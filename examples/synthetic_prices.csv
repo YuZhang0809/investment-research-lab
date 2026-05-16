@@ -1,0 +1,10 @@
+date,code,unadjusted_close,adjusted_close,trading_value,tradable_flag,price_limit_flag
+2026-05-13,SYN001,1000,1000,50000000,true,false
+2026-05-14,SYN001,1010,1010,51000000,true,false
+2026-05-15,SYN001,1020,1020,52000000,true,false
+2026-05-13,SYN002,2000,2000,80000000,true,false
+2026-05-14,SYN002,1980,1980,78000000,true,false
+2026-05-15,SYN002,2010,2010,82000000,true,false
+2026-05-13,SYN003,500,500,30000000,true,false
+2026-05-14,SYN003,505,505,31000000,true,false
+2026-05-15,SYN003,508,508,32000000,true,false

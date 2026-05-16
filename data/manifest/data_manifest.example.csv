@@ -1,0 +1,2 @@
+source,file_path,downloaded_at,vendor,schema_version,date_range,checksum,notes
+synthetic_example,examples/synthetic_prices.csv,2026-01-01T00:00:00,synthetic,prices_v0_1,2026-05-13..2026-05-15,example_checksum,example only

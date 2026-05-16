@@ -1,0 +1,117 @@
+experiment_id: qvm_v0_1
+description: Japan Small/Micro Quality Value Momentum v0.1
+status: public_example
+
+scope:
+  market: japan
+  instruments:
+    include:
+      - common_stock
+    exclude:
+      - etf
+      - reit
+      - infrastructure_fund
+      - preferred_stock
+  direction: long_only
+  currency: JPY
+  data_frequency: daily
+
+universe:
+  point_in_time: true
+  min_ipo_age_trading_days: 252
+  liquidity_lookback_days: 60
+  min_median_trading_value_jpy: null
+  require_tradable_on_rebalance_date: true
+  require_fundamentals: true
+  output_exclusions: true
+
+rebalance:
+  primary_frequency: quarterly
+  comparison_frequency: monthly
+  use_available_date: true
+  accounting_data_lag_days_if_no_disclosure_date: 90
+
+factors:
+  winsorize:
+    lower_pct: 1
+    upper_pct: 99
+  standardize: cross_sectional_zscore
+  missing_values:
+    impute_zero: false
+    emit_missing_flag: true
+  industry_neutralization:
+    enabled: false
+    report_exposure: true
+  quality:
+    weight: 0.4
+    variables:
+      - operating_profit_to_total_assets
+      - equity_to_assets
+  value:
+    weight: 0.4
+    variables:
+      - book_to_market
+      - earnings_yield
+  momentum:
+    weight: 0.2
+    role: confirmation_filter
+    variables:
+      - return_12_1
+      - return_6_1
+
+portfolio:
+  research_portfolio:
+    target_holdings_min: 20
+    target_holdings_max: 50
+    weighting: equal_weight
+  executable_portfolio:
+    lot_size: 100
+    allow_cash_drag: true
+    target_holdings_min: 8
+    target_holdings_max: 30
+  buy_rule:
+    rank_top_pct: 10
+    rank_top_n: 50
+  hold_rule:
+    rank_top_pct: 20
+    rank_top_n: 100
+  max_single_name_weight: 0.1
+  report_sector_exposure: true
+
+execution:
+  price_for_signal_returns: adjusted_close
+  price_for_order_size: unadjusted_price
+  adv_lookback_days: 60
+  max_order_to_median_trading_value: 0.005
+  mark_uncertain_fill_on_price_limit: true
+  skip_if_not_tradable: true
+
+cost_model:
+  scenarios:
+    optimistic:
+      spread_multiplier: 0.5
+      impact_multiplier: 0.0
+    base:
+      spread_multiplier: 1.0
+      impact_multiplier: 1.0
+    pessimistic:
+      spread_multiplier: 2.0
+      impact_multiplier: 2.0
+  commission_model: manual
+  tick_size_model: jpx_price_bucket
+
+tax:
+  output_modes:
+    - taxable_account
+    - nisa_like
+  nisa_like:
+    loss_not_deductible: true
+
+go_no_go:
+  require_reproducible_results: true
+  require_one_full_paper_rebalance_cycle: true
+  require_failure_case_review: true
+  require_after_cost_not_only_optimistic: true
+  benchmark:
+    - filtered_universe_equal_weight
+    - research_portfolio

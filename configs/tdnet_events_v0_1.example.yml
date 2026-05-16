@@ -1,0 +1,57 @@
+experiment_id: tdnet_events_v0_1
+description: TDnet event observation library v0.1
+status: public_example
+
+scope:
+  market: japan
+  direction: no_trading
+  currency: JPY
+  data_frequency:
+    - announcement_timestamp
+    - daily_price
+
+events:
+  labels:
+    - upward_revision
+    - dividend_increase
+    - share_buyback
+    - earnings_release
+    - other
+  required_fields:
+    - event_id
+    - announcement_datetime
+    - code
+    - company_name
+    - document_type
+    - event_label
+    - title
+    - url_or_doc_id
+    - parsed_flag
+    - parse_confidence
+    - notes
+    - next_1d_return
+    - next_5d_return
+    - next_20d_return
+    - next_60d_return
+
+parser_v0:
+  use_full_text_nlp: false
+  parse_complex_surprise: false
+  allow_intraday_trading_signal: false
+  labels_only: true
+
+return_windows:
+  use_adjusted_close: true
+  windows_trading_days:
+    - 1
+    - 5
+    - 20
+    - 60
+
+go_no_go_for_future_pead:
+  min_stable_observation_months: 3
+  preferred_stable_observation_months: 6
+  require_reproducible_event_fetch: true
+  require_timestamp_tradeability_check: true
+  require_acceptable_classification_quality: true
+  require_after_cost_research_case: true

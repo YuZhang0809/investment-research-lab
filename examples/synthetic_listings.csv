@@ -1,0 +1,4 @@
+code,name,market,sector,listed_date,delisted_date,security_type,is_common_stock,is_etf_reit_infra,tradable_flag,lot_size
+SYN001,Synthetic Alpha,Standard,Industrials,2020-01-01,,common_stock,true,false,true,100
+SYN002,Synthetic Beta,Prime,Services,2020-01-01,,common_stock,true,false,true,100
+SYN003,Synthetic Gamma,Growth,Technology,2020-01-01,,common_stock,true,false,true,100
