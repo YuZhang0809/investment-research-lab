@@ -71,6 +71,18 @@ def cumulative_return(returns: list[tuple[date, float]]) -> float | None:
     return value - 1.0
 
 
+def paired_return_series(
+    portfolio_returns: list[tuple[date, float]],
+    benchmark_returns: list[tuple[date, float]],
+) -> list[tuple[date, float, float]]:
+    benchmark_by_date = {row_date: value for row_date, value in benchmark_returns}
+    return [
+        (row_date, portfolio_return, benchmark_by_date[row_date])
+        for row_date, portfolio_return in portfolio_returns
+        if row_date in benchmark_by_date
+    ]
+
+
 def active_total_return(portfolio_total: float | None, benchmark_total: float | None) -> float | None:
     if portfolio_total is None or benchmark_total is None or benchmark_total <= -1:
         return None
@@ -163,20 +175,23 @@ def attribution_rows(
     frequency = summary_rows[-1].get("frequency") or summary_rows[0].get("frequency") or "monthly"
     annualization = periods_per_year(frequency)
     portfolio = summary_portfolio_returns(summary_rows)
-    portfolio_total = cumulative_return(portfolio)
     benchmarks = built_in_benchmarks(summary_rows)
     for item in custom_benchmarks:
         label, path = parse_benchmark_arg(item)
         benchmarks.append((label, "custom", benchmark_returns_from_file(path)))
     rows: list[dict[str, Any]] = []
     for label, benchmark_type, benchmark in benchmarks:
+        paired = paired_return_series(portfolio, benchmark)
+        paired_portfolio = [(row_date, portfolio_return) for row_date, portfolio_return, _benchmark_return in paired]
+        paired_benchmark = [(row_date, benchmark_return) for row_date, _portfolio_return, benchmark_return in paired]
         metrics = relative_metrics(portfolio, benchmark, annualization, min_periods=min_periods)
-        benchmark_total = cumulative_return(benchmark)
+        portfolio_total = cumulative_return(paired_portfolio)
+        benchmark_total = cumulative_return(paired_benchmark)
         rows.append(
             {
                 "benchmark_label": label,
                 "benchmark_type": benchmark_type,
-                "periods": len({row_date for row_date, _value in portfolio} & {row_date for row_date, _value in benchmark}),
+                "periods": len(paired),
                 "portfolio_total_return": portfolio_total,
                 "benchmark_total_return": benchmark_total,
                 "active_total_return": active_total_return(portfolio_total, benchmark_total),

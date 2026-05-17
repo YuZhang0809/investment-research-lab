@@ -151,6 +151,13 @@ def entry_trading_date(
     return trading_day_offset(calendar, announcement.date(), 0, mode="after")
 
 
+def tradable_timestamp(announcement: datetime | None, entry_date: date) -> str:
+    market_open = datetime.combine(entry_date, time(9, 0))
+    if announcement is not None and announcement.date() == entry_date and announcement > market_open:
+        return announcement.isoformat(sep=" ")
+    return market_open.isoformat(sep=" ")
+
+
 def overlap_metadata(rows: list[dict[str, str]], *, overlap_window_days: int) -> dict[int, dict[str, int]]:
     if overlap_window_days <= 0:
         raise ValueError("--overlap-window-days must be positive.")
@@ -220,7 +227,7 @@ def main() -> int:
         }).items()})
         if entry_date is not None:
             enriched["entry_date"] = entry_date.isoformat()
-            enriched["tradable_timestamp"] = f"{entry_date.isoformat()} 09:00:00"
+            enriched["tradable_timestamp"] = tradable_timestamp(announcement, entry_date)
             enriched["entry_status"] = "ok" if price_on_date(points, entry_date) else "missing_entry_price"
             for window in windows:
                 value, status = drift_return(points, calendar, entry_date, window)

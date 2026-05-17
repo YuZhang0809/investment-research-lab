@@ -117,6 +117,27 @@ class ResearchEngineLayersTest(unittest.TestCase):
             self.assertGreater(float(labels["SYNMKT"]["beta"] or 0), 0)
             self.assertGreater(float(labels["custom_size"]["periods"]), 0)
 
+    def test_benchmark_attribution_totals_use_paired_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            custom = temp / "custom_benchmark.csv"
+            write_csv(
+                custom,
+                [
+                    {"date": "2026-02-28", "return": "0.04"},
+                    {"date": "2026-03-31", "return": "0.06"},
+                ],
+                ["date", "return"],
+            )
+
+            rows = attribution_rows(synthetic_summary_rows(), [f"custom_size={custom}"], min_periods=2)
+            custom_row = {row["benchmark_label"]: row for row in rows}["custom_size"]
+
+            self.assertEqual(2, custom_row["periods"])
+            self.assertAlmostEqual(0.2096, custom_row["portfolio_total_return"])
+            self.assertAlmostEqual(0.1024, custom_row["benchmark_total_return"])
+            self.assertAlmostEqual((1.2096 / 1.1024) - 1.0, custom_row["active_total_return"])
+
     def test_strategy_diagnostics_pack_consumes_generic_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
@@ -160,9 +181,54 @@ class ResearchEngineLayersTest(unittest.TestCase):
 
             text = report.read_text(encoding="utf-8")
             self.assertIn("# Strategy Diagnostics Pack", text)
+            self.assertIn("## Data Gate", text)
+            self.assertIn("| lifecycle_data_status | pit_with_delistings |", text)
             self.assertIn("## Data Quality", text)
             self.assertIn("## Benchmark Attribution", text)
             self.assertIn("## Candidate Review", text)
+
+    def test_strategy_diagnostics_pack_handles_empty_optional_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            summary = temp / "summary.csv"
+            data_quality = temp / "data_quality_summary.csv"
+            benchmark = temp / "benchmark_attribution.csv"
+            trades = temp / "trades.csv"
+            candidates = temp / "scores.csv"
+            report = temp / "strategy_diagnostics.md"
+            write_csv(summary, synthetic_summary_rows(), list(synthetic_summary_rows()[0]))
+            write_csv(data_quality, [], ["issue_type", "severity", "count"])
+            write_csv(benchmark, [], ["benchmark_label", "benchmark_type", "beta", "alpha", "tracking_error", "information_ratio"])
+            write_csv(trades, [], ["side", "value", "constraint_reason"])
+            write_csv(candidates, [], ["rank", "code", "name", "filter_status"])
+
+            original_argv = sys.argv[:]
+            try:
+                sys.argv = [
+                    "generate_strategy_diagnostics_pack.py",
+                    "--summary",
+                    str(summary),
+                    "--data-quality-summary",
+                    str(data_quality),
+                    "--benchmark-attribution",
+                    str(benchmark),
+                    "--trades",
+                    str(trades),
+                    "--candidates",
+                    str(candidates),
+                    "--out",
+                    str(report),
+                    "--no-manifest",
+                ]
+                self.assertEqual(0, generate_strategy_diagnostics_pack.main())
+            finally:
+                sys.argv = original_argv
+
+            text = report.read_text(encoding="utf-8")
+            self.assertIn("| none |  | 0 |", text)
+            self.assertIn("| none |  |  |  |  |  |", text)
+            self.assertIn("| none | 0 |", text)
+            self.assertIn("|  | none |  |  |", text)
 
     def test_event_drift_adds_tradable_timestamp_and_overlap_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -236,6 +302,65 @@ class ResearchEngineLayersTest(unittest.TestCase):
             self.assertEqual("1", rows[0]["event_overlap_count"])
             self.assertEqual("1", rows[0]["duplicate_event_count"])
             self.assertEqual("0.1", rows[0]["next_1d_return"])
+
+    def test_event_drift_same_day_timestamp_does_not_precede_announcement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            events = temp / "events.csv"
+            prices = temp / "prices.csv"
+            out_dir = temp / "out"
+            fields = ["event_id", "announcement_datetime", "code", "company_name", "document_type", "event_label", "title", "url_or_doc_id", "parsed_flag", "parse_confidence", "notes"]
+            write_csv(
+                events,
+                [
+                    {
+                        "event_id": "evt1",
+                        "announcement_datetime": "2026-01-02 10:00",
+                        "code": "1001",
+                        "company_name": "Synthetic 1001",
+                        "document_type": "revision",
+                        "event_label": "upward_revision",
+                        "title": "Synthetic event",
+                        "url_or_doc_id": "doc1",
+                        "parsed_flag": "true",
+                        "parse_confidence": "1",
+                        "notes": "",
+                    }
+                ],
+                fields,
+            )
+            write_csv(
+                prices,
+                [
+                    {"date": "2026-01-02", "code": "1001", "adjusted_close": "100", "unadjusted_close": "100"},
+                    {"date": "2026-01-03", "code": "1001", "adjusted_close": "105", "unadjusted_close": "105"},
+                ],
+                ["date", "code", "adjusted_close", "unadjusted_close"],
+            )
+
+            original_argv = sys.argv[:]
+            try:
+                sys.argv = [
+                    "analyze_event_drift.py",
+                    "--events",
+                    str(events),
+                    "--prices",
+                    str(prices),
+                    "--entry-mode",
+                    "same_day_if_before_cutoff",
+                    "--window",
+                    "1",
+                    "--out-dir",
+                    str(out_dir),
+                    "--no-manifest",
+                ]
+                self.assertEqual(0, analyze_event_drift.main())
+            finally:
+                sys.argv = original_argv
+
+            rows = read_csv(out_dir / "tdnet_event_drift_202601_202601.csv")
+            self.assertEqual("2026-01-02", rows[0]["entry_date"])
+            self.assertEqual("2026-01-02 10:00:00", rows[0]["tradable_timestamp"])
 
 
 if __name__ == "__main__":

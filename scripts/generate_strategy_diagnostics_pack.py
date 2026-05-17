@@ -76,6 +76,10 @@ def failure_table(rows: list[dict[str, str]]) -> list[str]:
 
 
 def trade_summary(rows: list[dict[str, str]]) -> list[str]:
+    lines = ["| metric | value |", "|---|---:|"]
+    if not rows:
+        lines.append("| none | 0 |")
+        return lines
     require_columns(rows, {"side", "value"}, table_name="trades")
     counts = Counter(row.get("side", "") for row in rows if row.get("side"))
     value_by_side: Counter[str] = Counter()
@@ -84,13 +88,14 @@ def trade_summary(rows: list[dict[str, str]]) -> list[str]:
         value = parse_float(row.get("value"))
         if value is not None:
             value_by_side[row.get("side", "")] += value
-    lines = ["| metric | value |", "|---|---:|"]
     for side, count in counts.most_common():
         lines.append(f"| {side} trades | {count} |")
         lines.append(f"| {side} traded value | {value_by_side[side]:.10g} |")
     if constraints:
         for reason, count in constraints.most_common(5):
             lines.append(f"| constraint: {reason} | {count} |")
+    if len(lines) == 2:
+        lines.append("| none | 0 |")
     return lines
 
 
@@ -102,21 +107,26 @@ def latest_rows(rows: list[dict[str, str]], date_column: str = "date") -> list[d
 
 
 def contribution_table(rows: list[dict[str, str]], *, largest: bool) -> list[str]:
+    lines = ["| code | contribution |", "|---|---:|"]
+    if not rows:
+        lines.append("| none |  |")
+        return lines
     require_columns(rows, {"code", "contribution"}, table_name="contributions")
     selected = sorted(
         latest_rows(rows),
         key=lambda row: parse_float(row.get("contribution")) or 0.0,
         reverse=largest,
     )[:10]
-    lines = ["| code | contribution |", "|---|---:|"]
     for row in selected:
         lines.append(f"| {row.get('code', '')} | {pct(row.get('contribution'))} |")
+    if len(lines) == 2:
+        lines.append("| none |  |")
     return lines
 
 
 def exposure_table(rows: list[dict[str, str]]) -> list[str]:
     if not rows:
-        raise ValueError("exposures is empty.")
+        return ["| exposure | weight |", "|---|---:|", "| none |  |"]
     label = "group" if "group" in rows[0] else "sector" if "sector" in rows[0] else ""
     if not label:
         raise ValueError("exposures is missing required column: group or sector")
@@ -129,32 +139,45 @@ def exposure_table(rows: list[dict[str, str]]) -> list[str]:
 
 
 def candidate_table(rows: list[dict[str, str]]) -> list[str]:
+    lines = ["| rank | code | name | status |", "|---:|---|---|---|"]
+    if not rows:
+        lines.append("|  | none |  |  |")
+        return lines
     require_columns(rows, {"code", "rank"}, table_name="candidates")
     ranked = [row for row in rows if row.get("rank")]
     selected = sorted(ranked, key=lambda row: int(parse_float(row.get("rank")) or 0))[:20]
-    lines = ["| rank | code | name | status |", "|---:|---|---|---|"]
     for row in selected:
         lines.append(f"| {row.get('rank', '')} | {row.get('code', '')} | {row.get('name', '')} | {row.get('filter_status', '')} |")
+    if len(lines) == 2:
+        lines.append("|  | none |  |  |")
     return lines
 
 
 def summary_count_table(rows: list[dict[str, str]], label: str) -> list[str]:
-    require_columns(rows, {"issue_type", "severity", "count"}, table_name=label)
     lines = ["| issue type | severity | count |", "|---|---|---:|"]
+    if not rows:
+        lines.append("| none |  | 0 |")
+        return lines
+    require_columns(rows, {"issue_type", "severity", "count"}, table_name=label)
     for row in rows:
         lines.append(f"| {row.get('issue_type', '')} | {row.get('severity', '')} | {row.get('count', '')} |")
     return lines
 
 
 def benchmark_table(rows: list[dict[str, str]]) -> list[str]:
-    require_columns(rows, {"benchmark_label", "benchmark_type", "beta", "alpha", "tracking_error", "information_ratio"}, table_name="benchmark_attribution")
     lines = ["| benchmark | type | beta | alpha | TE | IR |", "|---|---|---:|---:|---:|---:|"]
+    if not rows:
+        lines.append("| none |  |  |  |  |  |")
+        return lines
+    require_columns(rows, {"benchmark_label", "benchmark_type", "beta", "alpha", "tracking_error", "information_ratio"}, table_name="benchmark_attribution")
     for row in rows:
         lines.append(
             f"| {row.get('benchmark_label', '')} | {row.get('benchmark_type', '')} | "
             f"{number(row.get('beta'))} | {pct(row.get('alpha'))} | {pct(row.get('tracking_error'))} | "
             f"{number(row.get('information_ratio'))} |"
         )
+    if len(lines) == 2:
+        lines.append("| none |  |  |  |  |  |")
     return lines
 
 
@@ -182,6 +205,10 @@ def write_report(
     metrics = metric_lookup(metrics_rows)
     lines = [
         f"# Strategy Diagnostics Pack {summary['period_start']}..{summary['period_end']}",
+        "",
+        "## Data Gate",
+        "",
+        *metric_table(metrics, ["lifecycle_data_status", "performance_conclusion_allowed", "risk_metric_status"]),
         "",
         "## Performance",
         "",
