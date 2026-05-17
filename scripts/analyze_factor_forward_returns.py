@@ -1,0 +1,349 @@
+from __future__ import annotations
+
+import argparse
+import math
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+from research_common import append_manifest, parse_date, parse_float, read_csv, write_csv
+
+
+DEFAULT_FACTORS = [
+    "operating_profit_to_total_assets",
+    "equity_to_assets",
+    "earnings_yield",
+    "book_to_market",
+    "return_12_1",
+    "return_6_1",
+]
+
+
+@dataclass
+class PricePoint:
+    date: date
+    adjusted_close: float
+
+
+@dataclass
+class ForwardReturnResult:
+    value: float | None
+    status: str
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Analyze simple factor forward returns from QVM factor files.")
+    parser.add_argument("--factors-dir", type=Path, default=Path("data/processed/factors"))
+    parser.add_argument("--prices", required=True, type=Path)
+    parser.add_argument("--start-date", required=True)
+    parser.add_argument("--end-date", required=True)
+    parser.add_argument("--holding-days", type=int, default=63)
+    parser.add_argument("--factor", action="append", dest="factors", help="Factor column to analyze. Can be repeated.")
+    parser.add_argument("--top-frac", type=float, default=0.2)
+    parser.add_argument("--out-dir", type=Path, default=Path("data/processed/factor_analysis"))
+    parser.add_argument("--report-dir", type=Path, default=Path("reports/factor_analysis"))
+    parser.add_argument("--manifest", type=Path, default=Path("data/manifest/data_manifest.csv"))
+    parser.add_argument("--no-manifest", action="store_true")
+    return parser
+
+
+def build_price_index(rows: list[dict[str, str]]) -> dict[str, list[PricePoint]]:
+    grouped: dict[str, list[PricePoint]] = defaultdict(list)
+    for row in rows:
+        code = (row.get("code") or "").strip()
+        row_date = parse_date(row.get("date"), field_name="prices.date")
+        price = parse_float(row.get("adjusted_close") or row.get("unadjusted_close"))
+        if code and row_date and price and price > 0:
+            grouped[code].append(PricePoint(date=row_date, adjusted_close=price))
+    for values in grouped.values():
+        values.sort(key=lambda item: item.date)
+    return grouped
+
+
+def first_on_or_after(points: list[PricePoint], target: date) -> int | None:
+    for index, point in enumerate(points):
+        if point.date >= target:
+            return index
+    return None
+
+
+def future_return(points: list[PricePoint], rebalance_date: date, holding_days: int) -> ForwardReturnResult:
+    if not points:
+        return ForwardReturnResult(None, "missing_price_history")
+    start_index = first_on_or_after(points, rebalance_date)
+    if start_index is None:
+        return ForwardReturnResult(None, "missing_start_price")
+    end_index = start_index + holding_days
+    if end_index >= len(points):
+        return ForwardReturnResult(None, "insufficient_forward_window")
+    start_price = points[start_index].adjusted_close
+    end_price = points[end_index].adjusted_close
+    if start_price <= 0:
+        return ForwardReturnResult(None, "invalid_start_price")
+    return ForwardReturnResult(end_price / start_price - 1.0, "ok")
+
+
+def factor_files(path: Path, start: date, end: date) -> list[Path]:
+    result: list[Path] = []
+    for file_path in sorted(path.glob("factors_*.csv")):
+        suffix = file_path.stem.replace("factors_", "")
+        if len(suffix) != 6 or not suffix.isdigit():
+            continue
+        month_date = parse_date(f"{suffix[:4]}-{suffix[4:]}-01", field_name="factor_file_month")
+        if month_date and start.replace(day=1) <= month_date <= end.replace(day=1):
+            result.append(file_path)
+    return result
+
+
+def pearson(xs: list[float], ys: list[float]) -> float | None:
+    if len(xs) < 2 or len(xs) != len(ys):
+        return None
+    mean_x = sum(xs) / len(xs)
+    mean_y = sum(ys) / len(ys)
+    cov = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    var_x = sum((x - mean_x) ** 2 for x in xs)
+    var_y = sum((y - mean_y) ** 2 for y in ys)
+    if var_x <= 0 or var_y <= 0:
+        return None
+    return cov / math.sqrt(var_x * var_y)
+
+
+def ranks(values: list[float]) -> list[float]:
+    indexed = sorted(enumerate(values), key=lambda item: item[1])
+    output = [0.0] * len(values)
+    index = 0
+    while index < len(indexed):
+        end = index + 1
+        while end < len(indexed) and indexed[end][1] == indexed[index][1]:
+            end += 1
+        average_rank = (index + 1 + end) / 2.0
+        for original_index, _value in indexed[index:end]:
+            output[original_index] = average_rank
+        index = end
+    return output
+
+
+def rank_ic(xs: list[float], ys: list[float]) -> float | None:
+    if len(xs) < 2 or len(xs) != len(ys):
+        return None
+    return pearson(ranks(xs), ranks(ys))
+
+
+def average(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def sample_std(values: list[float]) -> float | None:
+    if len(values) < 2:
+        return None
+    center = sum(values) / len(values)
+    return math.sqrt(sum((value - center) ** 2 for value in values) / (len(values) - 1))
+
+
+def fmt(value: Any) -> Any:
+    if isinstance(value, float):
+        return f"{value:.10g}"
+    return value
+
+
+def pct(value: float | None) -> str:
+    if value is None:
+        return ""
+    return f"{value * 100:.2f}%"
+
+
+def number(value: float | None, digits: int = 4) -> str:
+    if value is None:
+        return ""
+    return f"{value:.{digits}f}"
+
+
+def write_report(path: Path, rows: list[dict[str, Any]], holding_days: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Factor Forward Return Report",
+        "",
+        f"- holding days: {holding_days}",
+        f"- rows: {len(rows)}",
+        "",
+        "| factor | months | observations | avg rank IC | IC std | IC IR | positive IC months | avg top return | avg bottom return | avg top-bottom | avg coverage | missing factor | missing forward | bucket skipped |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    by_factor: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_factor[str(row["factor"])].append(row)
+    for factor, values in sorted(by_factor.items()):
+        observations = sum(int(row["observations"]) for row in values)
+        rank_ics = [float(row["rank_ic"]) for row in values if row.get("rank_ic") not in (None, "")]
+        avg_ic = average(rank_ics)
+        ic_std = sample_std(rank_ics)
+        ic_ir = avg_ic / ic_std if avg_ic is not None and ic_std and ic_std > 0 else None
+        positive_ic_months = sum(1 for value in rank_ics if value > 0)
+        avg_top = average([float(row["top_return"]) for row in values if row.get("top_return") not in (None, "")])
+        avg_bottom = average([float(row["bottom_return"]) for row in values if row.get("bottom_return") not in (None, "")])
+        avg_spread = average([float(row["top_bottom_spread"]) for row in values if row.get("top_bottom_spread") not in (None, "")])
+        avg_coverage = average([float(row["coverage"]) for row in values if row.get("coverage") not in (None, "")])
+        missing_factor = sum(int(row["missing_factor"]) for row in values)
+        missing_forward = sum(int(row["missing_forward_return"]) for row in values)
+        bucket_skipped = sum(1 for row in values if row.get("bucket_status") != "ok")
+        lines.append(
+            f"| {factor} | {len(values)} | {observations} | "
+            f"{number(avg_ic)} | {number(ic_std)} | {number(ic_ir)} | "
+            f"{positive_ic_months}/{len(rank_ics)} | {pct(avg_top)} | {pct(avg_bottom)} | "
+            f"{pct(avg_spread)} | {pct(avg_coverage)} | {missing_factor} | {missing_forward} | {bucket_skipped} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Caveat",
+            "",
+            "This is a lightweight factor diagnostic. It is not a full Alphalens-style study and does not control for sector, size, liquidity, or transaction costs.",
+        ]
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    start_date = parse_date(args.start_date, field_name="start_date")
+    end_date = parse_date(args.end_date, field_name="end_date")
+    if start_date is None or end_date is None:
+        raise ValueError("start-date and end-date are required")
+    factors = args.factors or DEFAULT_FACTORS
+    price_index = build_price_index(read_csv(args.prices))
+
+    output_rows: list[dict[str, Any]] = []
+    for file_path in factor_files(args.factors_dir, start_date, end_date):
+        factor_rows = read_csv(file_path)
+        if not factor_rows:
+            continue
+        rebalance_date = parse_date(factor_rows[0].get("rebalance_date"), field_name="factors.rebalance_date")
+        if rebalance_date is None:
+            continue
+        for factor in factors:
+            observations: list[tuple[float, float]] = []
+            total_rows = 0
+            missing_factor = 0
+            missing_price_history = 0
+            missing_start_price = 0
+            insufficient_forward_window = 0
+            invalid_start_price = 0
+            for row in factor_rows:
+                total_rows += 1
+                factor_value = parse_float(row.get(factor))
+                code = row.get("code", "")
+                if factor_value is None:
+                    missing_factor += 1
+                    continue
+                forward = future_return(price_index.get(code, []), rebalance_date, args.holding_days)
+                if forward.status == "ok" and forward.value is not None:
+                    observations.append((factor_value, forward.value))
+                elif forward.status == "missing_price_history":
+                    missing_price_history += 1
+                elif forward.status == "missing_start_price":
+                    missing_start_price += 1
+                elif forward.status == "insufficient_forward_window":
+                    insufficient_forward_window += 1
+                elif forward.status == "invalid_start_price":
+                    invalid_start_price += 1
+            observations.sort(key=lambda item: item[0], reverse=True)
+            bucket_size = max(1, int(math.ceil(len(observations) * args.top_frac))) if observations else 0
+            bucket_status = "ok"
+            if not bucket_size or len(observations) < bucket_size * 2:
+                bucket_status = "insufficient_non_overlapping_observations"
+                top: list[tuple[float, float]] = []
+                bottom: list[tuple[float, float]] = []
+            else:
+                top = observations[:bucket_size]
+                bottom = observations[-bucket_size:]
+            top_return = average([item[1] for item in top])
+            bottom_return = average([item[1] for item in bottom])
+            factor_values = [item[0] for item in observations]
+            forward_values = [item[1] for item in observations]
+            missing_forward = (
+                missing_price_history
+                + missing_start_price
+                + insufficient_forward_window
+                + invalid_start_price
+            )
+            output_rows.append(
+                {
+                    "rebalance_date": rebalance_date,
+                    "factor": factor,
+                    "rows": total_rows,
+                    "observations": len(observations),
+                    "coverage": len(observations) / total_rows if total_rows else 0,
+                    "pearson_ic": pearson(factor_values, forward_values),
+                    "rank_ic": rank_ic(factor_values, forward_values),
+                    "top_count": len(top),
+                    "bottom_count": len(bottom),
+                    "bucket_status": bucket_status,
+                    "top_return": top_return,
+                    "bottom_return": bottom_return,
+                    "top_bottom_spread": top_return - bottom_return if top_return is not None and bottom_return is not None else None,
+                    "missing_factor": missing_factor,
+                    "missing_forward_return": missing_forward,
+                    "missing_price_history": missing_price_history,
+                    "missing_start_price": missing_start_price,
+                    "insufficient_forward_window": insufficient_forward_window,
+                    "invalid_start_price": invalid_start_price,
+                }
+            )
+
+    token = f"{start_date.strftime('%Y%m')}_{end_date.strftime('%Y%m')}_{args.holding_days}d"
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    output_path = args.out_dir / f"factor_forward_returns_{token}.csv"
+    report_path = args.report_dir / f"factor_forward_returns_{token}.md"
+    fields = [
+        "rebalance_date",
+        "factor",
+        "rows",
+        "observations",
+        "coverage",
+        "pearson_ic",
+        "rank_ic",
+        "top_count",
+        "bottom_count",
+        "bucket_status",
+        "top_return",
+        "bottom_return",
+        "top_bottom_spread",
+        "missing_factor",
+        "missing_forward_return",
+        "missing_price_history",
+        "missing_start_price",
+        "insufficient_forward_window",
+        "invalid_start_price",
+    ]
+    write_csv(output_path, [{key: fmt(value) for key, value in row.items()} for row in output_rows], fields)
+    write_report(report_path, output_rows, args.holding_days)
+    if not args.no_manifest:
+        append_manifest(
+            args.manifest,
+            source="derived_factor_forward_returns",
+            file_path=output_path,
+            vendor="local",
+            schema_version="factor_forward_returns_v0_1",
+            date_range=f"{start_date.isoformat()}..{end_date.isoformat()}",
+            notes=f"{len(output_rows)} rows; holding_days={args.holding_days}",
+        )
+        append_manifest(
+            args.manifest,
+            source="derived_factor_forward_returns_report",
+            file_path=report_path,
+            vendor="local",
+            schema_version="factor_forward_returns_report_v0_1",
+            date_range=f"{start_date.isoformat()}..{end_date.isoformat()}",
+            notes=f"holding_days={args.holding_days}",
+        )
+    print(f"Wrote factor forward returns to {output_path}")
+    print(f"Wrote factor forward return report to {report_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

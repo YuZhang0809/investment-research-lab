@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+import unittest
+
+from pathlib import Path
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from validate_contracts import validate_contracts  # noqa: E402
+
+
+class ValidateContractsTest(unittest.TestCase):
+    def test_valid_minimal_contracts_have_no_errors(self) -> None:
+        config = {"universe": {"min_ipo_age_trading_days": 0, "liquidity_lookback_days": 0}}
+        listings = [
+            {
+                "code": "1001",
+                "name": "Sample",
+                "market": "Prime",
+                "sector": "Tech",
+                "listed_date": "2020-01-01",
+                "delisted_date": "",
+                "security_type": "common_stock",
+                "is_common_stock": "true",
+                "is_etf_reit_infra": "false",
+                "tradable_flag": "true",
+                "lot_size": "100",
+            }
+        ]
+        prices = []
+        for index in range(280):
+            prices.append(
+                {
+                    "date": f"2025-{index // 28 + 1:02d}-{index % 28 + 1:02d}",
+                    "code": "1001",
+                    "unadjusted_close": "1000",
+                    "adjusted_close": "1000",
+                    "trading_value": "1000000",
+                    "tradable_flag": "true",
+                    "price_limit_flag": "false",
+                }
+            )
+        fundamentals = [
+            {
+                "code": "1001",
+                "available_date": "2025-12-15",
+                "available_time": "15:00",
+                "document_type": "annual",
+                "operating_profit": "100",
+                "net_profit": "80",
+                "equity": "1000",
+                "total_assets": "2000",
+                "shares_outstanding": "100",
+            }
+        ]
+
+        issues, summary = validate_contracts(
+            config=config,
+            listing_rows=listings,
+            price_rows=prices,
+            fundamental_rows=fundamentals,
+        )
+
+        self.assertEqual([], [row for row in issues if row["severity"] == "error"])
+        self.assertEqual(1, summary["unique_codes"]["prices"])
+
+    def test_bad_date_number_and_duplicate_price_are_errors(self) -> None:
+        config = {"universe": {}}
+        listings = [
+            {
+                "code": "1001",
+                "name": "Sample",
+                "market": "Prime",
+                "sector": "Tech",
+                "listed_date": "bad-date",
+                "delisted_date": "",
+                "security_type": "common_stock",
+                "is_common_stock": "true",
+                "is_etf_reit_infra": "false",
+                "tradable_flag": "true",
+                "lot_size": "not-a-number",
+            }
+        ]
+        price_row = {
+            "date": "2025-01-01",
+            "code": "1001",
+            "unadjusted_close": "1000",
+            "adjusted_close": "1000",
+            "trading_value": "1000000",
+            "tradable_flag": "true",
+            "price_limit_flag": "false",
+        }
+        fundamentals = [
+            {
+                "code": "1001",
+                "available_date": "2025-01-02",
+                "available_time": "15:00",
+                "document_type": "annual",
+                "operating_profit": "100",
+                "net_profit": "80",
+                "equity": "1000",
+                "total_assets": "2000",
+                "shares_outstanding": "100",
+            }
+        ]
+
+        issues, _summary = validate_contracts(
+            config=config,
+            listing_rows=listings,
+            price_rows=[dict(price_row), dict(price_row)],
+            fundamental_rows=fundamentals,
+        )
+
+        error_checks = {row["check"] for row in issues if row["severity"] == "error"}
+        self.assertIn("date_parse", error_checks)
+        self.assertIn("number_parse", error_checks)
+        self.assertIn("duplicate_key", error_checks)
+
+
+if __name__ == "__main__":
+    unittest.main()

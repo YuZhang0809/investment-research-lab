@@ -24,7 +24,27 @@ $env:JQUANTS_API_KEY="..."
 python scripts\validate_jquants.py --preflight-only
 ```
 
+J-Quants downloads use the official `jquants-api-client` package and normalize
+responses into this repository's CSV contracts.
+
 Raw downloaded files are written under `data/raw/` and must remain untracked.
+
+## Phase 1 Real Data Path
+
+For the current real-data workflow, see:
+
+```text
+docs/phase_1_real_data_runbook.md
+```
+
+New lightweight helpers:
+
+```powershell
+python scripts\validate_contracts.py --help
+python scripts\generate_candidate_review.py --help
+python scripts\analyze_factor_forward_returns.py --help
+python scripts\compare_walkforward_runs.py --help
+```
 
 ## Smoke Test
 

@@ -8,13 +8,14 @@ from research_common import parse_float, read_csv
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generate Markdown QA report for QVM CSV pipeline.")
+    parser = argparse.ArgumentParser(description="Generate Markdown research report for QVM CSV pipeline.")
     parser.add_argument("--rebalance-date", required=True)
     parser.add_argument("--factors", required=True, type=Path)
     parser.add_argument("--scores", required=True, type=Path)
     parser.add_argument("--targets", required=True, type=Path)
     parser.add_argument("--orders", required=True, type=Path)
     parser.add_argument("--backtest-summary", required=True, type=Path)
+    parser.add_argument("--candidate-review", type=Path)
     parser.add_argument("--out", type=Path, default=None)
     return parser
 
@@ -38,6 +39,7 @@ def main() -> int:
     targets = read_csv(args.targets)
     orders = read_csv(args.orders)
     summary = read_csv(args.backtest_summary)
+    candidate_review = read_csv(args.candidate_review) if args.candidate_review and args.candidate_review.exists() else []
     output = args.out or Path(f"reports/monthly/qvm_pipeline_{args.rebalance_date[:7].replace('-', '')}.md")
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -52,13 +54,19 @@ def main() -> int:
     executable_targets = [row for row in targets if parse_float(row.get("target_shares"), default=0) > 0]
     zero_lot_targets = [row for row in targets if parse_float(row.get("target_shares"), default=0) == 0]
     side_counter = Counter(row.get("side", "") for row in orders)
+    review_status_counter = Counter(row.get("review_status", "") for row in candidate_review)
+    constraint_counter = Counter(
+        row.get("constraint_reason", "")
+        for row in candidate_review
+        if row.get("constraint_reason")
+    )
     summary_row = summary[0] if summary else {}
     capital = parse_float(summary_row.get("capital_jpy"))
     cash = parse_float(summary_row.get("cash"))
     cash_pct = cash / capital if cash is not None and capital else None
 
     lines = [
-        f"# QVM Pipeline Report {args.rebalance_date}",
+        f"# QVM Research Report {args.rebalance_date}",
         "",
         "## Scope",
         "",
@@ -67,11 +75,37 @@ def main() -> int:
         f"- target rows: {len(targets)}",
         f"- order rows: {len(orders)}",
         "",
-        "## Factor QA",
+        "## Candidate Review",
         "",
-        "| missing flag | count |",
+        f"- selected targets: {len(targets)}",
+        f"- executable targets after lot and order checks: {len(executable_targets)}",
+        f"- zero-lot targets: {len(zero_lot_targets)}",
+        f"- constrained / skipped orders: {len(order_reductions)}",
+        f"- cash after snapshot orders: {money(cash)} ({pct(cash_pct)})",
+        "",
+        "| review status | count |",
         "|---|---:|",
     ]
+    if review_status_counter:
+        for key, count in review_status_counter.most_common():
+            lines.append(f"| {key or 'unknown'} | {count} |")
+    else:
+        lines.append("| candidate_review_not_provided | 0 |")
+    lines.extend(["", "## Constraint Reasons", "", "| reason | count |", "|---|---:|"])
+    if constraint_counter:
+        for key, count in constraint_counter.most_common():
+            lines.append(f"| {key} | {count} |")
+    else:
+        lines.append("| none | 0 |")
+    lines.extend(
+        [
+            "",
+            "## Factor QA",
+            "",
+            "| missing flag | count |",
+            "|---|---:|",
+        ]
+    )
     if missing_counter:
         for key, count in missing_counter.most_common():
             lines.append(f"| {key} | {count} |")

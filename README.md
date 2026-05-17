@@ -2,10 +2,13 @@
 
 Public-safe research infrastructure for Japan equity experiments.
 
-This repository contains a local, file-based research engine for QVM-style
+This repository contains a local, file-based research workbench for QVM-style
 experiments, walk-forward simulations, reporting, and paper-trading logs. It is
-designed to be reproducible and auditable, but it intentionally excludes private
-portfolio data and vendor data snapshots.
+designed to make quant research runnable first and auditable second, while
+intentionally excluding private portfolio data and vendor data snapshots.
+
+The project is for learning and running personal Japan equity research. It is
+not a general quant platform, live trading system, or broker integration.
 
 ## Scope
 
@@ -16,6 +19,23 @@ portfolio data and vendor data snapshots.
 - QVM factor, score, target, order, and walk-forward pipelines
 - TDnet event-observation scaffolding
 - Synthetic examples and empty templates
+
+## Current Product Direction
+
+The first product milestone is a complete QVM research loop:
+
+```text
+clean contract data
+  -> point-in-time universe
+  -> QVM factors and ranks
+  -> research and executable targets
+  -> walk-forward summary
+  -> candidate and failure-case report
+```
+
+Quant research comes first. Validation, failure cases, and privacy checks are
+built into the workflow to keep results trustworthy, not to turn the project
+into a compliance or platform product.
 
 ## Out Of Scope
 
@@ -37,6 +57,16 @@ reports/examples/     Public-safe example report artifacts
 scripts/              Local research pipeline scripts
 tests/                Lightweight validation space
 ```
+
+Key planning docs:
+
+- `docs/prd.md`
+- `docs/phase_1_plan.md`
+- `docs/phase_1_real_data_runbook.md`
+- `docs/open_source_references.md`
+- `docs/architecture.md`
+- `docs/data_contracts.md`
+- `docs/experiment_workflow.md`
 
 ## Setup
 

@@ -32,6 +32,7 @@ Initial commit:
 - Synthetic sample CSVs
 - Empty templates for holdings, trades, events, and paper-trading logs
 - Public-safe docs: architecture, data contracts, workflow, data policy
+- Product direction docs: PRD, Phase 1 plan, open-source references
 
 ## What Was Intentionally Excluded
 
@@ -63,18 +64,25 @@ Use synthetic examples or local ignored data only.
 ```powershell
 python scripts\smoke_test_universe.py
 Get-ChildItem scripts -Filter *.py | ForEach-Object { python -m py_compile $_.FullName }
+python -m unittest discover -s tests
 ```
 
-Both passed before publishing.
+These checks passed locally.
+
+Phase 1 real-data path was also validated locally with a five-code J-Quants
+sample using `JQUANTS_API_KEY` from the local environment. Raw and processed
+outputs are ignored by git. See `docs/phase_1_real_data_runbook.md` for the
+credential-free command sequence.
 
 Privacy scan also checked for obvious references to private portfolio files,
 dashboard files, IPS/core-layer docs, private keys, and common token patterns.
 
 ## Next Useful Tasks
 
-1. Add GitHub Actions for smoke test and Python compile checks.
-2. Decide whether to add an open-source license.
-3. Add a fuller synthetic end-to-end QVM example with enough trading history.
-4. Improve CLI ergonomics so all scripts accept a consistent `--config` and `--data-root`.
-5. Add unit tests for data contracts, universe construction, factor generation, and order constraints.
-6. Keep the private workspace as the only place where real portfolio data and vendor data live.
+1. Expand from the five-code real sample to a broader but still local J-Quants research universe.
+2. Decide whether to wrap the official J-Quants client or keep the current lightweight adapter.
+3. Add lightweight privacy scanning.
+4. Add CI for compile checks, focused unit tests, and smoke test.
+5. Keep synthetic fixtures only for public no-key tests and schema examples.
+6. Decide whether to add an open-source license.
+7. Keep the private workspace as the only place where real portfolio data and vendor data live.
