@@ -100,6 +100,23 @@ Allowed decisions are `EXPLORATORY`, `REVIEW`, `REJECT`, and `PAPER_TEST`.
 These tools create research notes only. They do not implement approvals,
 permissions, immutable logs, compliance reports, dashboards, or schedulers.
 
+## Walk-Forward Tear Sheet
+
+Generate a static public-safe performance report from an existing walk-forward
+run:
+
+```powershell
+python scripts\generate_walkforward_tearsheet.py `
+  --summary <qvm_walkforward_summary.csv> `
+  --failures <qvm_walkforward_failure_cases.csv> `
+  --out reports\walkforward\walkforward_tearsheet.md `
+  --no-manifest
+```
+
+The tear sheet writes a metrics CSV and SVG charts next to the Markdown report.
+Metrics are sampled at the run's rebalance frequency, so monthly and quarterly
+risk statistics should not be compared as if they were daily metrics.
+
 ## J-Quants
 
 ```powershell

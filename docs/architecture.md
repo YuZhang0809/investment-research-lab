@@ -48,7 +48,11 @@ for manual inspection. Internal computation may use libraries such as `pandas`,
   real private parameter choices are not.
 - Portfolio builders convert ranks into research and executable targets.
 - Walk-forward runners simulate low-frequency rebalance loops.
-- Reports explain candidates, constraints, and failure cases.
+- Performance analytics compute reusable walk-forward metrics from summary
+  outputs, including return, risk, benchmark-relative, implementation, and
+  failure-case measures.
+- Reports explain candidates, constraints, failure cases, and static
+  public-safe tear sheets.
 
 The common path should remain easy for an agent to run script-by-script. The
 walk-forward runner can cache processed prices, fundamentals, universe
