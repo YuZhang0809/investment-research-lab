@@ -13,7 +13,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from build_factors import build_factors
+from build_factors import build_factors, factor_output_fields
+from factor_expressions import factor_definition_names
 from build_scores import STRATEGY_VERSION_CHOICES, build_scores
 from build_universe import build_universe_from_rows
 from research_common import (
@@ -567,30 +568,6 @@ UNIVERSE_CACHE_FIELDS = [
     "price_limit_flag",
 ]
 EXCLUSION_CACHE_FIELDS = ["rebalance_date", "code", "name", "reason", "detail"]
-FACTOR_CACHE_FIELDS = [
-    "rebalance_date",
-    "code",
-    "name",
-    "market",
-    "sector",
-    "price_date",
-    "latest_unadjusted_close",
-    "fundamentals_available_date",
-    "document_type",
-    "market_cap",
-    "operating_profit",
-    "net_profit",
-    "equity",
-    "total_assets",
-    "shares",
-    "operating_profit_to_total_assets",
-    "equity_to_assets",
-    "earnings_yield",
-    "book_to_market",
-    "return_12_1",
-    "return_6_1",
-    "missing_flags",
-]
 CANDIDATE_CACHE_FIELDS = [
     "rebalance_date",
     "code",
@@ -689,13 +666,16 @@ def compute_cache_fingerprints(args: argparse.Namespace, config: dict[str, Any])
             "schema_version": "walkforward_factors_cache_v0_1",
             "inputs": inputs_fingerprint,
             "universe": universe_fingerprint,
-            "source": {
-                "build_factors.py": source_checksum("build_factors.py"),
-                "research_common.py": source_checksum("research_common.py"),
-            },
             "factor_engine": {
                 "return_12_1": {"lookback_days": 252, "skip_days": 21},
                 "return_6_1": {"lookback_days": 126, "skip_days": 21},
+            },
+            "factor_definitions": factor_definition_names(config),
+            "factor_definition_config": ((config.get("factors", {}) or {}).get("definitions", []) or []),
+            "source": {
+                "build_factors.py": source_checksum("build_factors.py"),
+                "factor_expressions.py": source_checksum("factor_expressions.py"),
+                "research_common.py": source_checksum("research_common.py"),
             },
         }
     )
@@ -707,6 +687,7 @@ def compute_cache_fingerprints(args: argparse.Namespace, config: dict[str, Any])
             "config": cache_config(config, "strategy", "factors"),
             "source": {
                 "build_scores.py": source_checksum("build_scores.py"),
+                "factor_expressions.py": source_checksum("factor_expressions.py"),
                 "research_common.py": source_checksum("research_common.py"),
             },
         }
@@ -850,8 +831,9 @@ def run_cached_stages(args: argparse.Namespace, rebalance_date: date) -> tuple[P
             universe_rows=universe_rows,
             price_rows=price_rows,
             fundamental_rows=fundamental_rows,
+            config=config,
         )
-        write_table(factor_rows, factors_path, format=args.cache_format or "parquet", fieldnames=FACTOR_CACHE_FIELDS)
+        write_table(factor_rows, factors_path, format=args.cache_format or "parquet", fieldnames=factor_output_fields(config))
 
     if scores_path.exists() and not args.force_rebuild:
         score_rows = read_csv(scores_path)
@@ -946,6 +928,8 @@ def run_stages(args: argparse.Namespace, rebalance_date: date) -> tuple[Path, Pa
         [
             py,
             "scripts/build_factors.py",
+            "--config",
+            str(args.config),
             "--rebalance-date",
             rebalance_date.isoformat(),
             "--universe",

@@ -6,6 +6,7 @@ from pathlib import Path
 from statistics import mean, pstdev
 from typing import Any
 
+from factor_expressions import factor_definition_names_for_group
 from research_common import append_manifest, load_yaml, month_key, parse_date, parse_float, read_csv, write_csv
 
 
@@ -24,6 +25,7 @@ STRATEGY_VERSION_CHOICES = [
     "qvm",
     "value_dominant_quality_filter_momentum_exclusion",
     "weighted_groups",
+    "configurable",
 ]
 
 
@@ -67,10 +69,13 @@ def average_available(values: list[float | None]) -> float | None:
 
 
 def configured_factors(config: dict[str, Any], group: str, defaults: list[str]) -> list[str]:
-    values = config["factors"].get(group, {}).get("variables")
-    if not values:
-        return defaults
-    return [str(value) for value in values]
+    factor_config = config.get("factors", {}) or {}
+    values = factor_config.get(group, {}).get("variables")
+    configured = [str(value) for value in values] if values is not None else list(defaults)
+    for name in factor_definition_names_for_group(config, group):
+        if name not in configured:
+            configured.append(name)
+    return configured
 
 
 def fmt(value: Any) -> Any:
@@ -91,16 +96,29 @@ def strategy_factor_groups(
         return [], value_factors, []
     if strategy_version == "qv":
         return quality_factors, value_factors, []
-    if strategy_version == "weighted_groups":
+    if strategy_version in {"weighted_groups", "configurable"}:
         return quality_factors, value_factors, momentum_factors
     return quality_factors, value_factors, momentum_factors
+
+
+def configured_scoring_mode(config: dict[str, Any], strategy_version: str) -> str:
+    if strategy_version == "configurable":
+        mode = str((config.get("strategy", {}).get("scoring", {}) or {}).get("mode", "")).strip()
+        if not mode:
+            raise ValueError("strategy.scoring.mode is required for strategy-version configurable.")
+        if mode not in {"weighted_groups", "weighted_factors"}:
+            raise ValueError(f"Unsupported strategy.scoring.mode for configurable: {mode}")
+        return mode
+    if strategy_version == "weighted_groups":
+        return "weighted_groups"
+    return "legacy"
 
 
 def configured_group_weights(config: dict[str, Any]) -> dict[str, float]:
     scoring = config.get("strategy", {}).get("scoring", {}) or {}
     mode = str(scoring.get("mode", "")).strip()
     if mode != "weighted_groups":
-        raise ValueError("strategy.scoring.mode must be weighted_groups for strategy-version weighted_groups.")
+        raise ValueError("strategy.scoring.mode must be weighted_groups for group-weight scoring.")
     raw_weights = scoring.get("weights", {}) or {}
     unknown = sorted(set(raw_weights) - set(FACTOR_GROUPS))
     if unknown:
@@ -116,20 +134,62 @@ def configured_group_weights(config: dict[str, Any]) -> dict[str, float]:
     return weights
 
 
+def configured_factor_weights(config: dict[str, Any]) -> dict[str, float]:
+    scoring = config.get("strategy", {}).get("scoring", {}) or {}
+    mode = str(scoring.get("mode", "")).strip()
+    if mode != "weighted_factors":
+        raise ValueError("strategy.scoring.mode must be weighted_factors for factor-weight scoring.")
+    raw_weights = scoring.get("weights", {}) or {}
+    weights: dict[str, float] = {}
+    for name, raw_value in raw_weights.items():
+        factor = str(name).strip()
+        if not factor:
+            raise ValueError("Factor weight names must be non-empty.")
+        value = float(raw_value or 0.0)
+        if value < 0:
+            raise ValueError(f"Score weight for {factor} must be non-negative.")
+        weights[factor] = value
+    if not any(value > 0 for value in weights.values()):
+        raise ValueError("At least one strategy.scoring factor weight must be greater than zero.")
+    return weights
+
+
 def configured_filters(config: dict[str, Any]) -> list[dict[str, Any]]:
     values = config.get("strategy", {}).get("filters", []) or []
     filters: list[dict[str, Any]] = []
     for index, item in enumerate(values, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"strategy.filters[{index}] must be a mapping.")
         group = str((item or {}).get("group", "")).strip()
+        field = str((item or {}).get("field", "")).strip()
         rule = str((item or {}).get("rule", "")).strip()
-        if group not in FACTOR_GROUPS:
+        if group and field:
+            raise ValueError(f"Use either group or field in strategy.filters[{index}], not both.")
+        if not group and not field:
+            raise ValueError(f"strategy.filters[{index}] requires group or field.")
+        if group and group not in FACTOR_GROUPS:
             raise ValueError(f"Unknown filter group in strategy.filters[{index}]: {group}")
-        if rule != "exclude_bottom_pct":
+        allowed_rules = {
+            "exclude_bottom_pct",
+            "exclude_top_pct",
+            "exclude_below",
+            "exclude_above",
+            "require_not_missing",
+        }
+        if rule not in allowed_rules:
             raise ValueError(f"Unsupported filter rule in strategy.filters[{index}]: {rule}")
-        pct = float((item or {}).get("pct", 0.0) or 0.0)
-        if pct < 0 or pct > 100:
-            raise ValueError(f"Filter pct must be between 0 and 100 in strategy.filters[{index}].")
-        filters.append({"group": group, "rule": rule, "pct": pct})
+        normalized = {"group": group, "field": field, "rule": rule}
+        if rule in {"exclude_bottom_pct", "exclude_top_pct"}:
+            pct = float((item or {}).get("pct", 0.0) or 0.0)
+            if pct < 0 or pct > 100:
+                raise ValueError(f"Filter pct must be between 0 and 100 in strategy.filters[{index}].")
+            normalized["pct"] = pct
+        if rule in {"exclude_below", "exclude_above"}:
+            threshold = parse_float((item or {}).get("value"))
+            if threshold is None:
+                raise ValueError(f"strategy.filters[{index}].value must be numeric for {rule}.")
+            normalized["value"] = threshold
+        filters.append(normalized)
     return filters
 
 
@@ -157,31 +217,98 @@ def weighted_group_score(
     return score, []
 
 
-def apply_tail_filters(score_rows: list[dict[str, Any]], filters: list[dict[str, Any]]) -> None:
+def weighted_factor_score(
+    zscores: dict[str, float | None],
+    weights: dict[str, float],
+) -> tuple[float | None, list[str]]:
+    missing = [
+        f"{factor}_z"
+        for factor, weight in weights.items()
+        if weight > 0 and zscores.get(factor) is None
+    ]
+    if missing:
+        return None, missing
+    score = sum(weight * (zscores.get(factor) or 0.0) for factor, weight in weights.items())
+    return score, []
+
+
+def filter_field(filter_config: dict[str, Any], row: dict[str, Any] | None = None) -> tuple[str, str]:
+    group = str(filter_config.get("group", "") or "")
+    if group:
+        return GROUP_SCORE_FIELDS[group], group
+    configured_field = str(filter_config.get("field", "") or "")
+    if row is not None and configured_field not in row and f"{configured_field}_z" in row:
+        return f"{configured_field}_z", configured_field
+    return configured_field, configured_field
+
+
+def numeric_filter_value(row: dict[str, Any], field: str) -> float | None:
+    return parse_float(row.get(field))
+
+
+def mark_missing_filter_value(row: dict[str, Any], field: str) -> None:
+    row["filter_status"] = "missing_required_score"
+    row["filter_reasons"] = append_reason(str(row.get("filter_reasons", "")), field)
+    row["missing_score_components"] = append_reason(
+        str(row.get("missing_score_components", "")),
+        field,
+    )
+
+
+def apply_filters(score_rows: list[dict[str, Any]], filters: list[dict[str, Any]]) -> None:
     for filter_config in filters:
-        group = filter_config["group"]
-        pct = float(filter_config["pct"])
-        field = GROUP_SCORE_FIELDS[group]
-        missing_reason = field
+        field, label = filter_field(filter_config, score_rows[0] if score_rows else None)
+        rule = str(filter_config["rule"])
         for row in score_rows:
-            if row.get("filter_status") == "pass" and row.get(field) is None:
-                row["filter_status"] = "missing_required_score"
-                row["filter_reasons"] = append_reason(str(row.get("filter_reasons", "")), missing_reason)
-                row["missing_score_components"] = append_reason(
-                    str(row.get("missing_score_components", "")),
-                    missing_reason,
-                )
+            if row.get("filter_status") == "pass" and numeric_filter_value(row, field) is None:
+                mark_missing_filter_value(row, field)
+
+        if rule == "require_not_missing":
+            continue
+
+        if rule in {"exclude_below", "exclude_above"}:
+            threshold = float(filter_config["value"])
+            for row in score_rows:
+                if row.get("filter_status") != "pass":
+                    continue
+                value = numeric_filter_value(row, field)
+                if value is None:
+                    continue
+                if rule == "exclude_below" and value < threshold:
+                    row["filter_status"] = "filtered"
+                    row["filter_reasons"] = append_reason(
+                        str(row.get("filter_reasons", "")),
+                        f"{label}_below_{threshold:g}",
+                    )
+                if rule == "exclude_above" and value > threshold:
+                    row["filter_status"] = "filtered"
+                    row["filter_reasons"] = append_reason(
+                        str(row.get("filter_reasons", "")),
+                        f"{label}_above_{threshold:g}",
+                    )
+            continue
 
         eligible = [
             row
             for row in score_rows
-            if row.get("filter_status") == "pass" and row.get(field) is not None
+            if row.get("filter_status") == "pass" and numeric_filter_value(row, field) is not None
         ]
+        pct = float(filter_config.get("pct", 0.0))
         exclude_count = math.ceil(len(eligible) * pct / 100.0)
         if exclude_count <= 0:
             continue
-        reason = f"{group}_bottom_{pct:g}pct"
-        for row in sorted(eligible, key=lambda item: (float(item[field]), str(item.get("code", ""))))[:exclude_count]:
+        if rule == "exclude_bottom_pct":
+            selected = sorted(eligible, key=lambda item: (float(item[field]), str(item.get("code", ""))))[:exclude_count]
+            reason = f"{label}_bottom_{pct:g}pct"
+        elif rule == "exclude_top_pct":
+            selected = sorted(
+                eligible,
+                key=lambda item: (-float(item[field]), str(item.get("code", ""))),
+            )[:exclude_count]
+            reason = f"{label}_top_{pct:g}pct"
+        else:
+            raise ValueError(f"Unsupported filter rule: {rule}")
+        for row in selected:
             row["filter_status"] = "filtered"
             row["filter_reasons"] = append_reason(str(row.get("filter_reasons", "")), reason)
 
@@ -247,13 +374,17 @@ def build_scores(
 ) -> tuple[list[dict[str, Any]], list[str]]:
     quality_factors, value_factors, momentum_factors = strategy_factor_groups(config, strategy_version)
     rows = factor_rows
-    raw_factors = list(dict.fromkeys([*quality_factors, *value_factors, *momentum_factors]))
-    weighted_mode = strategy_version == "weighted_groups"
-    group_weights = configured_group_weights(config) if weighted_mode else {}
-    filters = configured_filters(config) if weighted_mode else []
+    scoring_mode = configured_scoring_mode(config, strategy_version)
+    factor_weights = configured_factor_weights(config) if scoring_mode == "weighted_factors" else {}
+    raw_factors = list(dict.fromkeys([*quality_factors, *value_factors, *momentum_factors, *factor_weights.keys()]))
+    group_weighted_mode = scoring_mode == "weighted_groups"
+    factor_weighted_mode = scoring_mode == "weighted_factors"
+    group_weights = configured_group_weights(config) if group_weighted_mode else {}
+    filters = configured_filters(config) if scoring_mode in {"weighted_groups", "weighted_factors"} else []
 
-    lower_pct = float(config["factors"]["winsorize"].get("lower_pct", 1))
-    upper_pct = float(config["factors"]["winsorize"].get("upper_pct", 99))
+    factor_config = config.get("factors", {}) or {}
+    lower_pct = float((factor_config.get("winsorize", {}) or {}).get("lower_pct", 1))
+    upper_pct = float((factor_config.get("winsorize", {}) or {}).get("upper_pct", 99))
     factor_stats: dict[str, dict[str, float]] = {}
     zscores_by_code: dict[str, dict[str, float | None]] = {row["code"]: {} for row in rows}
 
@@ -275,9 +406,9 @@ def build_scores(
             else:
                 zscores_by_code[row["code"]][factor] = (value - center) / scale
 
-    quality_weight = float(config["factors"]["quality"].get("weight", 0.4))
-    value_weight = float(config["factors"]["value"].get("weight", 0.4))
-    momentum_weight = float(config["factors"]["momentum"].get("weight", 0.2))
+    quality_weight = float((factor_config.get("quality", {}) or {}).get("weight", 0.4))
+    value_weight = float((factor_config.get("value", {}) or {}).get("weight", 0.4))
+    momentum_weight = float((factor_config.get("momentum", {}) or {}).get("weight", 0.2))
     score_rows: list[dict[str, Any]] = []
 
     for row in rows:
@@ -286,11 +417,14 @@ def build_scores(
         quality = average_available([z.get(factor) for factor in quality_factors])
         value = average_available([z.get(factor) for factor in value_factors])
         momentum = average_available([z.get(factor) for factor in momentum_factors])
-        if weighted_mode:
+        if group_weighted_mode:
             composite_score, missing_score_components = weighted_group_score(
                 {"quality": quality, "value": value, "momentum": momentum},
                 group_weights,
             )
+            qvm_score = composite_score
+        elif factor_weighted_mode:
+            composite_score, missing_score_components = weighted_factor_score(z, factor_weights)
             qvm_score = composite_score
         else:
             qvm_score, missing_score_components = strategy_score(
@@ -322,8 +456,8 @@ def build_scores(
             }
         )
 
-    if weighted_mode and filters:
-        apply_tail_filters(score_rows, filters)
+    if filters:
+        apply_filters(score_rows, filters)
 
     ranked = sorted(
         [

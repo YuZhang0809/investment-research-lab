@@ -39,10 +39,13 @@ for manual inspection. Internal computation may use libraries such as `pandas`,
   datasets through one interface.
 - Universe builders apply point-in-time eligibility rules.
 - Factor builders compute raw QVM variables.
-- Score builders normalize and rank candidates.
+- Factor builders compute built-in QVM variables and optional public-safe
+  configured factor definitions through a whitelist expression evaluator.
+- Score builders normalize and rank candidates using either legacy QVM modes,
+  weighted factor groups, or generic weighted factor z-scores.
 - Strategy expression code should stay generic: configurable factor weights,
-  score combiners, and filters are engine features; real private parameter
-  choices are not.
+  score combiners, field filters, and factor-tail filters are engine features;
+  real private parameter choices are not.
 - Portfolio builders convert ranks into research and executable targets.
 - Walk-forward runners simulate low-frequency rebalance loops.
 - Reports explain candidates, constraints, and failure cases.

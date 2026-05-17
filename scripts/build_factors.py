@@ -6,8 +6,14 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from factor_expressions import (
+    configured_factor_definitions,
+    evaluate_factor_expression,
+    factor_definition_names,
+)
 from research_common import (
     append_manifest,
+    load_yaml,
     month_key,
     parse_date,
     parse_float,
@@ -21,10 +27,36 @@ from research_common import (
 TRADING_DAYS_1M = 21
 TRADING_DAYS_6M = 126
 TRADING_DAYS_12M = 252
+BASE_FACTOR_FIELDS = [
+    "operating_profit_to_total_assets",
+    "equity_to_assets",
+    "earnings_yield",
+    "book_to_market",
+    "return_12_1",
+    "return_6_1",
+]
+FACTOR_METADATA_FIELDS = [
+    "rebalance_date",
+    "code",
+    "name",
+    "market",
+    "sector",
+    "price_date",
+    "latest_unadjusted_close",
+    "fundamentals_available_date",
+    "document_type",
+    "market_cap",
+    "operating_profit",
+    "net_profit",
+    "equity",
+    "total_assets",
+    "shares",
+]
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build QVM raw factor CSV for a rebalance date.")
+    parser.add_argument("--config", type=Path, default=Path("configs/qvm_v0_1.example.yml"))
     parser.add_argument("--rebalance-date", required=True)
     parser.add_argument("--universe", required=True, type=Path)
     parser.add_argument("--prices", required=True, type=Path)
@@ -140,13 +172,33 @@ def fmt(value: Any) -> Any:
     return value
 
 
+def factor_output_fields(config: dict[str, Any] | None = None) -> list[str]:
+    custom_fields = factor_definition_names(config)
+    return [
+        *FACTOR_METADATA_FIELDS,
+        *BASE_FACTOR_FIELDS,
+        *[field for field in custom_fields if field not in BASE_FACTOR_FIELDS],
+        "missing_flags",
+    ]
+
+
+def validate_custom_factor_names(config: dict[str, Any] | None) -> None:
+    reserved = set(FACTOR_METADATA_FIELDS) | set(BASE_FACTOR_FIELDS) | {"missing_flags"}
+    duplicates = sorted(set(factor_definition_names(config)) & reserved)
+    if duplicates:
+        raise ValueError(f"Configured factor definitions duplicate reserved factor fields: {', '.join(duplicates)}")
+
+
 def build_factors(
     *,
     rebalance_date: date,
     universe_rows: list[dict[str, str]],
     price_rows: list[dict[str, str]],
     fundamental_rows: list[dict[str, str]],
+    config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    validate_custom_factor_names(config)
+    custom_definitions = configured_factor_definitions(config)
     prices_by_code = group_by_code(price_rows)
     calendar = trading_calendar_from_rows(price_rows)
     fundamentals_by_code = group_by_code(fundamental_rows)
@@ -189,7 +241,36 @@ def build_factors(
                 TRADING_DAYS_1M,
             ),
         }
-        missing_flags = [name for name, value in raw_values.items() if value is None]
+        variables = {
+            "latest_unadjusted_close": latest_close,
+            "market_cap": market_cap,
+            "operating_profit": operating_profit,
+            "net_profit": net_profit,
+            "equity": equity,
+            "total_assets": total_assets,
+            "shares": shares,
+            **raw_values,
+        }
+
+        def configured_ts_return(lookback: Any, skip: Any = 0) -> float | None:
+            lookback_days = int(parse_float(lookback) or 0)
+            skip_days = int(parse_float(skip) or 0)
+            if lookback_days <= 0 or skip_days < 0:
+                return None
+            return return_with_skip(prices, calendar, rebalance_date, lookback_days, skip_days)
+
+        custom_values: dict[str, Any] = {}
+        for definition in custom_definitions:
+            value = evaluate_factor_expression(
+                definition.expr,
+                variables,
+                functions={"ts_return": configured_ts_return},
+            )
+            custom_values[definition.name] = value
+            variables[definition.name] = value
+
+        all_factor_values = {**raw_values, **custom_values}
+        missing_flags = [name for name, value in all_factor_values.items() if value is None]
 
         factor_rows.append(
             {
@@ -209,6 +290,7 @@ def build_factors(
                 "total_assets": total_assets,
                 "shares": shares,
                 **raw_values,
+                **custom_values,
                 "missing_flags": ";".join(missing_flags),
             }
         )
@@ -217,6 +299,7 @@ def build_factors(
 
 def main() -> int:
     args = build_parser().parse_args()
+    config = load_yaml(args.config)
     rebalance_date = parse_date(args.rebalance_date, field_name="rebalance_date")
     if rebalance_date is None:
         raise ValueError("rebalance_date is required")
@@ -226,33 +309,11 @@ def main() -> int:
         universe_rows=read_csv(args.universe),
         price_rows=read_csv(args.prices),
         fundamental_rows=read_csv(args.fundamentals),
+        config=config,
     )
     suffix = month_key(rebalance_date)
     output_path = args.out_dir / f"factors_{suffix}.csv"
-    fieldnames = [
-        "rebalance_date",
-        "code",
-        "name",
-        "market",
-        "sector",
-        "price_date",
-        "latest_unadjusted_close",
-        "fundamentals_available_date",
-        "document_type",
-        "market_cap",
-        "operating_profit",
-        "net_profit",
-        "equity",
-        "total_assets",
-        "shares",
-        "operating_profit_to_total_assets",
-        "equity_to_assets",
-        "earnings_yield",
-        "book_to_market",
-        "return_12_1",
-        "return_6_1",
-        "missing_flags",
-    ]
+    fieldnames = factor_output_fields(config)
     write_csv(output_path, [{key: fmt(value) for key, value in row.items()} for row in rows], fieldnames)
     if not args.no_manifest:
         append_manifest(

@@ -8,9 +8,11 @@ expression primitives, but it must not contain private strategy decisions.
 The public engine may own reusable mechanics:
 
 - configurable factor groups
+- configured factor definitions using the public whitelist expression engine
 - configurable score weighting
 - generic rank, z-score, winsorization, and missing-value handling
-- generic filters such as liquidity filters or factor tail exclusions
+- generic filters such as liquidity filters, score thresholds, or factor tail
+  exclusions
 - portfolio construction constraints such as holdings count, lot size, and ADV
   caps
 - walk-forward simulation, reporting, and validation code

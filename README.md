@@ -75,6 +75,7 @@ Key planning docs:
 - `docs/open_source_references.md`
 - `docs/architecture.md`
 - `docs/data_contracts.md`
+- `docs/factor_and_strategy_expressions.md`
 - `docs/experiment_workflow.md`
 - `docs/strategy_boundary.md`
 

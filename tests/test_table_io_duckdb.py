@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from duckdb_query import parquet_scan, query  # noqa: E402
 from analyze_factor_forward_returns import factor_files  # noqa: E402
+from build_factors import build_factors  # noqa: E402
 from build_scores import STRATEGY_VERSION_CHOICES, build_scores  # noqa: E402
 from research_common import read_csv, read_table, write_table  # noqa: E402
 
@@ -227,6 +228,141 @@ class TableIODuckDBTest(unittest.TestCase):
         self.assertEqual("momentum_score", by_code["1001"]["missing_score_components"])
         self.assertEqual("", by_code["1001"]["rank"])
         self.assertNotIn("momentum_bottom", by_code["1001"]["filter_reasons"])
+
+    def test_configured_factor_definitions_evaluate_safe_expressions(self) -> None:
+        config = {
+            "factors": {
+                "definitions": [
+                    {
+                        "name": "profit_margin_proxy",
+                        "group": "quality",
+                        "expr": "ratio(net_profit, operating_profit)",
+                    },
+                    {
+                        "name": "recent_return",
+                        "group": "momentum",
+                        "expr": "ts_return(lookback=2, skip=0)",
+                    },
+                ]
+            }
+        }
+
+        rows = build_factors(
+            config=config,
+            rebalance_date=date(2026, 1, 3),
+            universe_rows=[
+                {
+                    "code": "1001",
+                    "name": "Synthetic 1001",
+                    "market": "Prime",
+                    "sector": "Industrials",
+                    "latest_unadjusted_close": "120",
+                }
+            ],
+            price_rows=[
+                {"date": "2026-01-01", "code": "1001", "adjusted_close": "100", "unadjusted_close": "100"},
+                {"date": "2026-01-02", "code": "1001", "adjusted_close": "110", "unadjusted_close": "110"},
+                {"date": "2026-01-03", "code": "1001", "adjusted_close": "120", "unadjusted_close": "120"},
+            ],
+            fundamental_rows=[
+                {
+                    "code": "1001",
+                    "available_date": "2025-12-31",
+                    "operating_profit": "100",
+                    "net_profit": "50",
+                    "equity": "400",
+                    "total_assets": "1000",
+                    "shares_outstanding": "10",
+                }
+            ],
+        )
+
+        self.assertAlmostEqual(0.5, float(rows[0]["profit_margin_proxy"]))
+        self.assertAlmostEqual(0.2, float(rows[0]["recent_return"]))
+        self.assertNotIn("profit_margin_proxy", rows[0]["missing_flags"])
+
+    def test_factor_expression_rejects_unsafe_calls(self) -> None:
+        config = {
+            "factors": {
+                "definitions": [
+                    {
+                        "name": "bad_factor",
+                        "group": "quality",
+                        "expr": "__import__('os').system('echo no')",
+                    }
+                ]
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, "Unsupported function call"):
+            build_factors(
+                config=config,
+                rebalance_date=date(2026, 1, 1),
+                universe_rows=[{"code": "1001", "latest_unadjusted_close": "100"}],
+                price_rows=[{"date": "2026-01-01", "code": "1001", "adjusted_close": "100", "unadjusted_close": "100"}],
+                fundamental_rows=[],
+            )
+
+    def test_configured_factor_definitions_extend_group_scoring(self) -> None:
+        config = weighted_config(
+            weights={"quality": 1.0, "value": 0.0, "momentum": 0.0},
+            filters=[],
+        )
+        config["factors"]["quality"]["variables"] = []
+        config["factors"]["definitions"] = [
+            {
+                "name": "profit_margin_proxy",
+                "group": "quality",
+                "expr": "ratio(net_profit, operating_profit)",
+            }
+        ]
+        factors = [
+            {"rebalance_date": "2026-03-31", "code": "1001", "profit_margin_proxy": "0.1"},
+            {"rebalance_date": "2026-03-31", "code": "1002", "profit_margin_proxy": "0.3"},
+            {"rebalance_date": "2026-03-31", "code": "1003", "profit_margin_proxy": "0.2"},
+        ]
+
+        scores, raw_factors = build_scores(
+            config=config,
+            factor_rows=factors,
+            strategy_version="weighted_groups",
+        )
+
+        self.assertIn("profit_margin_proxy", raw_factors)
+        ranked = sorted([row for row in scores if row["rank"]], key=lambda row: int(row["rank"]))
+        self.assertEqual(["1002", "1003", "1001"], [row["code"] for row in ranked])
+
+    def test_configurable_weighted_factors_and_field_filters(self) -> None:
+        config = {
+            "strategy": {
+                "scoring": {"mode": "weighted_factors", "weights": {"custom_value": 1.0}},
+                "filters": [{"field": "custom_value", "rule": "exclude_bottom_pct", "pct": 20}],
+            },
+            "factors": {
+                "winsorize": {"lower_pct": 0, "upper_pct": 100},
+                "quality": {"variables": []},
+                "value": {"variables": []},
+                "momentum": {"variables": []},
+            },
+        }
+        factors = [
+            {"rebalance_date": "2026-03-31", "code": "1001", "custom_value": "1"},
+            {"rebalance_date": "2026-03-31", "code": "1002", "custom_value": "2"},
+            {"rebalance_date": "2026-03-31", "code": "1003", "custom_value": "3"},
+        ]
+
+        scores, raw_factors = build_scores(
+            config=config,
+            factor_rows=factors,
+            strategy_version="configurable",
+        )
+
+        self.assertEqual(["custom_value"], raw_factors)
+        by_code = {row["code"]: row for row in scores}
+        self.assertEqual("filtered", by_code["1001"]["filter_status"])
+        self.assertEqual("custom_value_bottom_20pct", by_code["1001"]["filter_reasons"])
+        ranked = sorted([row for row in scores if row["rank"]], key=lambda row: int(row["rank"]))
+        self.assertEqual(["1003", "1002"], [row["code"] for row in ranked])
 
 
 def factor_row(code: str, value: float) -> dict[str, str]:

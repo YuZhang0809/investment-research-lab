@@ -64,6 +64,10 @@ holdings, equity, and failure-case outputs remain CSV.
 `strategy.filters` from the config. It writes `composite_score`,
 `filter_status`, and `filter_reasons` while keeping `qvm_score` populated for
 the older target/order scripts during the migration.
+`--strategy-version configurable` supports the same group-weighted mode plus a
+generic `weighted_factors` mode that combines configured factor z-scores
+directly. Factor definitions under `factors.definitions` are evaluated by the
+whitelist expression engine documented in `docs/factor_and_strategy_expressions.md`.
 
 The research universe can retain names whose latest price is stale at the
 rebalance date. Those rows carry `rebalance_price_available=false` and
