@@ -14,7 +14,7 @@ from download_jquants_market_benchmark import compact_date, convert_topix  # noq
 class JQuantsMarketBenchmarkTest(unittest.TestCase):
     def test_convert_topix_writes_market_benchmark_contract(self) -> None:
         rows = [
-            {"Date": "2026-01-05", "Open": 1000.0, "High": 1010.0, "Low": 990.0, "Close": 1005.0},
+            {"Date": "2026-01-05", "O": 1000.0, "H": 1010.0, "L": 990.0, "C": 1005.0},
             {"Date": "2026-01-06 00:00:00", "Open": 1005.0, "High": 1020.0, "Low": 1000.0, "Close": 1015.0},
         ]
 

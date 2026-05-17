@@ -45,17 +45,25 @@ def compact_date(value: str) -> str:
     return "".join(ch for ch in value if ch.isdigit())[:8]
 
 
+def first_value(row: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, ""):
+            return value
+    return ""
+
+
 def convert_topix(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     converted: list[dict[str, Any]] = []
     for row in rows:
-        close = row.get("Close", "")
+        close = first_value(row, "Close", "C")
         converted.append(
             {
                 "date": normalize_date(row.get("Date")),
                 "benchmark_id": "TOPIX",
-                "open": row.get("Open", ""),
-                "high": row.get("High", ""),
-                "low": row.get("Low", ""),
+                "open": first_value(row, "Open", "O"),
+                "high": first_value(row, "High", "H"),
+                "low": first_value(row, "Low", "L"),
                 "close": close,
                 "adjusted_close": close,
             }
