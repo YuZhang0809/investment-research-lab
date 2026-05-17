@@ -21,6 +21,11 @@ rebalance date. This is cleaner than using a current master snapshot for all
 historical dates, but if exact `listed_date` and `delisted_date` are still
 missing the run is marked `pit_snapshot_panel`, not performance-conclusive.
 
+`download_jquants_listings_panel.py` writes a repeated snapshot panel, and
+`select_research_codes.py` can derive a generic research code list from that
+panel. Real code lists should stay in private workspaces because they can reveal
+research scope.
+
 ## Daily Prices
 
 ```text
@@ -64,6 +69,27 @@ source,file_path,downloaded_at,vendor,schema_version,date_range,checksum,notes
 
 The real manifest is local-only and ignored by git. Commit only
 `data/manifest/data_manifest.example.csv`.
+
+## Coverage Profiles
+
+`profile_data_coverage.py` writes a strategy-agnostic coverage table:
+
+```text
+rebalance_date,listing_source_date,listing_rows,common_stock_codes,price_any_history_codes,price_on_or_before_codes,price_on_date_codes,fundamentals_available_codes,common_with_price_history,common_with_price_on_or_before,common_with_price_on_date,common_with_fundamentals,common_with_price_and_fundamentals,common_missing_price_on_or_before,common_missing_fundamentals
+```
+
+`profile_research_universe.py` writes configured universe diagnostics without
+running strategy scoring:
+
+```text
+rebalance_date,listing_source_date,included_count,excluded_count,evaluated_count,stale_price_included,missing_rebalance_price_included,with_fundamentals_included,median_60d_trading_value_p10,median_60d_trading_value_median,median_60d_trading_value_p90,top_exclusion_reasons
+```
+
+and a reason-count table:
+
+```text
+rebalance_date,reason,count
+```
 
 ## Run Ledger
 
