@@ -11,6 +11,11 @@ from research_common import append_manifest, parse_bool, parse_date, parse_float
 
 ISSUE_FIELDS = ["issue_type", "severity", "date", "code", "detail", "value", "threshold"]
 SUMMARY_FIELDS = ["issue_type", "severity", "count"]
+BLOCKING_ERROR = "blocking_error"
+EXECUTION_CONSTRAINT = "execution_constraint"
+REVIEW_REQUIRED = "review_required"
+INFO = "info"
+SEVERITY_ORDER = [BLOCKING_ERROR, EXECUTION_CONSTRAINT, REVIEW_REQUIRED, INFO]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -86,6 +91,17 @@ def audit_prices(
 ) -> list[dict[str, Any]]:
     require_columns(rows, {"date", "code", "unadjusted_close"}, table_name="prices")
     issues: list[dict[str, Any]] = []
+    columns = set(rows[0])
+    has_adjusted_column = "adjusted_close" in columns
+    has_adjustment_column = "adjustment_factor" in columns
+    if not has_adjusted_column and not has_adjustment_column:
+        issues.append(
+            issue(
+                "missing_adjusted_price_basis_column",
+                BLOCKING_ERROR,
+                detail="prices must provide adjusted_close or adjustment_factor",
+            )
+        )
     for code, values in group_by_code(rows).items():
         previous_date: date | None = None
         previous_effective_adjusted: float | None = None
@@ -109,24 +125,24 @@ def audit_prices(
             if row_date is None:
                 continue
             if unadjusted is None or unadjusted <= 0:
-                severity = "error" if is_tradable else "warning"
+                severity = BLOCKING_ERROR if is_tradable else EXECUTION_CONSTRAINT
                 issues.append(issue("invalid_unadjusted_price", severity, row_date=row_date, code=code, value=row.get("unadjusted_close", "")))
             if is_tradable and (adjusted_text == "" or adjusted is None) and (adjustment is None or adjustment <= 0):
-                issues.append(issue("missing_adjusted_price", "error", row_date=row_date, code=code))
+                issues.append(issue("missing_adjusted_price", BLOCKING_ERROR, row_date=row_date, code=code))
             if is_tradable and adjusted is None and (adjustment is None or adjustment <= 0):
-                issues.append(issue("missing_adjusted_price_and_adjustment_factor", "error", row_date=row_date, code=code))
+                issues.append(issue("missing_adjusted_price_and_adjustment_factor", BLOCKING_ERROR, row_date=row_date, code=code))
             elif adjusted is not None and adjusted <= 0:
-                severity = "error" if is_tradable else "warning"
+                severity = BLOCKING_ERROR if is_tradable else EXECUTION_CONSTRAINT
                 issues.append(issue("invalid_adjusted_price", severity, row_date=row_date, code=code, value=adjusted))
             if tradable is False:
-                issues.append(issue("not_tradable_price_row", "warning", row_date=row_date, code=code))
+                issues.append(issue("not_tradable_price_row", EXECUTION_CONSTRAINT, row_date=row_date, code=code))
             if parse_bool(row.get("price_limit_flag"), default=False) is True:
-                issues.append(issue("price_limit_row", "info", row_date=row_date, code=code))
+                issues.append(issue("price_limit_row", EXECUTION_CONSTRAINT, row_date=row_date, code=code))
             if previous_date is not None and (row_date - previous_date).days > max_calendar_gap_days:
                 issues.append(
                     issue(
                         "price_calendar_gap",
-                        "warning",
+                        REVIEW_REQUIRED,
                         row_date=row_date,
                         code=code,
                         detail=f"previous_date={previous_date.isoformat()}",
@@ -140,7 +156,7 @@ def audit_prices(
                     issues.append(
                         issue(
                             "adjusted_price_jump",
-                            "warning",
+                            REVIEW_REQUIRED,
                             row_date=row_date,
                             code=code,
                             value=period_return,
@@ -156,7 +172,7 @@ def audit_prices(
                     issues.append(
                         issue(
                             "stale_adjusted_price_run",
-                            "warning",
+                            REVIEW_REQUIRED,
                             row_date=row_date,
                             code=code,
                             value=stale_run_length,
@@ -168,7 +184,7 @@ def audit_prices(
                 issues.append(
                     issue(
                         "adjustment_factor_change",
-                        "info",
+                        INFO,
                         row_date=row_date,
                         code=code,
                         detail=f"previous_adjustment_factor={previous_adjustment:.10g}",
@@ -200,7 +216,7 @@ def audit_listings(rows: list[dict[str, str]], price_rows: list[dict[str, str]])
             issues.append(
                 issue(
                     "price_after_delisting",
-                    "error",
+                    BLOCKING_ERROR,
                     row_date=last_price,
                     code=code,
                     detail=f"delisted_date={delisted.isoformat()}",
@@ -221,7 +237,7 @@ def audit_contributions(rows: list[dict[str, str]], *, max_single_name_contribut
             issues.append(
                 issue(
                     "single_name_abnormal_contribution",
-                    "warning",
+                    REVIEW_REQUIRED,
                     row_date=row_date,
                     code=row.get("code", ""),
                     value=contribution,
@@ -239,18 +255,56 @@ def summarize_issues(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def issue_count(row: dict[str, Any]) -> int:
+    try:
+        return int(row.get("count", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def severity_counts(summary_rows: list[dict[str, Any]]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for row in summary_rows:
+        counts[str(row.get("severity", ""))] += issue_count(row)
+    return counts
+
+
+def issue_count_list(summary_rows: list[dict[str, Any]], severity: str) -> str:
+    values = [
+        f"{row.get('issue_type', '')}({issue_count(row)})"
+        for row in summary_rows
+        if row.get("severity") == severity and issue_count(row) > 0
+    ]
+    return "; ".join(values) if values else "none"
+
+
+def data_quality_status(summary_rows: list[dict[str, Any]]) -> str:
+    counts = severity_counts(summary_rows)
+    if counts[BLOCKING_ERROR]:
+        return "blocked"
+    if counts[REVIEW_REQUIRED]:
+        return "review_required"
+    if counts[EXECUTION_CONSTRAINT]:
+        return "ok_with_execution_constraints"
+    return "ok"
+
+
 def write_report(path: Path, issues: list[dict[str, Any]], summary_rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    errors = sum(1 for row in issues if row["severity"] == "error")
-    warnings = sum(1 for row in issues if row["severity"] == "warning")
+    counts = severity_counts(summary_rows)
     lines = [
         "# Data Quality Audit",
         "",
         "| metric | value |",
-        "|---|---:|",
+        "|---|---|",
+        f"| data quality status | {data_quality_status(summary_rows)} |",
+        f"| blocked reason | {issue_count_list(summary_rows, BLOCKING_ERROR)} |",
+        f"| review reason | {issue_count_list(summary_rows, REVIEW_REQUIRED)} |",
         f"| total issues | {len(issues)} |",
-        f"| errors | {errors} |",
-        f"| warnings | {warnings} |",
+        f"| {BLOCKING_ERROR} | {counts[BLOCKING_ERROR]} |",
+        f"| {EXECUTION_CONSTRAINT} | {counts[EXECUTION_CONSTRAINT]} |",
+        f"| {REVIEW_REQUIRED} | {counts[REVIEW_REQUIRED]} |",
+        f"| {INFO} | {counts[INFO]} |",
         "",
         "## Issue Counts",
         "",
@@ -305,7 +359,7 @@ def main() -> int:
             source="derived_data_quality_audit",
             file_path=args.out,
             vendor="local",
-            schema_version="data_quality_audit_v0_1",
+            schema_version="data_quality_audit_v0_2",
             date_range="",
             notes=f"{len(issues)} issues; report={args.report.as_posix()}",
         )

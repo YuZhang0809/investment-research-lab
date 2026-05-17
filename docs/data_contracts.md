@@ -155,6 +155,28 @@ prices, large adjusted-price jumps, price calendar gaps, stale adjusted-price
 runs, not-tradable rows, price-limit rows, prices after delisting, and optional
 single-name abnormal contribution rows. It does not repair or synthesize data.
 
+Audit severity values are research gate categories:
+
+```text
+blocking_error
+execution_constraint
+review_required
+info
+```
+
+`blocking_error` means the data can directly pollute returns or lifecycle
+validity, such as missing adjusted-price basis on a tradable row or prices
+after delisting. `execution_constraint` means the row is a known trading
+constraint, such as not-tradable or price-limit rows. `review_required` means
+the run can be inspected but needs sampling before validation, such as large
+price jumps, long stale-price runs, price calendar gaps, or abnormal
+single-name contribution. `info` records context such as adjustment-factor
+changes.
+
+Blank `adjusted_close` is valid only when a positive `adjustment_factor` is
+present for that row. In that case the audit treats the source shape as valid
+because the engine has an explicit adjusted-price basis.
+
 ## Strategy Diagnostics Pack
 
 `generate_strategy_diagnostics_pack.py` consumes public-engine artifacts and
@@ -162,6 +184,11 @@ writes one static Markdown pack plus a metrics CSV. Required input is a
 walk-forward summary. Optional inputs are explicit files for failures, trades,
 candidates, contributions, exposures, data-quality summary, and benchmark
 attribution. Optional sections are shown only when their source file is passed.
+When a data-quality summary is supplied, the pack renders a top-level data gate
+with `research_safe_for_exploration`, `research_safe_for_validation`,
+`performance_conclusion_allowed`, and `performance_blocked_reason`. Formal
+performance conclusions require no blocking data-quality issues, no pending
+review-required audit items, and `lifecycle_data_status=pit_with_delistings`.
 
 ## Event Drift
 

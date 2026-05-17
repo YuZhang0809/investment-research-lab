@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import analyze_event_drift  # noqa: E402
 import generate_strategy_diagnostics_pack  # noqa: E402
 from analyze_benchmark_attribution import attribution_rows  # noqa: E402
-from audit_data_quality import audit_listings, audit_prices, summarize_issues  # noqa: E402
+from audit_data_quality import audit_listings, audit_prices, summarize_issues, write_report  # noqa: E402
 
 
 def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) -> None:
@@ -96,10 +96,17 @@ class ResearchEngineLayersTest(unittest.TestCase):
         self.assertIn("stale_adjusted_price_run", issue_types)
         self.assertIn("price_after_delisting", issue_types)
         self.assertIn(
-            {"issue_type": "invalid_unadjusted_price", "severity": "warning", "count": 1},
+            {"issue_type": "invalid_unadjusted_price", "severity": "execution_constraint", "count": 1},
             summary,
         )
-        self.assertIn({"issue_type": "price_after_delisting", "severity": "error", "count": 1}, summary)
+        self.assertIn({"issue_type": "price_after_delisting", "severity": "blocking_error", "count": 1}, summary)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report = Path(temp_dir) / "data_quality_report.md"
+            write_report(report, issues, summary)
+            text = report.read_text(encoding="utf-8")
+            self.assertIn("| data quality status | blocked |", text)
+            self.assertIn("| blocked reason |", text)
+            self.assertIn("price_after_delisting(1)", text)
 
     def test_benchmark_attribution_handles_builtin_and_custom_benchmarks(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -156,7 +163,7 @@ class ResearchEngineLayersTest(unittest.TestCase):
             report = temp / "strategy_diagnostics.md"
             write_csv(summary, synthetic_summary_rows(), list(synthetic_summary_rows()[0]))
             write_csv(failures, [{"date": "2026-02-28", "code": "", "failure_type": "cash_drag", "detail": "", "value": "50"}], ["date", "code", "failure_type", "detail", "value"])
-            write_csv(data_quality, [{"issue_type": "missing_adjusted_price", "severity": "error", "count": "1"}], ["issue_type", "severity", "count"])
+            write_csv(data_quality, [{"issue_type": "missing_adjusted_price", "severity": "blocking_error", "count": "1"}], ["issue_type", "severity", "count"])
             write_csv(
                 benchmark,
                 [{"benchmark_label": "SYNMKT", "benchmark_type": "market", "beta": "2", "alpha": "0", "tracking_error": "0.1", "information_ratio": "1.5"}],
@@ -189,6 +196,11 @@ class ResearchEngineLayersTest(unittest.TestCase):
             text = report.read_text(encoding="utf-8")
             self.assertIn("# Strategy Diagnostics Pack", text)
             self.assertIn("## Data Gate", text)
+            self.assertIn("| data_quality_status | blocked |", text)
+            self.assertIn("| research_safe_for_exploration | False |", text)
+            self.assertIn("| research_safe_for_validation | False |", text)
+            self.assertIn("| performance_conclusion_allowed | False |", text)
+            self.assertIn("data_quality_blocking_error=missing_adjusted_price(1)", text)
             self.assertIn("| lifecycle_data_status | pit_with_delistings |", text)
             self.assertIn("## Data Quality", text)
             self.assertIn("## Benchmark Attribution", text)
@@ -232,6 +244,8 @@ class ResearchEngineLayersTest(unittest.TestCase):
                 sys.argv = original_argv
 
             text = report.read_text(encoding="utf-8")
+            self.assertIn("| data_quality_status | ok |", text)
+            self.assertIn("| research_safe_for_exploration | True |", text)
             self.assertIn("| none |  | 0 |", text)
             self.assertIn("| none |  |  |  |  |  |", text)
             self.assertIn("| none | 0 |", text)
