@@ -40,6 +40,9 @@ for manual inspection. Internal computation may use libraries such as `pandas`,
 - Universe builders apply point-in-time eligibility rules.
 - Factor builders compute raw QVM variables.
 - Score builders normalize and rank candidates.
+- Strategy expression code should stay generic: configurable factor weights,
+  score combiners, and filters are engine features; real private parameter
+  choices are not.
 - Portfolio builders convert ranks into research and executable targets.
 - Walk-forward runners simulate low-frequency rebalance loops.
 - Reports explain candidates, constraints, and failure cases.
@@ -57,7 +60,7 @@ The public engine owns:
 
 - data contracts
 - reproducible transformations
-- scoring and portfolio construction logic
+- generic scoring, filtering, and portfolio construction logic
 - low-frequency research simulations
 - candidate and failure-case reports
 - failure-case logs
@@ -67,6 +70,8 @@ The public engine must not own:
 - personal allocation policy
 - live holdings
 - broker account records
+- private strategy decisions, final weights, candidate lists, or go/no-go
+  conclusions
 - tax lots from a real account
 - vendor data redistribution
 - live trading or broker execution

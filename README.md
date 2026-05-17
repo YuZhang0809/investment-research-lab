@@ -17,7 +17,8 @@ not a general quant platform, live trading system, or broker integration.
 - Parquet processed/cache data with CSV import/export contracts
 - Local DuckDB queries over Parquet files
 - Point-in-time universe construction
-- QVM factor, score, target, order, and walk-forward pipelines
+- Generic strategy expression primitives for factors, scores, filters, target,
+  order, and walk-forward pipelines
 - TDnet event-observation scaffolding
 - Synthetic examples and empty templates
 
@@ -43,6 +44,8 @@ into a compliance or platform product.
 
 - Personal IPS or household asset planning
 - Real portfolio holdings
+- Real private strategy decisions, parameter choices, candidate lists, or
+  go/no-go conclusions
 - Live trading or auto-ordering
 - Raw or processed vendor datasets
 - API keys, tokens, local `.env` files, or private reports
@@ -69,6 +72,7 @@ Key planning docs:
 - `docs/architecture.md`
 - `docs/data_contracts.md`
 - `docs/experiment_workflow.md`
+- `docs/strategy_boundary.md`
 
 ## Setup
 
