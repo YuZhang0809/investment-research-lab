@@ -139,8 +139,7 @@ def main() -> int:
 
     ranked = sorted(
         [row for row in score_rows if row["qvm_score"] is not None],
-        key=lambda row: row["qvm_score"],
-        reverse=True,
+        key=lambda row: (-float(row["qvm_score"]), str(row.get("code", ""))),
     )
     for rank, row in enumerate(ranked, start=1):
         row["rank"] = rank

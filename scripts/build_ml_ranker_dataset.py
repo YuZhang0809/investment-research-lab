@@ -6,7 +6,16 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from research_common import append_manifest, parse_date, parse_float, parse_int, read_csv, write_csv
+from research_common import (
+    append_manifest,
+    parse_date,
+    parse_float,
+    parse_int,
+    read_csv,
+    trading_calendar_from_rows,
+    trading_day_offset,
+    write_csv,
+)
 
 
 @dataclass
@@ -43,25 +52,44 @@ def build_price_index(rows: list[dict[str, str]]) -> dict[str, list[PricePoint]]
     return grouped
 
 
-def first_on_or_after(points: list[PricePoint], target: date) -> int | None:
-    for index, point in enumerate(points):
-        if point.date >= target:
-            return index
+def price_on_date(points: list[PricePoint], target: date) -> PricePoint | None:
+    for point in points:
+        if point.date == target:
+            return point
+        if point.date > target:
+            return None
     return None
 
 
-def future_return(points: list[PricePoint], rebalance_date: date, holding_days: int) -> float | None:
-    entry_index = first_on_or_after(points, rebalance_date)
-    if entry_index is None:
-        return None
-    exit_index = entry_index + holding_days
-    if exit_index >= len(points):
-        return None
-    entry = points[entry_index].adjusted_close
-    exit_value = points[exit_index].adjusted_close
+def has_price_after(points: list[PricePoint], target: date) -> bool:
+    return any(point.date > target for point in points)
+
+
+def future_return(
+    points: list[PricePoint],
+    calendar: list[date],
+    rebalance_date: date,
+    holding_days: int,
+) -> tuple[float | None, str]:
+    entry_date = trading_day_offset(calendar, rebalance_date, 0, mode="on_or_after")
+    if entry_date is None:
+        return None, "missing_entry_date"
+    exit_date = trading_day_offset(calendar, entry_date, holding_days, mode="on_or_after")
+    if exit_date is None:
+        return None, "insufficient_forward_window"
+    entry_point = price_on_date(points, entry_date)
+    if entry_point is None:
+        return None, "missing_entry_price"
+    exit_point = price_on_date(points, exit_date)
+    if exit_point is None:
+        if points and not has_price_after(points, exit_date) and points[-1].date < exit_date:
+            return -1.0, "assumed_delisting_loss"
+        return None, "missing_exit_price"
+    entry = entry_point.adjusted_close
+    exit_value = exit_point.adjusted_close
     if entry <= 0:
-        return None
-    return exit_value / entry - 1.0
+        return None, "invalid_entry_price"
+    return exit_value / entry - 1.0, "ok"
 
 
 def score_files(scores_dir: Path, start: date, end: date) -> list[Path]:
@@ -89,6 +117,7 @@ def write_report(path: Path, rows: list[dict[str, str]], start: date, end: date,
     returns = [parse_float(row.get("future_return")) for row in rows]
     clean = [value for value in returns if value is not None]
     avg_return = sum(clean) / len(clean) if clean else None
+    delisting_rows = sum(1 for row in rows if row.get("label_status") == "assumed_delisting_loss")
     lines = [
         "# ML Ranker Dataset Report",
         "",
@@ -97,6 +126,7 @@ def write_report(path: Path, rows: list[dict[str, str]], start: date, end: date,
         f"- holding_days label: {holding_days}",
         f"- rows: {len(rows):,}",
         f"- average future_return: {fmt(avg_return)}",
+        f"- assumed delisting loss rows: {delisting_rows:,}",
         "",
         "## Guardrails",
         "",
@@ -114,14 +144,21 @@ def main() -> int:
     end = parse_date(args.end_date, field_name="end_date")
     if start is None or end is None:
         raise ValueError("start-date and end-date are required")
-    price_index = build_price_index(read_csv(args.prices))
+    price_rows = read_csv(args.prices)
+    price_index = build_price_index(price_rows)
+    calendar = trading_calendar_from_rows(price_rows)
     dataset_rows: list[dict[str, str]] = []
     for path in score_files(args.scores_dir, start, end):
         for row in read_csv(path):
             rebalance_date = parse_date(row.get("rebalance_date"), field_name="scores.rebalance_date")
             if rebalance_date is None or not (start <= rebalance_date <= end):
                 continue
-            ret = future_return(price_index.get(row.get("code", ""), []), rebalance_date, args.holding_days)
+            ret, label_status = future_return(
+                price_index.get(row.get("code", ""), []),
+                calendar,
+                rebalance_date,
+                args.holding_days,
+            )
             if ret is None:
                 continue
             dataset_rows.append(
@@ -136,6 +173,7 @@ def main() -> int:
                     "qvm_score": fmt(parse_float(row.get("qvm_score"))),
                     "future_return": fmt(ret),
                     "label_holding_days": str(args.holding_days),
+                    "label_status": label_status,
                 }
             )
 
@@ -154,6 +192,7 @@ def main() -> int:
         "qvm_score",
         "future_return",
         "label_holding_days",
+        "label_status",
     ]
     write_csv(output_path, dataset_rows, fieldnames)
     write_report(report_path, dataset_rows, start, end, args.holding_days)

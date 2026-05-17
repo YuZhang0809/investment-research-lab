@@ -79,6 +79,12 @@ data/processed/validation/contract_validation_issues_phase1_real_sample.csv
 data/processed/validation/contract_validation_summary_phase1_real_sample.json
 ```
 
+Important: the J-Quants v2 `/equities/master` snapshot used by
+`download_jquants.py` does not provide full listed/delisted lifecycle dates.
+Validation should therefore flag `listing_lifecycle_coverage` for this sample.
+Treat that as a blocker for performance conclusions. The sample is still useful
+for API, CSV-contract, and pipeline smoke testing.
+
 ## 4. Run a Single Rebalance Snapshot
 
 ```powershell
@@ -155,8 +161,13 @@ python scripts\run_qvm_walkforward.py `
   --cost-scenario base `
   --run-label phase1_real_sample `
   --capital-jpy 5000000 `
-  --skip-stage-manifest
+  --skip-stage-manifest `
+  --allow-snapshot-listings
 ```
+
+`--allow-snapshot-listings` is intentionally explicit. It marks this as an
+exploratory survivor-biased sample run. For real historical research, provide
+PIT listings with `listed_date` and `delisted_date` instead and omit the flag.
 
 Expected local outputs:
 
@@ -170,6 +181,8 @@ reports/walkforward/qvm_walkforward_phase1_real_sample_202501_202605.md
 
 - This five-code sample proves the real-data path works. It is not a strategy
   conclusion.
+- A snapshot-only listings file is not a valid historical universe. Use it only
+  for local plumbing checks unless you have a separate PIT lifecycle source.
 - Console output on some Windows shells may render Japanese company and sector
   names incorrectly. The CSV files are written as UTF-8.
 - Synthetic fixtures remain useful for no-key smoke tests and public examples,

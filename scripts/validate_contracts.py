@@ -6,7 +6,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-from research_common import load_yaml, month_key, parse_date, parse_float, read_csv, write_csv
+from research_common import load_yaml, month_key, parse_bool, parse_date, parse_float, read_csv, write_csv
 
 
 LISTING_REQUIRED = [
@@ -58,6 +58,11 @@ NUMBER_COLUMNS = {
         "total_assets",
         "shares_outstanding",
     ],
+}
+BOOL_COLUMNS = {
+    "listings": ["is_common_stock", "is_etf_reit_infra", "tradable_flag"],
+    "prices": ["tradable_flag", "price_limit_flag"],
+    "fundamentals": [],
 }
 ISSUE_FIELDS = ["severity", "dataset", "check", "code", "column", "value", "message"]
 
@@ -174,6 +179,25 @@ def check_numbers(issues: list[dict[str, str]], *, dataset: str, rows: list[dict
                 )
 
 
+def check_bools(issues: list[dict[str, str]], *, dataset: str, rows: list[dict[str, str]]) -> None:
+    for row_index, row in enumerate(rows, start=2):
+        code = row.get("code", "")
+        for column in BOOL_COLUMNS[dataset]:
+            if column not in row or row.get(column) in (None, ""):
+                continue
+            if parse_bool(row.get(column), default=None) is None:
+                issue(
+                    issues,
+                    severity="error",
+                    dataset=dataset,
+                    check="bool_parse",
+                    code=code,
+                    column=column,
+                    value=row.get(column, ""),
+                    message=f"Row {row_index}: expected boolean value",
+                )
+
+
 def check_duplicate_keys(
     issues: list[dict[str, str]],
     *,
@@ -281,6 +305,117 @@ def check_price_coverage(
             )
 
 
+def check_listing_lifecycle(issues: list[dict[str, str]], *, listing_rows: list[dict[str, str]]) -> None:
+    if not listing_rows:
+        return
+    listed_dates = [row.get("listed_date", "").strip() for row in listing_rows]
+    lifecycle_statuses = {
+        row.get("listing_lifecycle_status", "").strip().lower()
+        for row in listing_rows
+        if row.get("listing_lifecycle_status")
+    }
+    if not any(listed_dates):
+        issue(
+            issues,
+            severity="error",
+            dataset="listings",
+            check="listing_lifecycle_coverage",
+            column="listed_date",
+            message="Listings have no listed_date values; this is a snapshot-only universe and is survivor-biased for historical research",
+        )
+    if "snapshot_only_missing_lifecycle_dates" in lifecycle_statuses:
+        issue(
+            issues,
+            severity="error",
+            dataset="listings",
+            check="listing_lifecycle_coverage",
+            column="listing_lifecycle_status",
+            value="snapshot_only_missing_lifecycle_dates",
+            message="J-Quants master snapshot lacks listed/delisted lifecycle dates; do not treat it as a PIT historical universe",
+        )
+
+
+def check_price_values(issues: list[dict[str, str]], *, price_rows: list[dict[str, str]]) -> None:
+    for row_index, row in enumerate(price_rows, start=2):
+        code = row.get("code", "")
+        for column in ["unadjusted_close", "adjusted_close"]:
+            value = parse_float(row.get(column))
+            if value is not None and value <= 0:
+                issue(
+                    issues,
+                    severity="error",
+                    dataset="prices",
+                    check="non_positive_price",
+                    code=code,
+                    column=column,
+                    value=row.get(column, ""),
+                    message=f"Row {row_index}: price must be positive",
+                )
+        trading_value = parse_float(row.get("trading_value"))
+        if trading_value is not None and trading_value < 0:
+            issue(
+                issues,
+                severity="error",
+                dataset="prices",
+                check="negative_trading_value",
+                code=code,
+                column="trading_value",
+                value=row.get("trading_value", ""),
+                message=f"Row {row_index}: trading value must not be negative",
+            )
+
+
+def check_price_gaps(issues: list[dict[str, str]], *, price_rows: list[dict[str, str]]) -> None:
+    parsed_rows: list[tuple[str, Any]] = []
+    for row in price_rows:
+        try:
+            row_date = parse_date(row.get("date"), field_name="prices.date")
+        except ValueError:
+            continue
+        code = (row.get("code") or "").strip()
+        if code and row_date:
+            parsed_rows.append((code, row_date))
+    calendar = sorted({row_date for _code, row_date in parsed_rows})
+    if not calendar:
+        return
+    by_code: dict[str, set[Any]] = defaultdict(set)
+    for code, row_date in parsed_rows:
+        by_code[code].add(row_date)
+    for code, dates in sorted(by_code.items()):
+        if len(dates) < 2:
+            continue
+        start = min(dates)
+        end = max(dates)
+        expected = [value for value in calendar if start <= value <= end]
+        missing_count = len(expected) - len(dates)
+        if missing_count > 0:
+            issue(
+                issues,
+                severity="warning",
+                dataset="prices",
+                check="price_sequence_gap",
+                code=code,
+                value=missing_count,
+                message=f"Missing {missing_count} market trading dates between first and last price row",
+            )
+
+
+def check_fundamental_available_dates(
+    issues: list[dict[str, str]], *, fundamental_rows: list[dict[str, str]]
+) -> None:
+    for row_index, row in enumerate(fundamental_rows, start=2):
+        if not (row.get("available_date") or "").strip():
+            issue(
+                issues,
+                severity="warning",
+                dataset="fundamentals",
+                check="missing_available_date",
+                code=row.get("code", ""),
+                column="available_date",
+                message=f"Row {row_index}: missing available_date cannot be point-in-time gated",
+            )
+
+
 def check_rebalance_warnings(
     issues: list[dict[str, str]],
     *,
@@ -343,7 +478,12 @@ def validate_contracts(
         check_required_columns(issues, dataset=dataset, rows=rows, required=required)
         check_dates(issues, dataset=dataset, rows=rows)
         check_numbers(issues, dataset=dataset, rows=rows)
+        check_bools(issues, dataset=dataset, rows=rows)
 
+    check_listing_lifecycle(issues, listing_rows=listing_rows)
+    check_price_values(issues, price_rows=price_rows)
+    check_price_gaps(issues, price_rows=price_rows)
+    check_fundamental_available_dates(issues, fundamental_rows=fundamental_rows)
     check_duplicate_keys(issues, dataset="listings", rows=listing_rows, key_columns=["code"])
     check_duplicate_keys(issues, dataset="prices", rows=price_rows, key_columns=["date", "code"])
     check_duplicate_keys(

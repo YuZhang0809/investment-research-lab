@@ -47,6 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", type=Path, default=Path("data/manifest/data_manifest.csv"))
     parser.add_argument("--no-manifest", action="store_true")
     parser.add_argument("--skip-stage-manifest", action="store_true")
+    parser.add_argument(
+        "--allow-snapshot-listings",
+        action="store_true",
+        help="Allow listings without lifecycle dates. Use only for exploratory survivor-biased samples.",
+    )
     return parser
 
 
@@ -113,6 +118,22 @@ def price_at(price_index: dict[str, list[PricePoint]], code: str, as_of: date) -
     return latest_price(price_index.get(code, []), as_of)
 
 
+def price_on_date(price_index: dict[str, list[PricePoint]], code: str, value: date) -> PricePoint | None:
+    for point in price_index.get(code, []):
+        if point.date == value:
+            return point
+        if point.date > value:
+            return None
+    return None
+
+
+def terminal_before(price_index: dict[str, list[PricePoint]], code: str, as_of: date) -> PricePoint | None:
+    points = price_index.get(code, [])
+    if points and points[-1].date < as_of:
+        return points[-1]
+    return None
+
+
 def next_price(points: list[PricePoint], after_date: date) -> PricePoint | None:
     for point in points:
         if point.date > after_date:
@@ -122,7 +143,7 @@ def next_price(points: list[PricePoint], after_date: date) -> PricePoint | None:
 
 def execution_point(price_index: dict[str, list[PricePoint]], code: str, signal_date: date, mode: str) -> PricePoint | None:
     if mode == "rebalance_close":
-        return price_at(price_index, code, signal_date)
+        return price_on_date(price_index, code, signal_date)
     return next_price(price_index.get(code, []), signal_date)
 
 
@@ -132,10 +153,51 @@ def execution_price(point: PricePoint, mode: str) -> float:
     return point.unadjusted_close
 
 
+def adjustment_ratio(point: PricePoint) -> float:
+    if point.adjusted_close <= 0:
+        return 1.0
+    return point.unadjusted_close / point.adjusted_close
+
+
+def adjusted_shares_for_trade(actual_shares: float, point: PricePoint) -> float:
+    return actual_shares * adjustment_ratio(point)
+
+
+def actual_shares_from_adjusted(adjusted_shares: float, point: PricePoint) -> float:
+    ratio = adjustment_ratio(point)
+    if ratio <= 0:
+        return adjusted_shares
+    return adjusted_shares / ratio
+
+
+def position_value(adjusted_shares: float, point: PricePoint) -> float:
+    return adjusted_shares * point.adjusted_close
+
+
+def display_shares(value: float) -> float | int:
+    rounded = round(value)
+    if abs(value - rounded) < 1e-6:
+        return int(rounded)
+    return value
+
+
+def snapshot_only_listings(rows: list[dict[str, str]]) -> bool:
+    if not rows:
+        return False
+    if any((row.get("listing_lifecycle_status") or "").strip() == "snapshot_only_missing_lifecycle_dates" for row in rows):
+        return True
+    return not any((row.get("listed_date") or "").strip() for row in rows)
+
+
 def adjusted_return(price_index: dict[str, list[PricePoint]], code: str, start: date, end: date) -> float | None:
     start_point = price_at(price_index, code, start)
+    if not start_point or start_point.adjusted_close <= 0:
+        return None
+    terminal_point = terminal_before(price_index, code, end)
+    if terminal_point is not None and terminal_point.date >= start_point.date:
+        return -1.0
     end_point = price_at(price_index, code, end)
-    if not start_point or not end_point or start_point.adjusted_close <= 0:
+    if not end_point:
         return None
     return end_point.adjusted_close / start_point.adjusted_close - 1.0
 
@@ -202,7 +264,7 @@ def money(value: float | None) -> str:
 
 def select_codes(
     scores: list[dict[str, str]],
-    holdings: dict[str, int],
+    holdings: dict[str, float],
     config: dict[str, Any],
 ) -> tuple[list[str], list[str]]:
     ranked = sorted(
@@ -220,10 +282,8 @@ def select_codes(
 
     buy_rule = config["portfolio"].get("buy_rule", {})
     hold_rule = config["portfolio"].get("hold_rule", {})
-    buy_pct_limit = math.ceil(universe_count * float(buy_rule.get("rank_top_pct", 10)) / 100)
-    hold_pct_limit = math.ceil(universe_count * float(hold_rule.get("rank_top_pct", 20)) / 100)
-    buy_limit = max(target_count, min(int(buy_rule.get("rank_top_n", 50)), buy_pct_limit))
-    hold_limit = max(target_count, min(int(hold_rule.get("rank_top_n", 100)), hold_pct_limit))
+    buy_limit = rank_rule_limit(universe_count, buy_rule, default_pct=10.0, default_n=50)
+    hold_limit = rank_rule_limit(universe_count, hold_rule, default_pct=20.0, default_n=100)
 
     kept = [code for code, shares in holdings.items() if shares > 0 and rank_by_code.get(code, 999999) <= hold_limit]
     kept.sort(key=lambda code: rank_by_code.get(code, 999999))
@@ -243,6 +303,18 @@ def select_codes(
     return selected, research_codes
 
 
+def rank_rule_limit(
+    universe_count: int,
+    rule: dict[str, Any],
+    *,
+    default_pct: float,
+    default_n: int,
+) -> int:
+    pct_limit = math.ceil(universe_count * float(rule.get("rank_top_pct", default_pct)) / 100)
+    n_limit = int(rule.get("rank_top_n", default_n))
+    return min(universe_count, max(0, pct_limit, n_limit))
+
+
 def build_targets(
     selected_codes: list[str],
     universe_by_code: dict[str, dict[str, str]],
@@ -256,7 +328,7 @@ def build_targets(
     targets: dict[str, int] = {}
     for code in selected_codes:
         universe = universe_by_code.get(code, {})
-        point = price_at(price_index, code, rebalance_date)
+        point = price_on_date(price_index, code, rebalance_date)
         if not point:
             targets[code] = 0
             continue
@@ -265,18 +337,31 @@ def build_targets(
     return targets
 
 
-def consume_lots(lots: list[dict[str, float]], shares_to_sell: int) -> float:
-    remaining = shares_to_sell
+def consume_lots(lots: list[dict[str, float]], adjusted_shares_to_sell: float) -> float:
+    remaining = adjusted_shares_to_sell
     basis = 0.0
-    while remaining > 0 and lots:
+    while remaining > 1e-9 and lots:
         lot = lots[0]
-        take = min(remaining, int(lot["shares"]))
-        basis += take * float(lot["basis_per_share"])
-        lot["shares"] -= take
+        take = min(remaining, float(lot["adjusted_shares"]))
+        basis += take * float(lot["basis_per_adjusted_share"])
+        lot["adjusted_shares"] -= take
         remaining -= take
-        if lot["shares"] <= 0:
+        if lot["adjusted_shares"] <= 1e-9:
             lots.pop(0)
     return basis
+
+
+def remaining_basis(lots: list[dict[str, float]]) -> float:
+    return sum(float(lot["adjusted_shares"]) * float(lot["basis_per_adjusted_share"]) for lot in lots)
+
+
+def add_reason(current: str, value: str) -> str:
+    if not current:
+        return value
+    parts = current.split(";")
+    if value in parts:
+        return current
+    return f"{current};{value}"
 
 
 def run_stages(args: argparse.Namespace, rebalance_date: date) -> tuple[Path, Path, Path]:
@@ -405,13 +490,24 @@ def main() -> int:
     if start_date is None or end_date is None:
         raise ValueError("start-date and end-date are required")
 
+    listing_rows_for_check = read_csv(args.listings)
+    if snapshot_only_listings(listing_rows_for_check) and not args.allow_snapshot_listings:
+        raise ValueError(
+            "Listings look snapshot-only: listed_date is missing or listing_lifecycle_status marks missing lifecycle dates. "
+            "This creates survivorship bias in historical walk-forward runs. Provide PIT lifecycle listings or pass "
+            "--allow-snapshot-listings for exploratory samples only."
+        )
+
     price_index = build_price_index(read_csv(args.prices))
     dates = rebalance_dates(all_price_dates(price_index), start_date, end_date, args.frequency)
     if not dates:
         raise ValueError("No rebalance dates found in price file for the requested window.")
 
     max_order_to_adv = float(config["execution"].get("max_order_to_median_trading_value", 0.005))
-    holdings: dict[str, int] = {}
+    # Holdings and tax lots are tracked in adjusted-share units so split events
+    # do not mechanically distort portfolio equity. Order sizing still uses
+    # actual unadjusted shares and prices.
+    holdings: dict[str, float] = {}
     tax_lots: dict[str, list[dict[str, float]]] = defaultdict(list)
     cash = args.capital_jpy
     cumulative_realized_gain = 0.0
@@ -444,12 +540,50 @@ def main() -> int:
             if research_return is not None:
                 research_equity *= 1 + research_return
 
+        for code, adjusted_shares in list(holdings.items()):
+            terminal_point = terminal_before(price_index, code, rebalance_date)
+            if terminal_point is None:
+                continue
+            actual_shares = actual_shares_from_adjusted(adjusted_shares, terminal_point)
+            basis = remaining_basis(tax_lots.get(code, []))
+            cumulative_realized_gain -= basis
+            holdings.pop(code, None)
+            tax_lots.pop(code, None)
+            failure_rows.append(
+                {
+                    "date": rebalance_date,
+                    "code": code,
+                    "failure_type": "assumed_delisting_loss",
+                    "detail": f"last_price_date={terminal_point.date}; recovery_price=0",
+                    "value": 0,
+                }
+            )
+            trade_rows.append(
+                {
+                    "signal_date": rebalance_date,
+                    "execution_date": rebalance_date,
+                    "code": code,
+                    "side": "DELIST",
+                    "requested_shares": -display_shares(actual_shares),
+                    "filled_shares": -display_shares(actual_shares),
+                    "price": 0,
+                    "value": 0,
+                    "estimated_cost_optimistic": 0,
+                    "estimated_cost_base": 0,
+                    "estimated_cost_pessimistic": 0,
+                    "selected_cost": 0,
+                    "realized_gain": -basis,
+                    "estimated_tax": 0,
+                    "constraint_reason": "assumed_delisting_loss",
+                }
+            )
+
         holdings_value = 0.0
-        for code, shares in list(holdings.items()):
+        for code, adjusted_shares in list(holdings.items()):
             point = price_at(price_index, code, rebalance_date)
             if not point:
                 continue
-            holdings_value += shares * point.unadjusted_close
+            holdings_value += position_value(adjusted_shares, point)
         pre_equity = cash + holdings_value
 
         selected_codes, research_codes = select_codes(scores, holdings, config)
@@ -457,7 +591,7 @@ def main() -> int:
         zero_lot_targets = sum(1 for code in selected_codes if targets.get(code, 0) == 0)
         for code in selected_codes:
             if targets.get(code, 0) == 0:
-                signal_point = price_at(price_index, code, rebalance_date)
+                signal_point = price_on_date(price_index, code, rebalance_date)
                 failure_rows.append(
                     {
                         "date": rebalance_date,
@@ -467,7 +601,7 @@ def main() -> int:
                         "value": signal_point.unadjusted_close if signal_point else "",
                     }
                 )
-        all_codes = sorted(set(holdings) | set(targets), key=lambda code: (targets.get(code, 0) - holdings.get(code, 0), code))
+        all_codes = sorted(set(holdings) | set(targets))
 
         buy_trades = 0
         sell_trades = 0
@@ -476,13 +610,19 @@ def main() -> int:
         estimated_cost_base = 0.0
 
         for code in all_codes:
-            current_shares = holdings.get(code, 0)
+            current_adjusted_shares = holdings.get(code, 0.0)
             target_shares = targets.get(code, 0)
+            position_point = price_at(price_index, code, rebalance_date)
+            signal_point = price_on_date(price_index, code, rebalance_date)
+            fill_point = execution_point(price_index, code, rebalance_date, args.execution_price)
+            current_shares = (
+                int(round(actual_shares_from_adjusted(current_adjusted_shares, position_point)))
+                if position_point
+                else 0
+            )
             desired_delta = target_shares - current_shares
             if desired_delta == 0:
                 continue
-            signal_point = price_at(price_index, code, rebalance_date)
-            fill_point = execution_point(price_index, code, rebalance_date, args.execution_price)
             if not signal_point or not fill_point:
                 skipped_orders += 1
                 failure_reason = "missing_signal_price" if not signal_point else "missing_execution_price"
@@ -572,13 +712,25 @@ def main() -> int:
                         for scenario in ["optimistic", "base", "pessimistic"]
                     }
                     cost = scenario_costs[args.cost_scenario]
-                reason = "reduced_by_cash" if filled_delta else "insufficient_cash"
+                reason = add_reason(reason, "reduced_by_cash" if filled_delta else "insufficient_cash")
                 failure_rows.append(
                     {
                         "date": rebalance_date,
                         "code": code,
                         "failure_type": reason,
                         "detail": f"cash={cash:.2f}",
+                        "value": trade_value,
+                    }
+                )
+            mark_price_limit = bool(config["execution"].get("mark_uncertain_fill_on_price_limit", False))
+            if mark_price_limit and filled_delta != 0 and fill_point.price_limit_flag:
+                reason = add_reason(reason, "price_limit_uncertain_fill")
+                failure_rows.append(
+                    {
+                        "date": rebalance_date,
+                        "code": code,
+                        "failure_type": "price_limit_uncertain_fill",
+                        "detail": f"execution_date={fill_point.date};execution_price={args.execution_price}",
                         "value": trade_value,
                     }
                 )
@@ -591,25 +743,26 @@ def main() -> int:
             if filled_delta > 0:
                 cash -= trade_value + cost
                 if filled_delta:
+                    adjusted_delta = adjusted_shares_for_trade(filled_delta, fill_point)
                     tax_lots[code].append(
                         {
-                            "shares": float(filled_delta),
-                            "basis_per_share": (trade_value + cost) / filled_delta,
+                            "adjusted_shares": adjusted_delta,
+                            "basis_per_adjusted_share": (trade_value + cost) / adjusted_delta,
                         }
                     )
                 buy_trades += 1
             elif filled_delta < 0:
                 cash += trade_value - cost
-                sold_shares = abs(filled_delta)
-                basis = consume_lots(tax_lots[code], sold_shares)
+                adjusted_sold_shares = adjusted_shares_for_trade(abs(filled_delta), fill_point)
+                basis = consume_lots(tax_lots[code], adjusted_sold_shares)
                 realized_gain = trade_value - cost - basis
                 if realized_gain > 0:
                     estimated_tax = realized_gain * args.tax_rate
                     cumulative_tax += estimated_tax
                 cumulative_realized_gain += realized_gain
                 sell_trades += 1
-            holdings[code] = current_shares + filled_delta
-            if holdings.get(code) == 0:
+            holdings[code] = current_adjusted_shares + adjusted_shares_for_trade(filled_delta, fill_point)
+            if abs(holdings.get(code, 0.0)) <= 1e-9:
                 holdings.pop(code, None)
             turnover_value += trade_value
             for scenario, scenario_cost in scenario_costs.items():
@@ -636,11 +789,11 @@ def main() -> int:
             )
 
         post_holdings_value = 0.0
-        for code, shares in sorted(holdings.items()):
+        for code, adjusted_shares in sorted(holdings.items()):
             point = price_at(price_index, code, rebalance_date)
             if not point:
                 continue
-            value = shares * point.unadjusted_close
+            value = position_value(adjusted_shares, point)
             post_holdings_value += value
         after_equity = cash + post_holdings_value
         scenario_equity = {
@@ -650,16 +803,17 @@ def main() -> int:
             for scenario in ["optimistic", "base", "pessimistic"]
         }
         after_tax_taxable_equity = after_equity - cumulative_tax
-        for code, shares in sorted(holdings.items()):
+        for code, adjusted_shares in sorted(holdings.items()):
             point = price_at(price_index, code, rebalance_date)
             if not point:
                 continue
-            value = shares * point.unadjusted_close
+            actual_shares = actual_shares_from_adjusted(adjusted_shares, point)
+            value = position_value(adjusted_shares, point)
             holdings_rows.append(
                 {
                     "date": rebalance_date,
                     "code": code,
-                    "shares": shares,
+                    "shares": display_shares(actual_shares),
                     "price": point.unadjusted_close,
                     "value": value,
                     "weight": value / after_equity if after_equity else 0,

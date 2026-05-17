@@ -66,7 +66,11 @@ def summarize(label: str, summary_path: Path, failures_path: Path | None, fallba
     if not rows:
         raise ValueError(f"No rows in {summary_path}")
     final = rows[-1]
-    initial_capital = parse_float(rows[0].get("portfolio_equity_pre")) or fallback_capital
+    initial_capital = parse_float(rows[0].get("portfolio_equity_pre"))
+    capital_source = "portfolio_equity_pre"
+    if not initial_capital:
+        initial_capital = fallback_capital
+        capital_source = "fallback_capital_jpy"
     if not initial_capital:
         raise ValueError(
             f"Cannot infer initial capital for {summary_path}; pass --capital-jpy as fallback."
@@ -85,11 +89,13 @@ def summarize(label: str, summary_path: Path, failures_path: Path | None, fallba
         "end": final.get("rebalance_date", ""),
         "frequency": final.get("frequency", ""),
         "initial_capital": initial_capital,
+        "capital_source": capital_source,
         "final_equity": final_equity,
         "final_return": final_equity / initial_capital - 1 if final_equity is not None else None,
         "benchmark_return": benchmark_equity / initial_capital - 1 if benchmark_equity is not None else None,
         "research_return": research_equity / initial_capital - 1 if research_equity is not None else None,
-        "max_drawdown": max_drawdown(clean_values) if clean_values else None,
+        "recorded_max_drawdown": max_drawdown(clean_values) if clean_values else None,
+        "drawdown_sampling": final.get("frequency", "") or "unknown",
         "avg_cash_pct": avg(rows, "cash_pct"),
         "avg_turnover": avg(rows, "turnover"),
         "avg_holdings": avg(rows, "holdings_count"),
@@ -105,17 +111,38 @@ def write_report(path: Path, summaries: list[dict[str, Any]]) -> None:
     lines = [
         "# Walk-Forward Comparison",
         "",
-        "| run | frequency | period | months | initial capital | final equity | return | benchmark | research | max DD | avg cash | avg turnover | avg holdings | zero-lot | skipped | base cost |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| run | frequency | period | months | initial capital | capital source | final equity | return | benchmark | research | avg cash | avg turnover | avg holdings | zero-lot | skipped | base cost |",
+        "|---|---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in summaries:
         lines.append(
             f"| {row['label']} | {row['frequency'] or 'unknown'} | {row['start']}..{row['end']} | {row['months']} | "
-            f"{money(row['initial_capital'])} | {money(row['final_equity'])} | {pct(row['final_return'])} | "
+            f"{money(row['initial_capital'])} | {row['capital_source']} | {money(row['final_equity'])} | {pct(row['final_return'])} | "
             f"{pct(row['benchmark_return'])} | {pct(row['research_return'])} | "
-            f"{pct(row['max_drawdown'])} | {pct(row['avg_cash_pct'])} | "
+            f"{pct(row['avg_cash_pct'])} | "
             f"{pct(row['avg_turnover'])} | {number(row['avg_holdings'])} | "
             f"{number(row['avg_zero_lot'])} | {number(row['avg_skipped'])} | {money(row['total_cost_base'])} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Drawdown Sampling",
+            "",
+            "| run | frequency | recorded equity points | recorded max DD | comparability |",
+            "|---|---|---:|---:|---|",
+        ]
+    )
+    frequency_counts = Counter(row["frequency"] or "unknown" for row in summaries)
+    for row in summaries:
+        frequency = row["frequency"] or "unknown"
+        comparability = (
+            "compare within this frequency only"
+            if frequency_counts[frequency] > 1
+            else "no same-frequency peer in this report"
+        )
+        lines.append(
+            f"| {row['label']} | {frequency} | {row['months']} | "
+            f"{pct(row['recorded_max_drawdown'])} | {comparability} |"
         )
     all_failure_types = sorted({key for row in summaries for key in row["failures"]})
     lines.extend(["", "## Failure Cases", "", "| failure type | " + " | ".join(row["label"] for row in summaries) + " |"])
@@ -133,7 +160,7 @@ def write_report(path: Path, summaries: list[dict[str, Any]]) -> None:
             "",
             "This comparison is a lightweight research summary. Read each source run's candidate and failure-case outputs before drawing conclusions.",
             "",
-            "Max drawdown is computed on each run's recorded equity points. Runs with different rebalance frequencies have different sampling density, so monthly and quarterly drawdowns are not directly comparable.",
+            "Recorded max drawdown is intentionally separated from the main comparison table. Runs with different rebalance frequencies have different sampling density, so monthly and quarterly drawdowns are not directly comparable.",
             "",
             "This script only compares the runs provided on the command line. It is not an append-only experiment registry and cannot protect against selecting only the best runs after many trials.",
         ]

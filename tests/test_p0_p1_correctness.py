@@ -1,0 +1,230 @@
+from __future__ import annotations
+
+import csv
+import sys
+import tempfile
+import unittest
+from datetime import date, timedelta
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import run_qvm_walkforward  # noqa: E402
+from analyze_factor_forward_returns import PricePoint as FactorPricePoint  # noqa: E402
+from analyze_factor_forward_returns import future_return as factor_future_return  # noqa: E402
+from build_factors import return_with_skip  # noqa: E402
+from download_jquants import convert_master, has_trade  # noqa: E402
+from validate_contracts import validate_contracts  # noqa: E402
+
+
+def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+class P0P1CorrectnessTest(unittest.TestCase):
+    def test_jquants_conversion_does_not_overstate_tradability(self) -> None:
+        self.assertFalse(has_trade({"C": "100", "Vo": "0", "Va": "0"}))
+        self.assertTrue(has_trade({"C": "100", "Vo": "100", "Va": "10000"}))
+
+        converted = convert_master([{"Code": "1001", "CoName": "Sample"}], "2026-05-15")
+
+        self.assertEqual("", converted[0]["tradable_flag"])
+        self.assertEqual("snapshot_only_missing_lifecycle_dates", converted[0]["listing_lifecycle_status"])
+
+    def test_snapshot_only_listings_fail_contract_validation(self) -> None:
+        config = {"universe": {"min_ipo_age_trading_days": 0, "liquidity_lookback_days": 0}}
+        listings = [
+            {
+                "code": "1001",
+                "name": "Snapshot",
+                "market": "Prime",
+                "sector": "Tech",
+                "listed_date": "",
+                "delisted_date": "",
+                "security_type": "common_stock",
+                "is_common_stock": "true",
+                "is_etf_reit_infra": "false",
+                "tradable_flag": "",
+                "lot_size": "100",
+                "listing_lifecycle_status": "snapshot_only_missing_lifecycle_dates",
+            }
+        ]
+        prices = [
+            {
+                "date": "2026-01-31",
+                "code": "1001",
+                "unadjusted_close": "1000",
+                "adjusted_close": "1000",
+                "trading_value": "1000000",
+                "tradable_flag": "true",
+                "price_limit_flag": "false",
+            }
+        ]
+        fundamentals = [
+            {
+                "code": "1001",
+                "available_date": "2026-01-15",
+                "available_time": "15:00",
+                "document_type": "annual",
+                "operating_profit": "100",
+                "net_profit": "80",
+                "equity": "1000",
+                "total_assets": "2000",
+                "shares_outstanding": "100",
+            }
+        ]
+
+        issues, _summary = validate_contracts(
+            config=config,
+            listing_rows=listings,
+            price_rows=prices,
+            fundamental_rows=fundamentals,
+        )
+
+        error_checks = {row["check"] for row in issues if row["severity"] == "error"}
+        self.assertIn("listing_lifecycle_coverage", error_checks)
+
+    def test_factor_forward_return_counts_terminal_price_as_delisting_loss(self) -> None:
+        calendar = [date(2026, 1, 1) + timedelta(days=index) for index in range(5)]
+        points = [
+            FactorPricePoint(date=date(2026, 1, 1), adjusted_close=100.0),
+            FactorPricePoint(date=date(2026, 1, 2), adjusted_close=90.0),
+        ]
+
+        result = factor_future_return(points, calendar, date(2026, 1, 1), 3)
+
+        self.assertEqual("assumed_delisting_loss", result.status)
+        self.assertEqual(-1.0, result.value)
+
+    def test_factor_momentum_uses_market_calendar_not_per_code_row_count(self) -> None:
+        calendar = [date(2026, 1, 1) + timedelta(days=index) for index in range(10)]
+        rows = [
+            {"date": "2026-01-01", "adjusted_close": "100"},
+            {"date": "2026-01-02", "adjusted_close": "200"},
+            {"date": "2026-01-09", "adjusted_close": "110"},
+            {"date": "2026-01-10", "adjusted_close": "120"},
+        ]
+
+        value = return_with_skip(rows, calendar, date(2026, 1, 10), lookback_days=4, skip_days=1)
+
+        self.assertAlmostEqual(-0.45, value or 0)
+
+    def test_walkforward_closes_terminal_holding_at_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            prices = temp / "prices.csv"
+            listings = temp / "listings.csv"
+            fundamentals = temp / "fundamentals.csv"
+            out_dir = temp / "out"
+            report_dir = temp / "reports"
+
+            write_csv(
+                prices,
+                [
+                    {
+                        "date": "2026-01-31",
+                        "code": "1001",
+                        "unadjusted_open": 100,
+                        "unadjusted_close": 100,
+                        "adjusted_close": 100,
+                        "trading_value": 10_000_000,
+                        "price_limit_flag": "false",
+                    },
+                    {
+                        "date": "2026-02-28",
+                        "code": "2002",
+                        "unadjusted_open": 100,
+                        "unadjusted_close": 100,
+                        "adjusted_close": 100,
+                        "trading_value": 10_000_000,
+                        "price_limit_flag": "false",
+                    },
+                ],
+                [
+                    "date",
+                    "code",
+                    "unadjusted_open",
+                    "unadjusted_close",
+                    "adjusted_close",
+                    "trading_value",
+                    "price_limit_flag",
+                ],
+            )
+            write_csv(listings, [], ["code"])
+            write_csv(fundamentals, [], ["code"])
+
+            original_argv = sys.argv[:]
+            original_run_stages = run_qvm_walkforward.run_stages
+
+            def fake_run_stages(args, rebalance_date):
+                suffix = rebalance_date.strftime("%Y%m%d")
+                universe = temp / "stage" / f"universe_{suffix}.csv"
+                factors = temp / "stage" / f"factors_{suffix}.csv"
+                scores = temp / "stage" / f"scores_{suffix}.csv"
+                write_csv(
+                    universe,
+                    [{"code": "1001", "lot_size": "100", "median_60d_trading_value": "10000000"}],
+                    ["code", "lot_size", "median_60d_trading_value"],
+                )
+                write_csv(factors, [{"code": "1001"}], ["code"])
+                write_csv(scores, [{"code": "1001", "rank": "1"}], ["code", "rank"])
+                return universe, factors, scores
+
+            try:
+                run_qvm_walkforward.run_stages = fake_run_stages
+                sys.argv = [
+                    "run_qvm_walkforward.py",
+                    "--config",
+                    str(ROOT / "configs" / "qvm_v0_1.example.yml"),
+                    "--listings",
+                    str(listings),
+                    "--prices",
+                    str(prices),
+                    "--fundamentals",
+                    str(fundamentals),
+                    "--start-date",
+                    "2026-01-31",
+                    "--end-date",
+                    "2026-02-28",
+                    "--frequency",
+                    "monthly",
+                    "--execution-price",
+                    "rebalance_close",
+                    "--capital-jpy",
+                    "10100",
+                    "--out-dir",
+                    str(out_dir),
+                    "--report-dir",
+                    str(report_dir),
+                    "--no-manifest",
+                    "--skip-stage-manifest",
+                    "--run-label",
+                    "delist_test",
+                ]
+
+                self.assertEqual(0, run_qvm_walkforward.main())
+            finally:
+                run_qvm_walkforward.run_stages = original_run_stages
+                sys.argv = original_argv
+
+            with (out_dir / "qvm_walkforward_summary_delist_test_202601_202602.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as file:
+                summary_rows = list(csv.DictReader(file))
+            with (out_dir / "qvm_walkforward_failure_cases_delist_test_202601_202602.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as file:
+                failure_rows = list(csv.DictReader(file))
+
+            self.assertLess(float(summary_rows[-1]["portfolio_equity_after_cost"]), 200)
+            self.assertIn("assumed_delisting_loss", {row["failure_type"] for row in failure_rows})
+
+
+if __name__ == "__main__":
+    unittest.main()

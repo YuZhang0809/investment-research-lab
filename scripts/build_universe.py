@@ -62,9 +62,12 @@ def group_prices(rows: list[dict[str, str]]) -> dict[str, list[PricePoint]]:
         code = (row.get("code") or "").strip()
         if not code:
             continue
+        row_date = parse_date(row.get("date"), field_name="prices.date")
+        if row_date is None:
+            continue
         grouped[code].append(
             PricePoint(
-                date=parse_date(row.get("date"), field_name="prices.date"),
+                date=row_date,
                 trading_value=parse_float(row.get("trading_value")),
                 unadjusted_close=parse_float(
                     row.get("unadjusted_close") or row.get("close") or row.get("price")
@@ -76,6 +79,15 @@ def group_prices(rows: list[dict[str, str]]) -> dict[str, list[PricePoint]]:
     for values in grouped.values():
         values.sort(key=lambda item: item.date)
     return grouped
+
+
+def price_on_date(points: list[PricePoint], target: Any) -> PricePoint | None:
+    for point in points:
+        if point.date == target:
+            return point
+        if point.date > target:
+            return None
+    return None
 
 
 def group_fundamentals(rows: list[dict[str, str]], rebalance_date: Any) -> dict[str, bool]:
@@ -141,8 +153,8 @@ def evaluate_row(
     if not allowed:
         reasons.append(reason)
 
-    listing_tradable = parse_bool(row.get("tradable_flag"), default=True)
-    if config["universe"].get("require_tradable_on_rebalance_date", True) and not listing_tradable:
+    listing_tradable = parse_bool(row.get("tradable_flag"), default=None)
+    if config["universe"].get("require_tradable_on_rebalance_date", True) and listing_tradable is False:
         reasons.append("listing_not_tradable")
 
     all_price_points = [point for point in prices_by_code.get(code, []) if point.date <= rebalance_date]
@@ -164,12 +176,15 @@ def evaluate_row(
         if median_trading_value is None or median_trading_value < min_trading_value_float:
             reasons.append(f"below_min_median_trading_value:{median_trading_value}")
 
-    latest = all_price_points[-1] if all_price_points else None
+    rebalance_price = price_on_date(prices_by_code.get(code, []), rebalance_date)
+    latest = rebalance_price or (all_price_points[-1] if all_price_points else None)
     if latest is None:
         reasons.append("no_price_on_or_before_rebalance")
     elif config["universe"].get("require_tradable_on_rebalance_date", True):
-        if latest.tradable_flag is False:
-            reasons.append("latest_price_not_tradable")
+        if rebalance_price is None:
+            reasons.append("no_price_on_rebalance_date")
+        elif rebalance_price.tradable_flag is False:
+            reasons.append("price_not_tradable_on_rebalance_date")
 
     has_fundamentals = fundamentals_by_code.get(code, False)
     if config["universe"].get("require_fundamentals", True) and not has_fundamentals:
@@ -190,7 +205,7 @@ def evaluate_row(
         "latest_price_date": latest.date if latest else None,
         "latest_unadjusted_close": latest.unadjusted_close if latest else None,
         "has_fundamentals": has_fundamentals,
-        "tradable_flag": listing_tradable and (latest.tradable_flag if latest else False),
+        "tradable_flag": (listing_tradable is not False) and (rebalance_price.tradable_flag if rebalance_price else False),
         "price_limit_flag": latest.price_limit_flag if latest else False,
     }
     return output_row, reasons

@@ -7,7 +7,7 @@ from time import sleep
 from typing import Any
 
 from jquants_client import DEFAULT_API_KEY_ENV, require_api_key, request_paginated
-from research_common import append_manifest, write_csv
+from research_common import append_manifest, parse_float, write_csv
 
 
 DEFAULT_DATE = "2026-05-15"
@@ -189,9 +189,10 @@ def convert_master(rows: list[dict[str, Any]], date_value: str) -> list[dict[str
                 "security_type": "etf" if non_equity else "common_stock",
                 "is_common_stock": "false" if non_equity else "true",
                 "is_etf_reit_infra": "true" if non_equity else "false",
-                "tradable_flag": "true",
+                "tradable_flag": "",
                 "lot_size": "100",
                 "source_date": row.get("Date") or date_value,
+                "listing_lifecycle_status": "snapshot_only_missing_lifecycle_dates",
                 "market_code": row.get("Mkt", ""),
                 "sector33_code": row.get("S33", ""),
                 "scale_category": row.get("ScaleCat", ""),
@@ -201,7 +202,10 @@ def convert_master(rows: list[dict[str, Any]], date_value: str) -> list[dict[str
 
 
 def has_trade(row: dict[str, Any]) -> bool:
-    return any(row.get(field) not in (None, "") for field in ["O", "H", "L", "C", "Vo", "Va"])
+    close = parse_float(row.get("C"))
+    volume = parse_float(row.get("Vo"), default=0.0) or 0.0
+    trading_value = parse_float(row.get("Va"), default=0.0) or 0.0
+    return close is not None and close > 0 and (volume > 0 or trading_value > 0)
 
 
 def price_limit_flag(row: dict[str, Any]) -> bool:
@@ -368,6 +372,7 @@ def main() -> int:
                 "tradable_flag",
                 "lot_size",
                 "source_date",
+                "listing_lifecycle_status",
                 "market_code",
                 "sector33_code",
                 "scale_category",

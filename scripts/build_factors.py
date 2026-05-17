@@ -6,7 +6,16 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from research_common import append_manifest, month_key, parse_date, parse_float, read_csv, write_csv
+from research_common import (
+    append_manifest,
+    month_key,
+    parse_date,
+    parse_float,
+    read_csv,
+    trading_calendar_from_rows,
+    trading_day_offset,
+    write_csv,
+)
 
 
 TRADING_DAYS_1M = 21
@@ -50,15 +59,35 @@ def adjusted_close(row: dict[str, str] | None) -> float | None:
     return parse_float(row.get("adjusted_close") or row.get("unadjusted_close"))
 
 
-def return_with_skip(rows: list[dict[str, str]], lookback_days: int, skip_days: int) -> float | None:
-    if len(rows) < lookback_days + 1:
+def price_on_or_before(rows: list[dict[str, str]], target: date) -> dict[str, str] | None:
+    latest: dict[str, str] | None = None
+    for row in rows:
+        row_date = price_date(row)
+        if row_date is None:
+            continue
+        if row_date > target:
+            break
+        latest = row
+    return latest
+
+
+def return_with_skip(
+    rows: list[dict[str, str]],
+    calendar: list[date],
+    rebalance_date: date,
+    lookback_days: int,
+    skip_days: int,
+) -> float | None:
+    end_date = trading_day_offset(calendar, rebalance_date, -skip_days, mode="on_or_before")
+    start_date = trading_day_offset(calendar, rebalance_date, -lookback_days, mode="on_or_before")
+    if start_date is None or end_date is None or start_date >= end_date:
         return None
-    end_index = -1 - skip_days
-    start_index = -1 - lookback_days
-    if abs(start_index) > len(rows) or abs(end_index) > len(rows):
+    start_row = price_on_or_before(rows, start_date)
+    end_row = price_on_or_before(rows, end_date)
+    if start_row is None or end_row is None:
         return None
-    end_price = adjusted_close(rows[end_index])
-    start_price = adjusted_close(rows[start_index])
+    end_price = adjusted_close(end_row)
+    start_price = adjusted_close(start_row)
     if end_price is None or start_price is None or start_price <= 0:
         return None
     return end_price / start_price - 1.0
@@ -103,6 +132,7 @@ def build_factors(
     fundamental_rows: list[dict[str, str]],
 ) -> list[dict[str, Any]]:
     prices_by_code = group_by_code(price_rows)
+    calendar = trading_calendar_from_rows(price_rows)
     fundamentals_by_code = group_by_code(fundamental_rows)
     factor_rows: list[dict[str, Any]] = []
 
@@ -128,8 +158,20 @@ def build_factors(
             "equity_to_assets": safe_ratio(equity, total_assets),
             "earnings_yield": safe_ratio(net_profit, market_cap),
             "book_to_market": safe_ratio(equity, market_cap),
-            "return_12_1": return_with_skip(prices, TRADING_DAYS_12M, TRADING_DAYS_1M),
-            "return_6_1": return_with_skip(prices, TRADING_DAYS_6M, TRADING_DAYS_1M),
+            "return_12_1": return_with_skip(
+                prices,
+                calendar,
+                rebalance_date,
+                TRADING_DAYS_12M,
+                TRADING_DAYS_1M,
+            ),
+            "return_6_1": return_with_skip(
+                prices,
+                calendar,
+                rebalance_date,
+                TRADING_DAYS_6M,
+                TRADING_DAYS_1M,
+            ),
         }
         missing_flags = [name for name, value in raw_values.items() if value is None]
 

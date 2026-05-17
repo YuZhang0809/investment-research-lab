@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+from bisect import bisect_left, bisect_right
 from datetime import date, datetime
 from pathlib import Path
 from statistics import median
@@ -111,6 +112,38 @@ def median_or_none(values: list[float]) -> float | None:
 
 def month_key(value: date) -> str:
     return value.strftime("%Y%m")
+
+
+def trading_calendar_from_rows(rows: list[dict[str, str]], date_column: str = "date") -> list[date]:
+    values: set[date] = set()
+    for row in rows:
+        value = parse_date(row.get(date_column), field_name=date_column)
+        if value is not None:
+            values.add(value)
+    return sorted(values)
+
+
+def trading_day_offset(
+    calendar: list[date],
+    anchor: date,
+    offset: int,
+    *,
+    mode: str = "on_or_after",
+) -> date | None:
+    if not calendar:
+        return None
+    if mode == "on_or_after":
+        index = bisect_left(calendar, anchor)
+    elif mode == "after":
+        index = bisect_right(calendar, anchor)
+    elif mode == "on_or_before":
+        index = bisect_right(calendar, anchor) - 1
+    else:
+        raise ValueError(f"Unsupported trading day anchor mode: {mode}")
+    target_index = index + offset
+    if target_index < 0 or target_index >= len(calendar):
+        return None
+    return calendar[target_index]
 
 
 def append_manifest(

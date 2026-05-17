@@ -6,7 +6,15 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
-from research_common import append_manifest, parse_date, parse_float, read_csv, write_csv
+from research_common import (
+    append_manifest,
+    parse_date,
+    parse_float,
+    read_csv,
+    trading_calendar_from_rows,
+    trading_day_offset,
+    write_csv,
+)
 
 
 WINDOWS = [1, 5, 20, 60]
@@ -55,22 +63,41 @@ def build_price_index(rows: list[dict[str, str]]) -> dict[str, list[PricePoint]]
     return grouped
 
 
-def first_after(points: list[PricePoint], event_date: date) -> int | None:
-    for index, point in enumerate(points):
-        if point.date > event_date:
-            return index
+def price_on_date(points: list[PricePoint], target: date) -> PricePoint | None:
+    for point in points:
+        if point.date == target:
+            return point
+        if point.date > target:
+            return None
     return None
 
 
-def drift_return(points: list[PricePoint], entry_index: int, window: int) -> float | None:
-    exit_index = entry_index + window
-    if entry_index >= len(points) or exit_index >= len(points):
-        return None
-    entry = points[entry_index].adjusted_close
-    exit_value = points[exit_index].adjusted_close
+def has_price_after(points: list[PricePoint], target: date) -> bool:
+    return any(point.date > target for point in points)
+
+
+def drift_return(
+    points: list[PricePoint],
+    calendar: list[date],
+    entry_date: date,
+    window: int,
+) -> tuple[float | None, str]:
+    entry_point = price_on_date(points, entry_date)
+    if entry_point is None:
+        return None, "missing_entry_price"
+    exit_date = trading_day_offset(calendar, entry_date, window, mode="on_or_after")
+    if exit_date is None:
+        return None, "insufficient_forward_window"
+    exit_point = price_on_date(points, exit_date)
+    if exit_point is None:
+        if not has_price_after(points, exit_date) and points[-1].date < exit_date:
+            return -1.0, "assumed_delisting_loss"
+        return None, "missing_exit_price"
+    entry = entry_point.adjusted_close
+    exit_value = exit_point.adjusted_close
     if entry <= 0:
-        return None
-    return exit_value / entry - 1.0
+        return None, "invalid_entry_price"
+    return exit_value / entry - 1.0, "ok"
 
 
 def fmt(value: float | None) -> str:
@@ -82,21 +109,28 @@ def fmt(value: float | None) -> str:
 def main() -> int:
     args = build_parser().parse_args()
     event_rows = read_csv(args.events)
-    price_index = build_price_index(read_csv(args.prices))
+    price_rows = read_csv(args.prices)
+    price_index = build_price_index(price_rows)
+    calendar = trading_calendar_from_rows(price_rows)
     output_rows: list[dict[str, str]] = []
     for row in event_rows:
         event_date = parse_announcement_date(row.get("announcement_datetime", ""))
         points = price_index.get(row.get("code", ""), [])
-        entry_index = first_after(points, event_date) if event_date is not None else None
+        entry_date = trading_day_offset(calendar, event_date, 0, mode="after") if event_date is not None else None
         enriched = dict(row)
-        if entry_index is not None:
-            enriched["entry_date"] = points[entry_index].date.isoformat()
+        if entry_date is not None:
+            enriched["entry_date"] = entry_date.isoformat()
+            enriched["entry_status"] = "ok" if price_on_date(points, entry_date) else "missing_entry_price"
             for window in WINDOWS:
-                enriched[f"next_{window}d_return"] = fmt(drift_return(points, entry_index, window))
+                value, status = drift_return(points, calendar, entry_date, window)
+                enriched[f"next_{window}d_return"] = fmt(value)
+                enriched[f"next_{window}d_status"] = status
         else:
             enriched["entry_date"] = ""
+            enriched["entry_status"] = "missing_entry_date"
             for window in WINDOWS:
-                enriched.setdefault(f"next_{window}d_return", "")
+                enriched[f"next_{window}d_return"] = ""
+                enriched[f"next_{window}d_status"] = "missing_entry_date"
         output_rows.append(enriched)
 
     suffix = args.run_label
@@ -110,6 +144,7 @@ def main() -> int:
         "event_id",
         "announcement_datetime",
         "entry_date",
+        "entry_status",
         "code",
         "company_name",
         "document_type",
@@ -120,9 +155,13 @@ def main() -> int:
         "parse_confidence",
         "notes",
         "next_1d_return",
+        "next_1d_status",
         "next_5d_return",
+        "next_5d_status",
         "next_20d_return",
+        "next_20d_status",
         "next_60d_return",
+        "next_60d_status",
     ]
     write_csv(output_path, output_rows, fieldnames)
     if not args.no_manifest:
