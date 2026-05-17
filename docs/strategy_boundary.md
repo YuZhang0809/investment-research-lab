@@ -14,6 +14,8 @@ The public engine may own reusable mechanics:
 - portfolio construction constraints such as holdings count, lot size, and ADV
   caps
 - walk-forward simulation, reporting, and validation code
+- lightweight experiment protocols, run ledgers, and decision-note templates
+  for recording what was tested and why
 - public-safe example configs using synthetic or illustrative parameters
 - tests built from synthetic fixtures
 
@@ -28,13 +30,20 @@ The public engine must not contain:
 - real private universe files
 - real candidate lists or selected tickers
 - real reports, final equity, tax, execution, or benchmark results
+- real run ledgers, protocols, notes, or final research conclusions
 - private parameter choices that represent a research conclusion
-- private go/no-go decisions
+- private go/no-go decisions or paper-test decisions
 - strategy names that reveal a live private implementation
+- audit systems, compliance workflows, approvals, user roles, permissions, or
+  immutable event stores
 
 For example, a generic weighted scoring module is public-safe. A config that
 states a private final allocation such as "use this value/quality weight on the
 Japan small-cap universe" belongs in a private workspace.
+
+A generic run ledger schema is public-safe. A ledger containing real run IDs,
+private universes, benchmark results, decisions, or notes belongs in a private
+workspace.
 
 ## Config Rule
 

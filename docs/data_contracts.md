@@ -32,3 +32,30 @@ source,file_path,downloaded_at,vendor,schema_version,date_range,checksum,notes
 
 The real manifest is local-only and ignored by git. Commit only
 `data/manifest/data_manifest.example.csv`.
+
+## Run Ledger
+
+Public-safe template:
+
+```text
+experiments/run_ledger.example.csv
+```
+
+Minimum CSV contract:
+
+```text
+run_id,run_at,experiment_id,phase,config_hash,data_hash,universe_label,period_start,period_end,strategy_label,rebalance_frequency,cost_scenario,execution_price,key_metric_after_cost,key_metric_after_tax,key_metric_benchmark,market_benchmark_id,market_beta,market_alpha,tracking_error,information_ratio,max_drawdown,avg_cash_pct,avg_turnover,notes_path,decision,decision_reason
+```
+
+Allowed `decision` values:
+
+```text
+EXPLORATORY
+REVIEW
+REJECT
+PAPER_TEST
+```
+
+The optional market fields are placeholders for later alpha/beta analysis and
+may be empty. Real run ledgers belong in private workspaces because they can
+contain real research results and decisions.

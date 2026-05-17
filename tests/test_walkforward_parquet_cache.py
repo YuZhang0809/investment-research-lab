@@ -146,10 +146,17 @@ def write_synthetic_walkforward_fixture(temp: Path) -> tuple[Path, Path, Path]:
     return listings, prices, fundamentals
 
 
-def cache_namespace(cache_dir: Path) -> Path:
-    namespaces = [path for path in cache_dir.iterdir() if path.is_dir()]
+def cache_namespaces(cache_dir: Path, layer: str) -> list[Path]:
+    layer_dir = cache_dir / layer
+    if not layer_dir.exists():
+        return []
+    return [path for path in layer_dir.iterdir() if path.is_dir()]
+
+
+def cache_namespace(cache_dir: Path, layer: str) -> Path:
+    namespaces = cache_namespaces(cache_dir, layer)
     if len(namespaces) != 1:
-        raise AssertionError(f"Expected one cache namespace, found {namespaces}")
+        raise AssertionError(f"Expected one {layer} cache namespace, found {namespaces}")
     return namespaces[0]
 
 
@@ -195,18 +202,22 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
             ]
 
             subprocess.run([*base_command, "--force-rebuild"], cwd=ROOT, check=True)
-            namespace = cache_namespace(cache_dir)
+            inputs_namespace = cache_namespace(cache_dir, "inputs")
+            universe_namespace = cache_namespace(cache_dir, "universe")
+            factors_namespace = cache_namespace(cache_dir, "factors")
+            scores_namespace = cache_namespace(cache_dir, "scores")
+            run_namespace = cache_namespace(cache_dir, "rebalance_candidates")
 
             expected_cache_files = [
-                namespace / "inputs" / "processed_prices.parquet",
-                namespace / "inputs" / "processed_fundamentals.parquet",
-                namespace / "universe" / "universe_202603.parquet",
-                namespace / "factors" / "factors_202603.parquet",
-                namespace / "scores" / "scores_202603_qvm.parquet",
+                inputs_namespace / "processed_prices.parquet",
+                inputs_namespace / "processed_fundamentals.parquet",
+                universe_namespace / "universe_202603.parquet",
+                factors_namespace / "factors_202603.parquet",
+                scores_namespace / "scores_202603_qvm.parquet",
             ]
             for path in expected_cache_files:
                 self.assertTrue(path.exists(), path)
-            candidate_files = list((namespace / "rebalance_candidates").glob("rebalance_candidates_202603_*.parquet"))
+            candidate_files = list(run_namespace.glob("rebalance_candidates_202603_*.parquet"))
             self.assertEqual(1, len(candidate_files))
             self.assertIn("capital5000000", candidate_files[0].name)
             self.assertIn("rebalance_close_base", candidate_files[0].name)
@@ -226,7 +237,7 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
             self.assertEqual("True", summary[-1]["performance_conclusion_allowed"])
             self.assertIn("cache_fingerprint", summary[-1])
 
-            scores_cache = namespace / "scores" / "scores_202603_qvm.parquet"
+            scores_cache = scores_namespace / "scores_202603_qvm.parquet"
             cache_mtime = scores_cache.stat().st_mtime_ns
             subprocess.run(base_command, cwd=ROOT, check=True)
             self.assertEqual(cache_mtime, scores_cache.stat().st_mtime_ns)
@@ -313,13 +324,86 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
                 ]
 
             subprocess.run(command(config_a), cwd=ROOT, check=True)
-            first_namespaces = {path.name for path in cache_dir.iterdir() if path.is_dir()}
-            self.assertEqual(1, len(first_namespaces))
+            first_score_namespaces = {path.name for path in cache_namespaces(cache_dir, "scores")}
+            self.assertEqual(1, len(first_score_namespaces))
+            self.assertEqual(1, len(cache_namespaces(cache_dir, "inputs")))
+            self.assertEqual(1, len(cache_namespaces(cache_dir, "universe")))
+            self.assertEqual(1, len(cache_namespaces(cache_dir, "factors")))
 
             subprocess.run(command(config_b), cwd=ROOT, check=True)
-            second_namespaces = {path.name for path in cache_dir.iterdir() if path.is_dir()}
-            self.assertEqual(2, len(second_namespaces))
-            self.assertTrue(first_namespaces < second_namespaces)
+            second_score_namespaces = {path.name for path in cache_namespaces(cache_dir, "scores")}
+            self.assertEqual(2, len(second_score_namespaces))
+            self.assertTrue(first_score_namespaces < second_score_namespaces)
+            self.assertEqual(1, len(cache_namespaces(cache_dir, "inputs")))
+            self.assertEqual(1, len(cache_namespaces(cache_dir, "universe")))
+            self.assertEqual(1, len(cache_namespaces(cache_dir, "factors")))
+
+    def test_weighted_group_walkforward_and_score_config_cache_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            cache_dir = temp / "cache"
+            config_a = temp / "weighted_a.yml"
+            config_b = temp / "weighted_b.yml"
+            config_text = (ROOT / "configs" / "qvm_v0_1.example.yml").read_text(encoding="utf-8")
+            config_a.write_text(config_text, encoding="utf-8")
+            config_b.write_text(
+                config_text.replace("      value: 0.4", "      value: 0.6", 1),
+                encoding="utf-8",
+            )
+
+            def command(config: Path) -> list[str]:
+                return [
+                    sys.executable,
+                    str(ROOT / "scripts" / "run_qvm_walkforward.py"),
+                    "--config",
+                    str(config),
+                    "--listings",
+                    str(listings),
+                    "--prices",
+                    str(prices),
+                    "--fundamentals",
+                    str(fundamentals),
+                    "--start-date",
+                    "2026-03-01",
+                    "--end-date",
+                    "2026-03-31",
+                    "--cache-format",
+                    "parquet",
+                    "--cache-dir",
+                    str(cache_dir),
+                    "--out-dir",
+                    str(temp / "out"),
+                    "--report-dir",
+                    str(temp / "reports"),
+                    "--strategy-version",
+                    "weighted_groups",
+                    "--no-manifest",
+                    "--skip-stage-manifest",
+                ]
+
+            subprocess.run(command(config_a), cwd=ROOT, check=True)
+            first_score_namespaces = {path.name for path in cache_namespaces(cache_dir, "scores")}
+            self.assertEqual(1, len(first_score_namespaces))
+            scores_namespace_a = cache_namespace(cache_dir, "scores")
+            score_files = list(scores_namespace_a.glob("scores_202603_weighted_groups.parquet"))
+            self.assertEqual(1, len(score_files))
+            rows = query(
+                f"""
+                select composite_score, qvm_score, filter_status
+                from {parquet_scan(score_files[0])}
+                """
+            )
+            self.assertIn("composite_score", rows.columns)
+            self.assertTrue((rows["filter_status"] != "").all())
+
+            subprocess.run(command(config_b), cwd=ROOT, check=True)
+            second_score_namespaces = {path.name for path in cache_namespaces(cache_dir, "scores")}
+            self.assertEqual(2, len(second_score_namespaces))
+            self.assertTrue(first_score_namespaces < second_score_namespaces)
+            self.assertEqual(1, len(cache_namespaces(cache_dir, "inputs")))
+            self.assertEqual(1, len(cache_namespaces(cache_dir, "universe")))
+            self.assertEqual(1, len(cache_namespaces(cache_dir, "factors")))
 
     def test_cache_namespace_changes_when_input_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -355,17 +439,73 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
             ]
 
             subprocess.run(command, cwd=ROOT, check=True)
-            first_namespaces = {path.name for path in cache_dir.iterdir() if path.is_dir()}
-            self.assertEqual(1, len(first_namespaces))
+            first_input_namespaces = {path.name for path in cache_namespaces(cache_dir, "inputs")}
+            self.assertEqual(1, len(first_input_namespaces))
 
             text = fundamentals.read_text(encoding="utf-8")
             self.assertIn("75000000", text)
             fundamentals.write_text(text.replace("75000000", "75000001", 1), encoding="utf-8")
 
             subprocess.run(command, cwd=ROOT, check=True)
-            second_namespaces = {path.name for path in cache_dir.iterdir() if path.is_dir()}
-            self.assertEqual(2, len(second_namespaces))
-            self.assertTrue(first_namespaces < second_namespaces)
+            second_input_namespaces = {path.name for path in cache_namespaces(cache_dir, "inputs")}
+            self.assertEqual(2, len(second_input_namespaces))
+            self.assertTrue(first_input_namespaces < second_input_namespaces)
+            self.assertEqual(2, len(cache_namespaces(cache_dir, "universe")))
+            self.assertEqual(2, len(cache_namespaces(cache_dir, "factors")))
+            self.assertEqual(2, len(cache_namespaces(cache_dir, "scores")))
+
+    def test_portfolio_parameter_change_reuses_upstream_cache_layers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            cache_dir = temp / "cache"
+            base_command = [
+                sys.executable,
+                str(ROOT / "scripts" / "run_qvm_walkforward.py"),
+                "--config",
+                str(ROOT / "configs" / "qvm_v0_1.example.yml"),
+                "--listings",
+                str(listings),
+                "--prices",
+                str(prices),
+                "--fundamentals",
+                str(fundamentals),
+                "--start-date",
+                "2026-03-01",
+                "--end-date",
+                "2026-03-31",
+                "--cache-format",
+                "parquet",
+                "--cache-dir",
+                str(cache_dir),
+                "--out-dir",
+                str(temp / "out"),
+                "--report-dir",
+                str(temp / "reports"),
+                "--no-manifest",
+                "--skip-stage-manifest",
+            ]
+
+            subprocess.run([*base_command, "--target-holdings", "15", "--adv-cap", "0.005"], cwd=ROOT, check=True)
+            universe_cache = cache_namespace(cache_dir, "universe") / "universe_202603.parquet"
+            factors_cache = cache_namespace(cache_dir, "factors") / "factors_202603.parquet"
+            scores_cache = cache_namespace(cache_dir, "scores") / "scores_202603_qvm.parquet"
+            mtimes = {
+                "universe": universe_cache.stat().st_mtime_ns,
+                "factors": factors_cache.stat().st_mtime_ns,
+                "scores": scores_cache.stat().st_mtime_ns,
+            }
+
+            subprocess.run([*base_command, "--target-holdings", "30", "--adv-cap", "0.01"], cwd=ROOT, check=True)
+
+            self.assertEqual(1, len(cache_namespaces(cache_dir, "inputs")))
+            self.assertEqual(1, len(cache_namespaces(cache_dir, "universe")))
+            self.assertEqual(1, len(cache_namespaces(cache_dir, "factors")))
+            self.assertEqual(1, len(cache_namespaces(cache_dir, "scores")))
+            self.assertEqual(2, len(cache_namespaces(cache_dir, "rebalance_candidates")))
+            self.assertEqual(mtimes["universe"], universe_cache.stat().st_mtime_ns)
+            self.assertEqual(mtimes["factors"], factors_cache.stat().st_mtime_ns)
+            self.assertEqual(mtimes["scores"], scores_cache.stat().st_mtime_ns)
 
     def test_rebalance_candidate_cache_is_run_dependent_for_capital(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -402,13 +542,20 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
             subprocess.run(base_command, cwd=ROOT, check=True)
             subprocess.run([*base_command, "--capital-jpy", "20000000"], cwd=ROOT, check=True)
 
-            namespace = cache_namespace(cache_dir)
+            namespace = cache_namespaces(cache_dir, "rebalance_candidates")
+            self.assertEqual(2, len(namespace))
             candidate_names = sorted(
-                path.name for path in (namespace / "rebalance_candidates").glob("rebalance_candidates_202603_*.parquet")
+                path.name
+                for run_namespace in namespace
+                for path in run_namespace.glob("rebalance_candidates_202603_*.parquet")
             )
             self.assertEqual(2, len(candidate_names))
             self.assertTrue(any("capital5000000" in name for name in candidate_names))
             self.assertTrue(any("capital20000000" in name for name in candidate_names))
+            self.assertEqual(1, len(cache_namespaces(cache_dir, "inputs")))
+            self.assertEqual(1, len(cache_namespaces(cache_dir, "universe")))
+            self.assertEqual(1, len(cache_namespaces(cache_dir, "factors")))
+            self.assertEqual(1, len(cache_namespaces(cache_dir, "scores")))
 
 
 if __name__ == "__main__":

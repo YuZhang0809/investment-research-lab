@@ -38,13 +38,20 @@ def floor_lot(value: float, price: float, lot: int) -> int:
     return int(value // (price * lot)) * lot
 
 
+def score_value(row: dict[str, str]) -> float | None:
+    value = parse_float(row.get("qvm_score"))
+    if value is not None:
+        return value
+    return parse_float(row.get("composite_score"))
+
+
 def main() -> int:
     args = build_parser().parse_args()
     config = load_yaml(args.config)
     rebalance_date = parse_date(args.rebalance_date, field_name="rebalance_date")
     if rebalance_date is None:
         raise ValueError("rebalance_date is required")
-    scores = [row for row in read_csv(args.scores) if parse_float(row.get("qvm_score")) is not None]
+    scores = [row for row in read_csv(args.scores) if score_value(row) is not None]
     universe_by_code = {row["code"]: row for row in read_csv(args.universe)}
     ranked = sorted(scores, key=lambda row: parse_int(row.get("rank"), default=999999) or 999999)
 
@@ -84,6 +91,7 @@ def main() -> int:
                 "name": row.get("name", ""),
                 "sector": row.get("sector", ""),
                 "qvm_score": row.get("qvm_score", ""),
+                "composite_score": row.get("composite_score", ""),
                 "research_weight": research_weight,
                 "research_target_value": target_value,
                 "latest_unadjusted_close": price,
@@ -109,6 +117,7 @@ def main() -> int:
         "name",
         "sector",
         "qvm_score",
+        "composite_score",
         "research_weight",
         "research_target_value",
         "latest_unadjusted_close",

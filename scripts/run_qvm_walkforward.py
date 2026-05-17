@@ -514,7 +514,10 @@ def score_cache_fields(raw_factors: list[str]) -> list[str]:
         "quality_score",
         "value_score",
         "momentum_score",
+        "composite_score",
         "qvm_score",
+        "filter_status",
+        "filter_reasons",
         "missing_score_components",
         *[f"{factor}_z" for factor in raw_factors],
     ]
@@ -545,34 +548,93 @@ def cache_enabled(args: argparse.Namespace) -> bool:
     return args.cache_dir is not None
 
 
-def stable_config_hash(config: dict[str, Any]) -> str:
-    payload = json.dumps(config, sort_keys=True, default=str, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+def cache_digest(payload: dict[str, Any]) -> str:
+    text = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
-def compute_cache_fingerprint(args: argparse.Namespace, config: dict[str, Any]) -> str:
-    payload = {
-        "schema_version": "walkforward_cache_v0_2",
-        "config": stable_config_hash(config),
+def cache_config(config: dict[str, Any], *keys: str) -> dict[str, Any]:
+    return {key: config.get(key, {}) for key in keys}
+
+
+def compute_cache_fingerprints(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, str]:
+    inputs_payload = {
+        "schema_version": "walkforward_inputs_cache_v0_1",
         "inputs": {
             "listings": checksum(args.listings),
             "prices": checksum(args.prices),
             "fundamentals": checksum(args.fundamentals),
         },
-        "strategy_version": args.strategy_version,
-        "frequency": args.frequency,
-        "target_holdings": args.target_holdings,
-        "adv_cap": args.adv_cap,
     }
-    text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    inputs_fingerprint = cache_digest(inputs_payload)
+    universe_fingerprint = cache_digest(
+        {
+            "schema_version": "walkforward_universe_cache_v0_1",
+            "inputs": inputs_fingerprint,
+            "config": cache_config(config, "scope", "universe"),
+        }
+    )
+    factors_fingerprint = cache_digest(
+        {
+            "schema_version": "walkforward_factors_cache_v0_1",
+            "inputs": inputs_fingerprint,
+            "universe": universe_fingerprint,
+            "factor_engine": {
+                "return_12_1": {"lookback_days": 252, "skip_days": 21},
+                "return_6_1": {"lookback_days": 126, "skip_days": 21},
+            },
+        }
+    )
+    scores_fingerprint = cache_digest(
+        {
+            "schema_version": "walkforward_scores_cache_v0_1",
+            "factors": factors_fingerprint,
+            "strategy_version": args.strategy_version,
+            "config": cache_config(config, "strategy", "factors"),
+        }
+    )
+    run_fingerprint = cache_digest(
+        {
+            "schema_version": "walkforward_run_cache_v0_1",
+            "scores": scores_fingerprint,
+            "date_range": {"start": args.start_date, "end": args.end_date},
+            "frequency": args.frequency,
+            "portfolio": cache_config(config, "portfolio", "execution", "cost_model", "tax", "missing_price_tail_policy"),
+            "execution_price": args.execution_price,
+            "cost_scenario": args.cost_scenario,
+            "capital_jpy": args.capital_jpy,
+            "tax_rate": args.tax_rate,
+        }
+    )
+    return {
+        "inputs": inputs_fingerprint,
+        "universe": universe_fingerprint,
+        "factors": factors_fingerprint,
+        "scores": scores_fingerprint,
+        "run": run_fingerprint,
+    }
 
 
-def cache_path(args: argparse.Namespace, category: str, name: str) -> Path:
+def compute_cache_fingerprint(args: argparse.Namespace, config: dict[str, Any]) -> str:
+    return compute_cache_fingerprints(args, config)["run"]
+
+
+def cache_fingerprint(args: argparse.Namespace, layer: str) -> str:
+    fingerprints = getattr(args, "_cache_fingerprints", {})
+    if layer in fingerprints:
+        return fingerprints[layer]
+    return getattr(args, "_cache_fingerprint", "unfingerprinted")
+
+
+def cache_path(args: argparse.Namespace, category: str, name: str, *, layer: str | None = None) -> Path:
     if args.cache_dir is None:
         raise ValueError("Cache path requested while cache is disabled")
-    fingerprint = getattr(args, "_cache_fingerprint", "unfingerprinted")
-    return args.cache_dir / fingerprint / category / f"{name}.{args.cache_format or 'parquet'}"
+    fingerprint = cache_fingerprint(args, layer or category)
+    return args.cache_dir / category / fingerprint / f"{name}.{args.cache_format or 'parquet'}"
+
+
+def cache_manifest_fingerprint(args: argparse.Namespace) -> str:
+    return cache_fingerprint(args, "run")
 
 
 def strategy_cache_token(args: argparse.Namespace) -> str:
@@ -667,7 +729,9 @@ def run_cached_stages(args: argparse.Namespace, rebalance_date: date) -> tuple[P
         )
         write_table(factor_rows, factors_path, format=args.cache_format or "parquet", fieldnames=FACTOR_CACHE_FIELDS)
 
-    if not scores_path.exists() or args.force_rebuild:
+    if scores_path.exists() and not args.force_rebuild:
+        score_rows = read_csv(scores_path)
+    else:
         score_rows, raw_factors = build_scores(
             config=config,
             factor_rows=factor_rows,
@@ -682,6 +746,9 @@ def run_cached_stages(args: argparse.Namespace, rebalance_date: date) -> tuple[P
             fieldnames=score_cache_fields(raw_factors),
         )
 
+    stage_rows = getattr(args, "_stage_rows", {})
+    stage_rows[suffix] = {"universe": universe_rows, "scores": score_rows}
+    args._stage_rows = stage_rows
     return universe_path, factors_path, scores_path
 
 
@@ -721,6 +788,7 @@ def write_rebalance_candidates_cache(
         args,
         "rebalance_candidates",
         f"rebalance_candidates_{suffix}_{run_dependent_candidate_token(args)}",
+        layer="run",
     )
     write_table(rows, output_path, format=args.cache_format or "parquet", fieldnames=CANDIDATE_CACHE_FIELDS)
 
@@ -890,7 +958,8 @@ def main() -> int:
     config = apply_config_overrides(load_yaml(args.config), args)
     args._config = config
     if cache_enabled(args):
-        args._cache_fingerprint = compute_cache_fingerprint(args, config)
+        args._cache_fingerprints = compute_cache_fingerprints(args, config)
+        args._cache_fingerprint = args._cache_fingerprints["run"]
     start_date = parse_date(args.start_date, field_name="start_date")
     end_date = parse_date(args.end_date, field_name="end_date")
     if start_date is None or end_date is None:
@@ -949,8 +1018,9 @@ def main() -> int:
 
     for rebalance_date in dates:
         universe_path, _factors_path, scores_path = run_stages(args, rebalance_date)
-        universe_rows = read_csv(universe_path)
-        scores = read_csv(scores_path)
+        stage_rows = getattr(args, "_stage_rows", {}).get(month_key(rebalance_date), {})
+        universe_rows = stage_rows.get("universe") or read_csv(universe_path)
+        scores = stage_rows.get("scores") or read_csv(scores_path)
         universe_by_code = {row["code"]: row for row in universe_rows}
 
         if previous_date is not None:
@@ -1338,7 +1408,7 @@ def main() -> int:
             "target_holdings": args.target_holdings or config["portfolio"]["executable_portfolio"].get("target_holdings_max", ""),
             "adv_cap": max_order_to_adv,
             "tax_rate": args.tax_rate,
-            "cache_fingerprint": getattr(args, "_cache_fingerprint", ""),
+            "cache_fingerprint": cache_manifest_fingerprint(args) if cache_enabled(args) else "",
             "lifecycle_data_status": lifecycle_status,
             "performance_conclusion_allowed": conclusion_allowed,
             "strict_rebalance_price_filter": config["universe"].get("strict_rebalance_price_filter", False),

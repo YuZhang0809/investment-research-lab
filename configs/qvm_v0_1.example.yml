@@ -32,6 +32,18 @@ rebalance:
   use_available_date: true
   accounting_data_lag_days_if_no_disclosure_date: 90
 
+strategy:
+  scoring:
+    mode: weighted_groups
+    weights:
+      quality: 0.4
+      value: 0.4
+      momentum: 0.2
+  filters:
+    - group: momentum
+      rule: exclude_bottom_pct
+      pct: 20
+
 factors:
   winsorize:
     lower_pct: 1

@@ -83,6 +83,13 @@ class TableIODuckDBTest(unittest.TestCase):
 
     def test_supported_strategy_versions_produce_rankable_scores(self) -> None:
         config = {
+            "strategy": {
+                "scoring": {
+                    "mode": "weighted_groups",
+                    "weights": {"quality": 0.4, "value": 0.4, "momentum": 0.2},
+                },
+                "filters": [],
+            },
             "factors": {
                 "winsorize": {"lower_pct": 0, "upper_pct": 100},
                 "quality": {
@@ -134,6 +141,93 @@ class TableIODuckDBTest(unittest.TestCase):
             for factor in raw_factors:
                 self.assertEqual(0.0, row[f"{factor}_z"])
 
+    def test_weighted_group_scoring_respects_config_weights(self) -> None:
+        config = weighted_config(weights={"quality": 0.0, "value": 1.0, "momentum": 0.0}, filters=[])
+        factors = [
+            grouped_factor_row("1001", quality=10, value=1, momentum=1),
+            grouped_factor_row("1002", quality=1, value=10, momentum=1),
+            grouped_factor_row("1003", quality=5, value=5, momentum=1),
+        ]
+
+        scores, _raw_factors = build_scores(
+            config=config,
+            factor_rows=factors,
+            strategy_version="weighted_groups",
+        )
+
+        ranked = sorted([row for row in scores if row["rank"]], key=lambda row: int(row["rank"]))
+        self.assertEqual(["1002", "1003", "1001"], [row["code"] for row in ranked])
+        for row in scores:
+            self.assertEqual(row["composite_score"], row["qvm_score"])
+            self.assertEqual("pass", row["filter_status"])
+
+    def test_weighted_group_scoring_rejects_bad_weight_config(self) -> None:
+        factors = [grouped_factor_row("1001", quality=1, value=1, momentum=1)]
+
+        with self.assertRaisesRegex(ValueError, "Unknown score group"):
+            build_scores(
+                config=weighted_config(weights={"quality": 1.0, "profit": 1.0}, filters=[]),
+                factor_rows=factors,
+                strategy_version="weighted_groups",
+            )
+
+        with self.assertRaisesRegex(ValueError, "greater than zero"):
+            build_scores(
+                config=weighted_config(weights={"quality": 0.0, "value": 0.0}, filters=[]),
+                factor_rows=factors,
+                strategy_version="weighted_groups",
+            )
+
+    def test_bottom_pct_filter_keeps_audit_columns_and_removes_rank(self) -> None:
+        config = weighted_config(
+            weights={"quality": 0.0, "value": 1.0, "momentum": 0.0},
+            filters=[{"group": "momentum", "rule": "exclude_bottom_pct", "pct": 20}],
+        )
+        factors = [
+            grouped_factor_row("1001", quality=1, value=5, momentum=1),
+            grouped_factor_row("1002", quality=1, value=4, momentum=2),
+            grouped_factor_row("1003", quality=1, value=3, momentum=3),
+            grouped_factor_row("1004", quality=1, value=2, momentum=4),
+            grouped_factor_row("1005", quality=1, value=1, momentum=5),
+        ]
+
+        scores, _raw_factors = build_scores(
+            config=config,
+            factor_rows=factors,
+            strategy_version="weighted_groups",
+        )
+
+        by_code = {row["code"]: row for row in scores}
+        self.assertEqual("filtered", by_code["1001"]["filter_status"])
+        self.assertEqual("momentum_bottom_20pct", by_code["1001"]["filter_reasons"])
+        self.assertEqual("", by_code["1001"]["rank"])
+        self.assertNotEqual("", by_code["1001"]["composite_score"])
+        self.assertEqual(["1002", "1003", "1004", "1005"], [row["code"] for row in scores if row["rank"]])
+
+    def test_missing_filter_group_score_is_reported_separately(self) -> None:
+        config = weighted_config(
+            weights={"quality": 0.0, "value": 1.0, "momentum": 0.0},
+            filters=[{"group": "momentum", "rule": "exclude_bottom_pct", "pct": 20}],
+        )
+        factors = [
+            grouped_factor_row("1001", quality=1, value=3, momentum=None),
+            grouped_factor_row("1002", quality=1, value=2, momentum=2),
+            grouped_factor_row("1003", quality=1, value=1, momentum=3),
+        ]
+
+        scores, _raw_factors = build_scores(
+            config=config,
+            factor_rows=factors,
+            strategy_version="weighted_groups",
+        )
+
+        by_code = {row["code"]: row for row in scores}
+        self.assertEqual("missing_required_score", by_code["1001"]["filter_status"])
+        self.assertEqual("momentum_score", by_code["1001"]["filter_reasons"])
+        self.assertEqual("momentum_score", by_code["1001"]["missing_score_components"])
+        self.assertEqual("", by_code["1001"]["rank"])
+        self.assertNotIn("momentum_bottom", by_code["1001"]["filter_reasons"])
+
 
 def factor_row(code: str, value: float) -> dict[str, str]:
     return {
@@ -148,6 +242,49 @@ def factor_row(code: str, value: float) -> dict[str, str]:
         "book_to_market": str(value + 0.3),
         "return_12_1": str(value + 0.4),
         "return_6_1": str(value + 0.5),
+    }
+
+
+def weighted_config(weights: dict[str, float], filters: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "strategy": {
+            "scoring": {"mode": "weighted_groups", "weights": weights},
+            "filters": filters,
+        },
+        "factors": {
+            "winsorize": {"lower_pct": 0, "upper_pct": 100},
+            "quality": {
+                "weight": 0.4,
+                "variables": ["operating_profit_to_total_assets", "equity_to_assets"],
+            },
+            "value": {"weight": 0.4, "variables": ["earnings_yield", "book_to_market"]},
+            "momentum": {"weight": 0.2, "variables": ["return_12_1", "return_6_1"]},
+        },
+    }
+
+
+def grouped_factor_row(
+    code: str,
+    *,
+    quality: float | None,
+    value: float | None,
+    momentum: float | None,
+) -> dict[str, str]:
+    def text(number: float | None) -> str:
+        return "" if number is None else str(number)
+
+    return {
+        "rebalance_date": "2026-03-31",
+        "code": code,
+        "name": f"Synthetic {code}",
+        "sector": "Industrials",
+        "latest_unadjusted_close": "1000",
+        "operating_profit_to_total_assets": text(quality),
+        "equity_to_assets": text(quality),
+        "earnings_yield": text(value),
+        "book_to_market": text(value),
+        "return_12_1": text(momentum),
+        "return_6_1": text(momentum),
     }
 
 

@@ -17,7 +17,15 @@ mistakes.
 8. Build order constraints and failure cases.
 9. Run a single snapshot or walk-forward simulation.
 10. Generate candidate, failure-case, and performance reports.
-11. Review the output before changing factor rules or paper trading.
+11. Append the run summary to a private run ledger when the result is worth
+    remembering.
+12. Generate a lightweight decision note for REVIEW, REJECT, or PAPER_TEST
+    candidates.
+13. Review the output before changing factor rules or paper trading.
+
+The public repository provides only generic templates and scripts for this
+recordkeeping. Real ledgers, real protocols, real decision notes, and real
+conclusions stay private.
 
 ## Phase 1 Workflow Target
 
@@ -52,3 +60,34 @@ For a personal research project, strategy discovery should stay incremental:
 
 The default workflow is research-only. Live trading and auto-ordering are
 outside the scope of this repository.
+
+## Experiment Notes
+
+Before an important run, copy `experiments/experiment_protocol.example.md` into
+a private workspace and write down the question, hypothesis, phase, periods,
+planned variants, metrics, and reject conditions. This is meant to prevent
+post-hoc storytelling; it is not an approval document.
+
+After a walk-forward run, `scripts/append_run_record.py` can append one row from
+a summary CSV into a private CSV ledger. It records hashes, period, strategy
+label, execution settings, headline metrics, optional future alpha/beta fields,
+and a lightweight decision label:
+
+```text
+EXPLORATORY
+REVIEW
+REJECT
+PAPER_TEST
+```
+
+`scripts/generate_decision_note.py` can turn a ledger row or summary CSV into a
+Markdown research note with a decision, short reason, key metrics, caveats, and
+next action.
+
+These notes are deliberately not:
+
+- an audit system
+- a compliance workflow
+- an approval process
+- an immutable log
+- a database or dashboard

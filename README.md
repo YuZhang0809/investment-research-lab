@@ -19,6 +19,8 @@ not a general quant platform, live trading system, or broker integration.
 - Point-in-time universe construction
 - Generic strategy expression primitives for factors, scores, filters, target,
   order, and walk-forward pipelines
+- Lightweight public-safe experiment protocol, run ledger schema, and decision
+  note tooling
 - TDnet event-observation scaffolding
 - Synthetic examples and empty templates
 
@@ -46,6 +48,8 @@ into a compliance or platform product.
 - Real portfolio holdings
 - Real private strategy decisions, parameter choices, candidate lists, or
   go/no-go conclusions
+- Real experiment ledgers, decision notes, or protocol files with private
+  results
 - Live trading or auto-ordering
 - Raw or processed vendor datasets
 - API keys, tokens, local `.env` files, or private reports
@@ -117,6 +121,26 @@ python scripts\run_qvm_walkforward.py `
   --adv-cap 0.005 `
   --no-manifest
 ```
+
+For important research runs, keep the real ledger and notes in a private
+workspace:
+
+```powershell
+python scripts\append_run_record.py `
+  --summary <walkforward-summary.csv> `
+  --config <config.example.yml> `
+  --ledger <private-run-ledger.csv> `
+  --run-id <stable-run-id> `
+  --decision REVIEW
+
+python scripts\generate_decision_note.py `
+  --ledger <private-run-ledger.csv> `
+  --run-id <stable-run-id> `
+  --out <private-decision-note.md>
+```
+
+These are research notes. They are not approvals, audit logs, compliance
+records, or a database.
 
 ## Data Policy
 

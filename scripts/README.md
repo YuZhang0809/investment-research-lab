@@ -51,11 +51,19 @@ python scripts\run_qvm_walkforward.py `
 ```
 
 `--cache-format parquet` enables `data/processed/cache` by default unless
-`--cache-dir` is provided. Cache files live under a fingerprinted namespace
-derived from the effective config, input checksums, strategy, frequency, and
-parameter overrides, so config or input changes do not silently reuse stale
-tables. `--force-rebuild` refreshes files inside the current namespace. Summary,
-trades, holdings, equity, and failure-case outputs remain CSV.
+`--cache-dir` is provided. Cache files live under layer-specific fingerprinted
+namespaces: inputs, universe, factors, scores, and run-dependent candidate
+tables. Portfolio parameter changes such as target holdings, ADV cap, capital,
+cost, or execution timing reuse upstream universe/factor/score cache files when
+their dependencies are unchanged. Config or input changes still create new
+fingerprinted namespaces instead of silently reusing stale tables.
+`--force-rebuild` refreshes files inside the current namespaces. Summary, trades,
+holdings, equity, and failure-case outputs remain CSV.
+
+`--strategy-version weighted_groups` uses `strategy.scoring.weights` and
+`strategy.filters` from the config. It writes `composite_score`,
+`filter_status`, and `filter_reasons` while keeping `qvm_score` populated for
+the older target/order scripts during the migration.
 
 The research universe can retain names whose latest price is stale at the
 rebalance date. Those rows carry `rebalance_price_available=false` and
@@ -64,6 +72,29 @@ non-orderable unless `strict_rebalance_price_filter` removes them upstream.
 Walk-forward tail gaps are explicit through `missing_price_tail_policy`: the
 public example defaults to `warn_only`, while conservative runs can use
 `assume_zero_after_n_trading_days` with `max_stale_trading_days`.
+
+## Run Ledger And Decision Notes
+
+Run ledgers are CSV files intended for private workspaces. The public repo only
+contains the generic schema and scripts.
+
+```powershell
+python scripts\append_run_record.py `
+  --summary <qvm_walkforward_summary.csv> `
+  --config configs\qvm_v0_1.example.yml `
+  --ledger <private-run-ledger.csv> `
+  --run-id <stable-run-id> `
+  --decision REVIEW
+
+python scripts\generate_decision_note.py `
+  --ledger <private-run-ledger.csv> `
+  --run-id <stable-run-id> `
+  --out <private-decision-note.md>
+```
+
+Allowed decisions are `EXPLORATORY`, `REVIEW`, `REJECT`, and `PAPER_TEST`.
+These tools create research notes only. They do not implement approvals,
+permissions, immutable logs, compliance reports, dashboards, or schedulers.
 
 ## J-Quants
 
