@@ -88,25 +88,31 @@ def audit_prices(
     issues: list[dict[str, Any]] = []
     for code, values in group_by_code(rows).items():
         previous_date: date | None = None
-        previous_adjusted: float | None = None
+        previous_effective_adjusted: float | None = None
         previous_adjustment: float | None = None
         stale_run_length = 1
         stale_run_reported = False
+        cumulative_adjustment = 1.0
         for row in values:
             row_date = parse_date(row.get("date"), field_name="prices.date")
             adjusted_text = row.get("adjusted_close", "")
             adjusted = parse_float(adjusted_text)
             unadjusted = parse_float(row.get("unadjusted_close"))
             adjustment = parse_float(row.get("adjustment_factor"))
+            if adjustment is not None and adjustment > 0:
+                cumulative_adjustment *= adjustment
+            effective_adjusted = adjusted
+            if effective_adjusted is None and unadjusted is not None and adjustment is not None and adjustment > 0:
+                effective_adjusted = unadjusted / cumulative_adjustment
             if row_date is None:
                 continue
             if unadjusted is None or unadjusted <= 0:
                 issues.append(issue("invalid_unadjusted_price", "error", row_date=row_date, code=code, value=row.get("unadjusted_close", "")))
-            if adjusted_text == "" or adjusted is None:
+            if (adjusted_text == "" or adjusted is None) and (adjustment is None or adjustment <= 0):
                 issues.append(issue("missing_adjusted_price", "error", row_date=row_date, code=code))
-                if adjustment is None or adjustment <= 0:
-                    issues.append(issue("missing_adjusted_price_and_adjustment_factor", "error", row_date=row_date, code=code))
-            elif adjusted <= 0:
+            if adjusted is None and (adjustment is None or adjustment <= 0):
+                issues.append(issue("missing_adjusted_price_and_adjustment_factor", "error", row_date=row_date, code=code))
+            elif adjusted is not None and adjusted <= 0:
                 issues.append(issue("invalid_adjusted_price", "error", row_date=row_date, code=code, value=adjusted))
             if parse_bool(row.get("tradable_flag"), default=True) is False:
                 issues.append(issue("not_tradable_price_row", "warning", row_date=row_date, code=code))
@@ -124,8 +130,8 @@ def audit_prices(
                         threshold=max_calendar_gap_days,
                     )
                 )
-            if previous_adjusted is not None and adjusted is not None and previous_adjusted > 0:
-                period_return = adjusted / previous_adjusted - 1.0
+            if previous_effective_adjusted is not None and effective_adjusted is not None and previous_effective_adjusted > 0:
+                period_return = effective_adjusted / previous_effective_adjusted - 1.0
                 if abs(period_return) > jump_threshold:
                     issues.append(
                         issue(
@@ -137,7 +143,7 @@ def audit_prices(
                             threshold=jump_threshold,
                         )
                     )
-                if adjusted == previous_adjusted:
+                if effective_adjusted == previous_effective_adjusted:
                     stale_run_length += 1
                 else:
                     stale_run_length = 1
@@ -166,7 +172,7 @@ def audit_prices(
                     )
                 )
             previous_date = row_date
-            previous_adjusted = adjusted
+            previous_effective_adjusted = effective_adjusted
             previous_adjustment = adjustment
     return issues
 

@@ -73,7 +73,8 @@ class ResearchEngineLayersTest(unittest.TestCase):
     def test_data_quality_audit_flags_price_contract_issues(self) -> None:
         price_rows = [
             {"date": "2026-01-01", "code": "1001", "unadjusted_close": "100", "adjusted_close": "100", "adjustment_factor": "1"},
-            {"date": "2026-01-02", "code": "1001", "unadjusted_close": "100", "adjusted_close": "", "adjustment_factor": ""},
+            {"date": "2026-01-02", "code": "1001", "unadjusted_close": "100", "adjusted_close": "", "adjustment_factor": "1"},
+            {"date": "2026-01-03", "code": "1001", "unadjusted_close": "100", "adjusted_close": "", "adjustment_factor": ""},
             {"date": "2026-01-20", "code": "1001", "unadjusted_close": "100", "adjusted_close": "200", "adjustment_factor": "0.5"},
             {"date": "2026-01-21", "code": "1001", "unadjusted_close": "100", "adjusted_close": "200", "adjustment_factor": "0.5"},
             {"date": "2026-01-22", "code": "1001", "unadjusted_close": "100", "adjusted_close": "200", "adjustment_factor": "0.5"},
@@ -88,6 +89,7 @@ class ResearchEngineLayersTest(unittest.TestCase):
         summary = summarize_issues(issues)
 
         self.assertIn("missing_adjusted_price", issue_types)
+        self.assertEqual(1, sum(1 for row in issues if row["issue_type"] == "missing_adjusted_price"))
         self.assertIn("missing_adjusted_price_and_adjustment_factor", issue_types)
         self.assertIn("price_calendar_gap", issue_types)
         self.assertIn("stale_adjusted_price_run", issue_types)
