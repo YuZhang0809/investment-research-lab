@@ -78,6 +78,7 @@ class ResearchEngineLayersTest(unittest.TestCase):
             {"date": "2026-01-20", "code": "1001", "unadjusted_close": "100", "adjusted_close": "200", "adjustment_factor": "0.5"},
             {"date": "2026-01-21", "code": "1001", "unadjusted_close": "100", "adjusted_close": "200", "adjustment_factor": "0.5"},
             {"date": "2026-01-22", "code": "1001", "unadjusted_close": "100", "adjusted_close": "200", "adjustment_factor": "0.5"},
+            {"date": "2026-01-02", "code": "1002", "unadjusted_close": "", "adjusted_close": "", "adjustment_factor": "", "tradable_flag": "false"},
         ]
         listing_rows = [{"code": "1001", "delisted_date": "2026-01-10"}]
 
@@ -94,6 +95,10 @@ class ResearchEngineLayersTest(unittest.TestCase):
         self.assertIn("price_calendar_gap", issue_types)
         self.assertIn("stale_adjusted_price_run", issue_types)
         self.assertIn("price_after_delisting", issue_types)
+        self.assertIn(
+            {"issue_type": "invalid_unadjusted_price", "severity": "warning", "count": 1},
+            summary,
+        )
         self.assertIn({"issue_type": "price_after_delisting", "severity": "error", "count": 1}, summary)
 
     def test_benchmark_attribution_handles_builtin_and_custom_benchmarks(self) -> None:

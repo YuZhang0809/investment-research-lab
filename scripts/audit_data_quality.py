@@ -99,6 +99,8 @@ def audit_prices(
             adjusted = parse_float(adjusted_text)
             unadjusted = parse_float(row.get("unadjusted_close"))
             adjustment = parse_float(row.get("adjustment_factor"))
+            tradable = parse_bool(row.get("tradable_flag"), default=True)
+            is_tradable = tradable is not False
             if adjustment is not None and adjustment > 0:
                 cumulative_adjustment *= adjustment
             effective_adjusted = adjusted
@@ -107,14 +109,16 @@ def audit_prices(
             if row_date is None:
                 continue
             if unadjusted is None or unadjusted <= 0:
-                issues.append(issue("invalid_unadjusted_price", "error", row_date=row_date, code=code, value=row.get("unadjusted_close", "")))
-            if (adjusted_text == "" or adjusted is None) and (adjustment is None or adjustment <= 0):
+                severity = "error" if is_tradable else "warning"
+                issues.append(issue("invalid_unadjusted_price", severity, row_date=row_date, code=code, value=row.get("unadjusted_close", "")))
+            if is_tradable and (adjusted_text == "" or adjusted is None) and (adjustment is None or adjustment <= 0):
                 issues.append(issue("missing_adjusted_price", "error", row_date=row_date, code=code))
-            if adjusted is None and (adjustment is None or adjustment <= 0):
+            if is_tradable and adjusted is None and (adjustment is None or adjustment <= 0):
                 issues.append(issue("missing_adjusted_price_and_adjustment_factor", "error", row_date=row_date, code=code))
             elif adjusted is not None and adjusted <= 0:
-                issues.append(issue("invalid_adjusted_price", "error", row_date=row_date, code=code, value=adjusted))
-            if parse_bool(row.get("tradable_flag"), default=True) is False:
+                severity = "error" if is_tradable else "warning"
+                issues.append(issue("invalid_adjusted_price", severity, row_date=row_date, code=code, value=adjusted))
+            if tradable is False:
                 issues.append(issue("not_tradable_price_row", "warning", row_date=row_date, code=code))
             if parse_bool(row.get("price_limit_flag"), default=False) is True:
                 issues.append(issue("price_limit_row", "info", row_date=row_date, code=code))
