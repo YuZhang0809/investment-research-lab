@@ -20,6 +20,9 @@ LEDGER_FIELDS = [
     "run_at",
     "experiment_id",
     "phase",
+    "hypothesis",
+    "predefined_metrics",
+    "go_no_go_criteria",
     "config_hash",
     "data_hash",
     "code_version",
@@ -62,6 +65,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-at", help="ISO timestamp. Defaults to current UTC time.")
     parser.add_argument("--experiment-id", default="")
     parser.add_argument("--phase", choices=PHASES, default="EXPLORATORY")
+    parser.add_argument("--hypothesis", required=True)
+    parser.add_argument("--predefined-metric", action="append", dest="predefined_metrics", required=True)
+    parser.add_argument("--go-no-go-criterion", action="append", dest="go_no_go_criteria", required=True)
     parser.add_argument("--universe-label", default="")
     parser.add_argument("--strategy-label", help="Defaults to strategy_version from the summary.")
     parser.add_argument("--notes-path", default="")
@@ -246,6 +252,9 @@ def engine_fingerprint() -> str:
         "build_scores.py",
         "run_qvm_walkforward.py",
         "append_run_record.py",
+        "analyze_benchmark_attribution.py",
+        "audit_data_quality.py",
+        "generate_strategy_diagnostics_pack.py",
         "generate_decision_note.py",
     ]
     digests = []
@@ -279,6 +288,9 @@ def build_record(args: argparse.Namespace) -> dict[str, str]:
         "run_at": run_at,
         "experiment_id": args.experiment_id,
         "phase": args.phase,
+        "hypothesis": args.hypothesis,
+        "predefined_metrics": ";".join(args.predefined_metrics),
+        "go_no_go_criteria": ";".join(args.go_no_go_criteria),
         "config_hash": config_hash,
         "data_hash": data_hash,
         "code_version": code_version,

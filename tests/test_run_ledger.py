@@ -82,6 +82,17 @@ def write_summary(path: Path) -> None:
     )
 
 
+def protocol_args() -> list[str]:
+    return [
+        "--hypothesis",
+        "Synthetic hypothesis",
+        "--predefined-metric",
+        "after_cost_return",
+        "--go-no-go-criterion",
+        "Synthetic go/no-go criterion",
+    ]
+
+
 class RunLedgerTest(unittest.TestCase):
     def test_append_run_record_writes_header_and_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -116,6 +127,7 @@ class RunLedgerTest(unittest.TestCase):
                     "REVIEW",
                     "--decision-reason",
                     "Synthetic review",
+                    *protocol_args(),
                     "--data-path",
                     str(data),
                 ],
@@ -128,6 +140,9 @@ class RunLedgerTest(unittest.TestCase):
             self.assertEqual(1, len(rows))
             self.assertEqual("synthetic_run", rows[0]["run_id"])
             self.assertEqual("synthetic_experiment", rows[0]["experiment_id"])
+            self.assertEqual("Synthetic hypothesis", rows[0]["hypothesis"])
+            self.assertEqual("after_cost_return", rows[0]["predefined_metrics"])
+            self.assertEqual("Synthetic go/no-go criterion", rows[0]["go_no_go_criteria"])
             self.assertEqual("REVIEW", rows[0]["decision"])
             self.assertTrue(rows[0]["code_version"])
             self.assertTrue(rows[0]["engine_hash"])
@@ -159,6 +174,7 @@ class RunLedgerTest(unittest.TestCase):
                 str(ledger),
                 "--run-id",
                 "duplicate_run",
+                *protocol_args(),
             ]
 
             subprocess.run(command, cwd=ROOT, check=True)
@@ -188,6 +204,7 @@ class RunLedgerTest(unittest.TestCase):
                     str(ledger),
                     "--run-id",
                     "bad_decision",
+                    *protocol_args(),
                     "--decision",
                     "GO",
                 ],
@@ -218,6 +235,7 @@ class RunLedgerTest(unittest.TestCase):
                 str(ledger),
                 "--engine-hash",
                 "engine-a",
+                *protocol_args(),
             ]
 
             subprocess.run([*base_command, "--code-version", "code-a"], cwd=ROOT, check=True)
@@ -322,6 +340,7 @@ class RunLedgerTest(unittest.TestCase):
                     str(ledger),
                     "--run-id",
                     "market_run",
+                    *protocol_args(),
                 ],
                 cwd=ROOT,
                 check=True,
@@ -356,6 +375,7 @@ class RunLedgerTest(unittest.TestCase):
                     str(ledger),
                     "--run-id",
                     "note_run",
+                    *protocol_args(),
                     "--decision",
                     "PAPER_TEST",
                     "--decision-reason",

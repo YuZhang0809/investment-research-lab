@@ -88,6 +88,9 @@ python scripts\append_run_record.py `
   --config configs\qvm_v0_1.example.yml `
   --ledger <private-run-ledger.csv> `
   --run-id <stable-run-id> `
+  --hypothesis "Plain-language research hypothesis" `
+  --predefined-metric after_cost_return `
+  --go-no-go-criterion "Review threshold chosen before the run" `
   --decision REVIEW
 
 python scripts\generate_decision_note.py `
@@ -99,6 +102,40 @@ python scripts\generate_decision_note.py `
 Allowed decisions are `EXPLORATORY`, `REVIEW`, `REJECT`, and `PAPER_TEST`.
 These tools create research notes only. They do not implement approvals,
 permissions, immutable logs, compliance reports, dashboards, or schedulers.
+
+## Generic Diagnostics
+
+These scripts provide strategy-agnostic diagnostics for QVM, event studies, and
+future rankers:
+
+```powershell
+python scripts\audit_data_quality.py `
+  --prices <prices.csv> `
+  --listings <listings.csv> `
+  --out reports\engineering\data_quality_issues.csv `
+  --summary-out reports\engineering\data_quality_summary.csv `
+  --report reports\engineering\data_quality_report.md `
+  --no-manifest
+
+python scripts\analyze_benchmark_attribution.py `
+  --summary <walkforward_summary.csv> `
+  --benchmark size=<size_benchmark.csv> `
+  --out reports\benchmark\benchmark_attribution.csv `
+  --report reports\benchmark\benchmark_attribution.md `
+  --no-manifest
+
+python scripts\generate_strategy_diagnostics_pack.py `
+  --summary <walkforward_summary.csv> `
+  --failures <failure_cases.csv> `
+  --data-quality-summary reports\engineering\data_quality_summary.csv `
+  --benchmark-attribution reports\benchmark\benchmark_attribution.csv `
+  --out reports\strategy\strategy_diagnostics.md `
+  --no-manifest
+```
+
+The diagnostics pack consumes only explicitly supplied artifacts. It does not
+invent candidate, exposure, contribution, or ADV sections when those source
+files are not passed.
 
 ## Walk-Forward Tear Sheet
 

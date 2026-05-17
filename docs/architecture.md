@@ -48,9 +48,18 @@ for manual inspection. Internal computation may use libraries such as `pandas`,
   real private parameter choices are not.
 - Portfolio builders convert ranks into research and executable targets.
 - Walk-forward runners simulate low-frequency rebalance loops.
+- Data-quality audits flag contract, price, stale-data, lifecycle, and
+  contribution issues before performance conclusions.
 - Performance analytics compute reusable walk-forward metrics from summary
   outputs, including return, risk, benchmark-relative, implementation, and
   failure-case measures.
+- Benchmark attribution compares strategy returns with filtered-universe,
+  market, size, value, or custom benchmark series using one relative-metrics
+  implementation.
+- Strategy diagnostics packs assemble supplied public artifacts into one static
+  report without inferring missing diagnostics from unrelated files.
+- Event research tools normalize event logs and compute post-announcement
+  trading-window drift with duplicate/overlap metadata.
 - Reports explain candidates, constraints, failure cases, and static
   public-safe tear sheets.
 

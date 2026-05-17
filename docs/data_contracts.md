@@ -58,6 +58,12 @@ When a market benchmark is supplied, walk-forward summaries include
 `market_benchmark_return`. The run ledger derives market beta, annualized simple
 alpha, annualized tracking error, and information ratio from period returns.
 
+`analyze_benchmark_attribution.py` can also compare a summary CSV against
+custom benchmark files passed as `label=path`. Custom benchmark files must have
+`date` plus either a return column (`return` or `benchmark_return`) or one value
+column (`close`, `equity`, or `value`). Files that mix return and value columns
+are rejected instead of guessed.
+
 ## Fundamentals
 
 ```text
@@ -108,7 +114,7 @@ experiments/run_ledger.example.csv
 Minimum CSV contract:
 
 ```text
-run_id,run_at,experiment_id,phase,config_hash,data_hash,code_version,engine_hash,universe_label,period_start,period_end,rebalance_count,strategy_label,rebalance_frequency,cost_scenario,execution_price,lifecycle_data_status,performance_conclusion_allowed,missing_price_tail_policy,missing_price_tail_max_stale_days,key_metric_after_cost,key_metric_after_tax,key_metric_benchmark,market_benchmark_id,market_beta,market_alpha,tracking_error,information_ratio,max_drawdown,avg_cash_pct,avg_turnover,notes_path,decision,decision_reason
+run_id,run_at,experiment_id,phase,hypothesis,predefined_metrics,go_no_go_criteria,config_hash,data_hash,code_version,engine_hash,universe_label,period_start,period_end,rebalance_count,strategy_label,rebalance_frequency,cost_scenario,execution_price,lifecycle_data_status,performance_conclusion_allowed,missing_price_tail_policy,missing_price_tail_max_stale_days,key_metric_after_cost,key_metric_after_tax,key_metric_benchmark,market_benchmark_id,market_beta,market_alpha,tracking_error,information_ratio,max_drawdown,avg_cash_pct,avg_turnover,notes_path,decision,decision_reason
 ```
 
 Allowed `decision` values:
@@ -126,6 +132,46 @@ the summary has a market benchmark series; otherwise they remain empty. Real run
 ledgers belong in private workspaces because they can contain real research
 results and decisions.
 
+`append_run_record.py` requires `--hypothesis`, at least one
+`--predefined-metric`, and at least one `--go-no-go-criterion`. This keeps
+exploratory, validation, and paper-test runs from being registered as
+post-hoc metric hunts.
+
 `lifecycle_data_status` is a caveat field, not an approval flag. Current
 walk-forward values include `snapshot_only`, `partial_lifecycle`,
 `pit_snapshot_panel`, `pit_no_delistings_observed`, and `pit_with_delistings`.
+
+## Data Quality Audit
+
+`audit_data_quality.py` writes issue-level and summary-level outputs:
+
+```text
+issue_type,severity,date,code,detail,value,threshold
+issue_type,severity,count
+```
+
+The audit flags missing adjusted prices, missing adjustment factors, invalid
+prices, large adjusted-price jumps, price calendar gaps, stale adjusted-price
+runs, not-tradable rows, price-limit rows, prices after delisting, and optional
+single-name abnormal contribution rows. It does not repair or synthesize data.
+
+## Strategy Diagnostics Pack
+
+`generate_strategy_diagnostics_pack.py` consumes public-engine artifacts and
+writes one static Markdown pack plus a metrics CSV. Required input is a
+walk-forward summary. Optional inputs are explicit files for failures, trades,
+candidates, contributions, exposures, data-quality summary, and benchmark
+attribution. Optional sections are shown only when their source file is passed.
+
+## Event Drift
+
+`analyze_event_drift.py` expects the event log columns:
+
+```text
+event_id,announcement_datetime,code,event_label
+```
+
+The richer TDnet event contract may also include company name, document type,
+title, URL/document ID, parse flag, confidence, and notes. The drift output adds
+`entry_date`, `tradable_timestamp`, event overlap/duplicate counts, and
+`next_<window>d_return/status` columns for configured trading-day windows.

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time
 from pathlib import Path
 
 from research_common import (
@@ -18,6 +18,7 @@ from research_common import (
 
 
 WINDOWS = [1, 5, 20, 60]
+REQUIRED_EVENT_FIELDS = {"event_id", "announcement_datetime", "code", "event_label"}
 
 
 @dataclass
@@ -30,6 +31,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Append post-event drift windows to a TDnet event CSV.")
     parser.add_argument("--events", required=True, type=Path)
     parser.add_argument("--prices", required=True, type=Path)
+    parser.add_argument("--window", action="append", type=int, dest="windows", help="Trading-day window. Can be repeated.")
+    parser.add_argument("--entry-mode", choices=["next_trading_day", "same_day_if_before_cutoff"], default="next_trading_day")
+    parser.add_argument("--same-day-cutoff", default="15:00", help="HH:MM cutoff for same_day_if_before_cutoff.")
+    parser.add_argument("--overlap-window-days", type=int, default=60)
     parser.add_argument("--out-dir", type=Path, default=Path("data/processed/events"))
     parser.add_argument("--run-label", default="observation")
     parser.add_argument("--manifest", type=Path, default=Path("data/manifest/data_manifest.csv"))
@@ -37,16 +42,46 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def parse_announcement_date(value: str) -> date | None:
+def require_event_columns(rows: list[dict[str, str]]) -> None:
+    if not rows:
+        raise ValueError("events is empty.")
+    missing = sorted(REQUIRED_EVENT_FIELDS - set(rows[0]))
+    if missing:
+        raise ValueError(f"events is missing required column(s): {', '.join(missing)}")
+
+
+def parse_windows(values: list[int] | None) -> list[int]:
+    windows = values or WINDOWS
+    clean = sorted(set(windows))
+    if not clean or any(value <= 0 for value in clean):
+        raise ValueError("--window values must be positive.")
+    return clean
+
+
+def parse_cutoff(value: str) -> time:
+    try:
+        return datetime.strptime(value, "%H:%M").time()
+    except ValueError as exc:
+        raise ValueError(f"Invalid --same-day-cutoff: {value!r}; expected HH:MM") from exc
+
+
+def parse_announcement_datetime(value: str) -> datetime | None:
     text = (value or "").strip()
     if not text:
         return None
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
-            return datetime.strptime(text, fmt).date()
+            return datetime.strptime(text, fmt)
         except ValueError:
             continue
     raise ValueError(f"Invalid announcement_datetime: {value!r}")
+
+
+def parse_announcement_date(value: str) -> date | None:
+    parsed = parse_announcement_datetime(value)
+    if parsed is None:
+        return None
+    return parsed.date()
 
 
 def build_price_index(rows: list[dict[str, str]]) -> dict[str, list[PricePoint]]:
@@ -100,6 +135,57 @@ def drift_return(
     return exit_value / entry - 1.0, "ok"
 
 
+def entry_trading_date(
+    announcement: datetime | None,
+    calendar: list[date],
+    *,
+    entry_mode: str,
+    same_day_cutoff: time,
+) -> date | None:
+    if announcement is None:
+        return None
+    if entry_mode == "next_trading_day":
+        return trading_day_offset(calendar, announcement.date(), 0, mode="after")
+    if entry_mode == "same_day_if_before_cutoff" and announcement.time() < same_day_cutoff:
+        return trading_day_offset(calendar, announcement.date(), 0, mode="on_or_after")
+    return trading_day_offset(calendar, announcement.date(), 0, mode="after")
+
+
+def overlap_metadata(rows: list[dict[str, str]], *, overlap_window_days: int) -> dict[int, dict[str, int]]:
+    if overlap_window_days <= 0:
+        raise ValueError("--overlap-window-days must be positive.")
+    parsed: list[tuple[int, str, str, datetime]] = []
+    for index, row in enumerate(rows):
+        announcement = parse_announcement_datetime(row.get("announcement_datetime", ""))
+        code = (row.get("code") or "").strip()
+        label = (row.get("event_label") or "").strip()
+        if announcement is not None and code:
+            parsed.append((index, code, label, announcement))
+    duplicate_counts: dict[tuple[str, str, date], int] = defaultdict(int)
+    for _index, code, label, announcement in parsed:
+        duplicate_counts[(code, label, announcement.date())] += 1
+    output: dict[int, dict[str, int]] = {}
+    for index, code, label, announcement in parsed:
+        overlaps = [
+            item
+            for item in parsed
+            if item[0] != index
+            and item[1] == code
+            and abs((item[3].date() - announcement.date()).days) <= overlap_window_days
+        ]
+        prior = [
+            item
+            for item in overlaps
+            if item[3] < announcement
+        ]
+        output[index] = {
+            "event_overlap_count": len(overlaps),
+            "duplicate_event_count": duplicate_counts[(code, label, announcement.date())],
+            "event_sequence_in_overlap_window": len(prior) + 1,
+        }
+    return output
+
+
 def fmt(value: float | None) -> str:
     if value is None:
         return ""
@@ -108,27 +194,43 @@ def fmt(value: float | None) -> str:
 
 def main() -> int:
     args = build_parser().parse_args()
+    windows = parse_windows(args.windows)
+    same_day_cutoff = parse_cutoff(args.same_day_cutoff)
     event_rows = read_csv(args.events)
+    require_event_columns(event_rows)
     price_rows = read_csv(args.prices)
     price_index = build_price_index(price_rows)
     calendar = trading_calendar_from_rows(price_rows)
+    overlaps = overlap_metadata(event_rows, overlap_window_days=args.overlap_window_days)
     output_rows: list[dict[str, str]] = []
-    for row in event_rows:
-        event_date = parse_announcement_date(row.get("announcement_datetime", ""))
+    for index, row in enumerate(event_rows):
+        announcement = parse_announcement_datetime(row.get("announcement_datetime", ""))
         points = price_index.get(row.get("code", ""), [])
-        entry_date = trading_day_offset(calendar, event_date, 0, mode="after") if event_date is not None else None
+        entry_date = entry_trading_date(
+            announcement,
+            calendar,
+            entry_mode=args.entry_mode,
+            same_day_cutoff=same_day_cutoff,
+        )
         enriched = dict(row)
+        enriched.update({key: str(value) for key, value in overlaps.get(index, {
+            "event_overlap_count": 0,
+            "duplicate_event_count": 0,
+            "event_sequence_in_overlap_window": 0,
+        }).items()})
         if entry_date is not None:
             enriched["entry_date"] = entry_date.isoformat()
+            enriched["tradable_timestamp"] = f"{entry_date.isoformat()} 09:00:00"
             enriched["entry_status"] = "ok" if price_on_date(points, entry_date) else "missing_entry_price"
-            for window in WINDOWS:
+            for window in windows:
                 value, status = drift_return(points, calendar, entry_date, window)
                 enriched[f"next_{window}d_return"] = fmt(value)
                 enriched[f"next_{window}d_status"] = status
         else:
             enriched["entry_date"] = ""
+            enriched["tradable_timestamp"] = ""
             enriched["entry_status"] = "missing_entry_date"
-            for window in WINDOWS:
+            for window in windows:
                 enriched[f"next_{window}d_return"] = ""
                 enriched[f"next_{window}d_status"] = "missing_entry_date"
         output_rows.append(enriched)
@@ -144,7 +246,11 @@ def main() -> int:
         "event_id",
         "announcement_datetime",
         "entry_date",
+        "tradable_timestamp",
         "entry_status",
+        "event_overlap_count",
+        "duplicate_event_count",
+        "event_sequence_in_overlap_window",
         "code",
         "company_name",
         "document_type",
@@ -154,14 +260,7 @@ def main() -> int:
         "parsed_flag",
         "parse_confidence",
         "notes",
-        "next_1d_return",
-        "next_1d_status",
-        "next_5d_return",
-        "next_5d_status",
-        "next_20d_return",
-        "next_20d_status",
-        "next_60d_return",
-        "next_60d_status",
+        *[field for window in windows for field in (f"next_{window}d_return", f"next_{window}d_status")],
     ]
     write_csv(output_path, output_rows, fieldnames)
     if not args.no_manifest:
@@ -170,9 +269,9 @@ def main() -> int:
             source="derived_tdnet_event_drift",
             file_path=output_path,
             vendor="local",
-            schema_version="tdnet_event_drift_v0_1",
+            schema_version="tdnet_event_drift_v0_2",
             date_range=suffix,
-            notes=f"{len(output_rows)} event rows; adjusted-close drift windows",
+            notes=f"{len(output_rows)} event rows; windows={','.join(str(window) for window in windows)}",
         )
     print(f"Wrote {len(output_rows)} event drift rows to {output_path}")
     return 0

@@ -16,12 +16,13 @@ mistakes.
 7. Convert ranks into research targets and executable targets.
 8. Build order constraints and failure cases.
 9. Run a single snapshot or walk-forward simulation.
-10. Generate candidate, failure-case, and performance reports.
-11. Append the run summary to a private run ledger when the result is worth
+10. Run data-quality, benchmark, and strategy diagnostics.
+11. Generate candidate, failure-case, and performance reports.
+12. Append the run summary to a private run ledger when the result is worth
     remembering.
-12. Generate a lightweight decision note for REVIEW, REJECT, or PAPER_TEST
+13. Generate a lightweight decision note for REVIEW, REJECT, or PAPER_TEST
     candidates.
-13. Review the output before changing factor rules or paper trading.
+14. Review the output before changing factor rules or paper trading.
 
 The public repository provides only generic templates and scripts for this
 recordkeeping. Real ledgers, real protocols, real decision notes, and real
@@ -70,8 +71,9 @@ post-hoc storytelling; it is not an approval document.
 
 After a walk-forward run, `scripts/append_run_record.py` can append one row from
 a summary CSV into a private CSV ledger. It records hashes, period, strategy
-label, execution settings, headline metrics, optional future alpha/beta fields,
-and a lightweight decision label:
+label, execution settings, headline metrics, market alpha/beta fields,
+hypothesis, predefined metrics, go/no-go criteria, and a lightweight decision
+label:
 
 ```text
 EXPLORATORY
@@ -83,6 +85,17 @@ PAPER_TEST
 `scripts/generate_decision_note.py` can turn a ledger row or summary CSV into a
 Markdown research note with a decision, short reason, key metrics, caveats, and
 next action.
+
+Generic diagnostics are split into explicit file-first tools:
+
+```powershell
+python scripts\audit_data_quality.py --prices <prices.csv> --listings <listings.csv>
+python scripts\analyze_benchmark_attribution.py --summary <summary.csv> --benchmark size=<size_benchmark.csv>
+python scripts\generate_strategy_diagnostics_pack.py --summary <summary.csv> --data-quality-summary <audit_summary.csv>
+```
+
+These scripts consume supplied artifacts only. They do not infer missing
+diagnostics from unrelated files.
 
 These notes are deliberately not:
 
