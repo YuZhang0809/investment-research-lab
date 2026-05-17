@@ -12,10 +12,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import run_qvm_walkforward  # noqa: E402
+from build_factors import adjusted_close as factor_adjusted_close  # noqa: E402
+from build_factors import rows_until_rebalance  # noqa: E402
 from run_qvm_walkforward import (  # noqa: E402
     PricePoint,
     actual_shares_from_adjusted,
     adjusted_shares_for_trade,
+    build_price_index,
     consume_lots,
     position_value,
 )
@@ -54,6 +57,65 @@ class WalkForwardAdjustedValuationTest(unittest.TestCase):
         self.assertEqual(10_000, position_value(adjusted_shares, pre_split))
         self.assertEqual(10_000, position_value(adjusted_shares, post_split))
         self.assertEqual(200, actual_shares_from_adjusted(adjusted_shares, post_split))
+
+    def test_missing_adjusted_close_uses_adjustment_factor_for_reverse_split(self) -> None:
+        price_index = build_price_index(
+            [
+                {
+                    "date": "2026-01-31",
+                    "code": "1001",
+                    "unadjusted_open": "100",
+                    "unadjusted_close": "100",
+                    "adjusted_close": "",
+                    "trading_value": "1000000",
+                    "adjustment_factor": "1",
+                    "price_limit_flag": "false",
+                },
+                {
+                    "date": "2026-02-28",
+                    "code": "1001",
+                    "unadjusted_open": "1000",
+                    "unadjusted_close": "1000",
+                    "adjusted_close": "",
+                    "trading_value": "1000000",
+                    "adjustment_factor": "10",
+                    "price_limit_flag": "false",
+                },
+            ]
+        )
+
+        pre_split, post_split = price_index["1001"]
+        adjusted_shares = adjusted_shares_for_trade(100, pre_split)
+
+        self.assertEqual(100, adjusted_shares)
+        self.assertEqual(10_000, position_value(adjusted_shares, pre_split))
+        self.assertEqual(10_000, position_value(adjusted_shares, post_split))
+        self.assertEqual(10, actual_shares_from_adjusted(adjusted_shares, post_split))
+
+    def test_missing_factor_adjusted_close_uses_adjustment_factor(self) -> None:
+        rows = rows_until_rebalance(
+            [
+                {
+                    "date": "2026-01-31",
+                    "code": "1001",
+                    "unadjusted_close": "100",
+                    "adjusted_close": "",
+                    "adjustment_factor": "1",
+                },
+                {
+                    "date": "2026-02-28",
+                    "code": "1001",
+                    "unadjusted_close": "1000",
+                    "adjusted_close": "",
+                    "adjustment_factor": "10",
+                },
+            ],
+            date(2026, 2, 28),
+        )
+
+        self.assertEqual(2, len(rows))
+        self.assertEqual(100, factor_adjusted_close(rows[0]))
+        self.assertEqual(100, factor_adjusted_close(rows[1]))
 
     def test_adjusted_tax_lot_basis_survives_split(self) -> None:
         pre_split = PricePoint(

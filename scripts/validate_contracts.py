@@ -26,7 +26,6 @@ PRICE_REQUIRED = [
     "date",
     "code",
     "unadjusted_close",
-    "adjusted_close",
     "trading_value",
     "tradable_flag",
     "price_limit_flag",
@@ -50,7 +49,7 @@ DATE_COLUMNS = {
 }
 NUMBER_COLUMNS = {
     "listings": ["lot_size"],
-    "prices": ["unadjusted_close", "adjusted_close", "trading_value"],
+    "prices": ["unadjusted_close", "adjusted_close", "adjustment_factor", "trading_value"],
     "fundamentals": [
         "operating_profit",
         "net_profit",
@@ -348,31 +347,58 @@ def check_listing_lifecycle(issues: list[dict[str, str]], *, listing_rows: list[
 def check_price_values(issues: list[dict[str, str]], *, price_rows: list[dict[str, str]]) -> None:
     for row_index, row in enumerate(price_rows, start=2):
         code = row.get("code", "")
-        for column in ["unadjusted_close", "adjusted_close"]:
-            if row.get(column) in (None, ""):
+        unadjusted = parse_float(row.get("unadjusted_close"))
+        if row.get("unadjusted_close") in (None, ""):
+            issue(
+                issues,
+                severity="error",
+                dataset="prices",
+                check="missing_price",
+                code=code,
+                column="unadjusted_close",
+                value=row.get("unadjusted_close", ""),
+                message=f"Row {row_index}: unadjusted_close is required",
+            )
+        elif unadjusted is not None and unadjusted <= 0:
+            issue(
+                issues,
+                severity="error",
+                dataset="prices",
+                check="non_positive_price",
+                code=code,
+                column="unadjusted_close",
+                value=row.get("unadjusted_close", ""),
+                message=f"Row {row_index}: unadjusted_close must be positive",
+            )
+
+        adjusted = parse_float(row.get("adjusted_close"))
+        adjustment_factor = parse_float(row.get("adjustment_factor"))
+        if adjusted is None:
+            if adjustment_factor is None or adjustment_factor <= 0:
                 issue(
                     issues,
                     severity="error",
                     dataset="prices",
-                    check="missing_price",
+                    check="missing_adjusted_price_basis",
                     code=code,
-                    column=column,
-                    value=row.get(column, ""),
-                    message=f"Row {row_index}: price is required",
+                    column="adjusted_close",
+                    value=row.get("adjusted_close", ""),
+                    message=(
+                        f"Row {row_index}: adjusted_close is missing or invalid, "
+                        "so positive adjustment_factor is required"
+                    ),
                 )
-                continue
-            value = parse_float(row.get(column))
-            if value is not None and value <= 0:
-                issue(
-                    issues,
-                    severity="error",
-                    dataset="prices",
-                    check="non_positive_price",
-                    code=code,
-                    column=column,
-                    value=row.get(column, ""),
-                    message=f"Row {row_index}: price must be positive",
-                )
+        elif adjusted <= 0:
+            issue(
+                issues,
+                severity="error",
+                dataset="prices",
+                check="non_positive_price",
+                code=code,
+                column="adjusted_close",
+                value=row.get("adjusted_close", ""),
+                message=f"Row {row_index}: adjusted_close must be positive",
+            )
         trading_value = parse_float(row.get("trading_value"))
         if trading_value is not None and trading_value < 0:
             issue(

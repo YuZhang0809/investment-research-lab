@@ -108,25 +108,41 @@ def parse_price_flag(value: str | None) -> bool:
 
 
 def build_price_index(price_rows: list[dict[str, str]]) -> dict[str, list[PricePoint]]:
-    grouped: dict[str, list[PricePoint]] = defaultdict(list)
+    raw_grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
     for row in price_rows:
         code = row.get("code", "")
-        row_date = parse_date(row.get("date"), field_name="prices.date")
-        unadjusted_open = parse_float(row.get("unadjusted_open"))
-        unadjusted = parse_float(row.get("unadjusted_close"))
-        adjusted = parse_float(row.get("adjusted_close") or row.get("unadjusted_close"))
-        if not code or row_date is None or unadjusted is None or adjusted is None:
-            continue
-        grouped[code].append(
-            PricePoint(
-                date=row_date,
-                unadjusted_open=unadjusted_open if unadjusted_open is not None else unadjusted,
-                unadjusted_close=unadjusted,
-                adjusted_close=adjusted,
-                trading_value=parse_float(row.get("trading_value")),
-                price_limit_flag=parse_price_flag(row.get("price_limit_flag")),
-            )
+        if code:
+            raw_grouped[code].append(row)
+
+    grouped: dict[str, list[PricePoint]] = defaultdict(list)
+    for code, rows in raw_grouped.items():
+        sorted_rows = sorted(
+            rows,
+            key=lambda item: parse_date(item.get("date"), field_name="prices.date") or date.min,
         )
+        cumulative_adjustment = 1.0
+        for row in sorted_rows:
+            adjustment_factor = parse_float(row.get("adjustment_factor"), default=1.0) or 1.0
+            if adjustment_factor > 0:
+                cumulative_adjustment *= adjustment_factor
+            row_date = parse_date(row.get("date"), field_name="prices.date")
+            unadjusted_open = parse_float(row.get("unadjusted_open"))
+            unadjusted = parse_float(row.get("unadjusted_close"))
+            adjusted = parse_float(row.get("adjusted_close"))
+            if adjusted is None and unadjusted is not None:
+                adjusted = unadjusted / cumulative_adjustment
+            if not code or row_date is None or unadjusted is None or adjusted is None:
+                continue
+            grouped[code].append(
+                PricePoint(
+                    date=row_date,
+                    unadjusted_open=unadjusted_open if unadjusted_open is not None else unadjusted,
+                    unadjusted_close=unadjusted,
+                    adjusted_close=adjusted,
+                    trading_value=parse_float(row.get("trading_value")),
+                    price_limit_flag=parse_price_flag(row.get("price_limit_flag")),
+                )
+            )
     for values in grouped.values():
         values.sort(key=lambda point: point.date)
     return grouped

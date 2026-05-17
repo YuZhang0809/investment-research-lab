@@ -32,6 +32,12 @@ research scope.
 date,code,unadjusted_close,adjusted_close,trading_value,tradable_flag,price_limit_flag
 ```
 
+`adjusted_close` should be populated when the source provides it. If it is not
+available, the price file must include a positive `adjustment_factor` column so
+the engine can synthesize an adjusted series for returns and corporate-action
+neutral valuation. Without either adjusted prices or adjustment factors,
+split/reverse-split periods are not research-safe.
+
 ## Market Benchmark Prices
 
 Optional input for `run_qvm_walkforward.py --market-benchmark-prices`.

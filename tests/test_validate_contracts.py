@@ -170,6 +170,61 @@ class ValidateContractsTest(unittest.TestCase):
         error_checks = {row["check"] for row in issues if row["severity"] == "error"}
         self.assertIn("missing_price", error_checks)
         self.assertIn("number_parse", error_checks)
+        self.assertIn("missing_adjusted_price_basis", error_checks)
+
+    def test_missing_adjusted_close_is_valid_when_adjustment_factor_is_available(self) -> None:
+        config = {"universe": {"min_ipo_age_trading_days": 0, "liquidity_lookback_days": 0}}
+        listings = [
+            {
+                "code": "1001",
+                "name": "Sample",
+                "market": "Prime",
+                "sector": "Tech",
+                "listed_date": "2020-01-01",
+                "delisted_date": "",
+                "security_type": "common_stock",
+                "is_common_stock": "true",
+                "is_etf_reit_infra": "false",
+                "tradable_flag": "true",
+                "lot_size": "100",
+            }
+        ]
+        prices = []
+        for index in range(280):
+            prices.append(
+                {
+                    "date": f"2025-{index // 28 + 1:02d}-{index % 28 + 1:02d}",
+                    "code": "1001",
+                    "unadjusted_close": "1000",
+                    "adjusted_close": "",
+                    "adjustment_factor": "1",
+                    "trading_value": "1000000",
+                    "tradable_flag": "true",
+                    "price_limit_flag": "false",
+                }
+            )
+        fundamentals = [
+            {
+                "code": "1001",
+                "available_date": "2025-12-15",
+                "available_time": "15:00",
+                "document_type": "annual",
+                "operating_profit": "100",
+                "net_profit": "80",
+                "equity": "1000",
+                "total_assets": "2000",
+                "shares_outstanding": "100",
+            }
+        ]
+
+        issues, _summary = validate_contracts(
+            config=config,
+            listing_rows=listings,
+            price_rows=prices,
+            fundamental_rows=fundamentals,
+        )
+
+        self.assertEqual([], [row for row in issues if row["severity"] == "error"])
 
     def test_all_empty_delisted_dates_are_warned(self) -> None:
         config = {"universe": {"min_ipo_age_trading_days": 0, "liquidity_lookback_days": 0}}

@@ -50,13 +50,29 @@ def price_date(row: dict[str, str]) -> date | None:
 
 def rows_until_rebalance(rows: list[dict[str, str]], rebalance_date: date) -> list[dict[str, str]]:
     clean = [row for row in rows if price_date(row) and price_date(row) <= rebalance_date]
-    return sorted(clean, key=lambda row: price_date(row) or date.min)
+    return rows_with_effective_adjusted_close(sorted(clean, key=lambda row: price_date(row) or date.min))
+
+
+def rows_with_effective_adjusted_close(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    cumulative_adjustment = 1.0
+    adjusted_rows: list[dict[str, str]] = []
+    for row in rows:
+        copied = dict(row)
+        adjustment_factor = parse_float(copied.get("adjustment_factor"), default=1.0) or 1.0
+        if adjustment_factor > 0:
+            cumulative_adjustment *= adjustment_factor
+        adjusted = parse_float(copied.get("adjusted_close"))
+        unadjusted = parse_float(copied.get("unadjusted_close"))
+        if adjusted is None and unadjusted is not None:
+            copied["_effective_adjusted_close"] = str(unadjusted / cumulative_adjustment)
+        adjusted_rows.append(copied)
+    return adjusted_rows
 
 
 def adjusted_close(row: dict[str, str] | None) -> float | None:
     if row is None:
         return None
-    return parse_float(row.get("adjusted_close") or row.get("unadjusted_close"))
+    return parse_float(row.get("_effective_adjusted_close") or row.get("adjusted_close") or row.get("unadjusted_close"))
 
 
 def price_on_or_before(rows: list[dict[str, str]], target: date) -> dict[str, str] | None:
