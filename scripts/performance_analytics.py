@@ -12,6 +12,7 @@ from research_common import parse_date, parse_float
 
 
 METRIC_FIELDS = ["category", "metric", "value", "formatted_value"]
+INSUFFICIENT_SAMPLE_REASON = "insufficient_sample_count"
 
 
 def periods_per_year(frequency: str) -> float:
@@ -27,6 +28,21 @@ def periods_per_year(frequency: str) -> float:
     if normalized == "yearly":
         return 1.0
     return 1.0
+
+
+def minimum_risk_periods(frequency: str) -> int:
+    normalized = (frequency or "").strip().lower()
+    if normalized == "daily":
+        return 60
+    if normalized == "weekly":
+        return 26
+    if normalized == "monthly":
+        return 12
+    if normalized == "quarterly":
+        return 8
+    if normalized == "yearly":
+        return 5
+    return 12
 
 
 def clean(values: list[float | None]) -> list[float]:
@@ -94,7 +110,7 @@ def equity_series(rows: list[dict[str, str]], column: str) -> list[tuple[date, f
     for row in rows:
         row_date = parse_date(row.get("rebalance_date") or row.get("date"), field_name="performance.date")
         value = parse_float(row.get(column))
-        if row_date is not None and value is not None and value > 0:
+        if row_date is not None and value is not None and math.isfinite(value):
             values.append((row_date, value))
     return values
 
@@ -117,12 +133,12 @@ def period_returns(
             if explicit is not None:
                 values.append((row_date, explicit))
                 equity = parse_float(row.get(equity_column))
-                if equity is not None and equity > 0:
+                if equity is not None and math.isfinite(equity):
                     previous = equity
                 continue
         equity = parse_float(row.get(equity_column))
-        if equity is None or equity <= 0 or previous is None or previous <= 0:
-            if equity is not None and equity > 0:
+        if equity is None or previous is None or previous <= 0:
+            if equity is not None and math.isfinite(equity):
                 previous = equity
             continue
         values.append((row_date, equity / previous - 1.0))
@@ -130,10 +146,10 @@ def period_returns(
     return values
 
 
-def cumulative_return(equity_values: list[tuple[date, float]], initial_capital: float | None) -> float | None:
-    if not equity_values or initial_capital is None or initial_capital <= 0:
+def return_from_equity(equity: float | None, initial_capital: float | None) -> float | None:
+    if equity is None or initial_capital is None or initial_capital <= 0:
         return None
-    return equity_values[-1][1] / initial_capital - 1.0
+    return equity / initial_capital - 1.0
 
 
 def annualized_return(total_return: float | None, periods: int, annualization: float) -> float | None:
@@ -170,8 +186,11 @@ def sortino_ratio(returns: list[float], annualization: float) -> float | None:
     return mean(returns) * annualization / downside
 
 
-def drawdown_series(equity_values: list[tuple[date, float]]) -> list[tuple[date, float]]:
-    peak = None
+def drawdown_series(
+    equity_values: list[tuple[date, float]],
+    initial_capital: float | None = None,
+) -> list[tuple[date, float]]:
+    peak = initial_capital if initial_capital is not None and initial_capital > 0 else None
     values: list[tuple[date, float]] = []
     for row_date, value in equity_values:
         peak = value if peak is None else max(peak, value)
@@ -180,13 +199,19 @@ def drawdown_series(equity_values: list[tuple[date, float]]) -> list[tuple[date,
     return values
 
 
-def max_drawdown(equity_values: list[tuple[date, float]]) -> float | None:
-    drawdowns = [value for _date, value in drawdown_series(equity_values)]
+def max_drawdown(
+    equity_values: list[tuple[date, float]],
+    initial_capital: float | None = None,
+) -> float | None:
+    drawdowns = [value for _date, value in drawdown_series(equity_values, initial_capital)]
     return min(drawdowns) if drawdowns else None
 
 
-def longest_drawdown_periods(equity_values: list[tuple[date, float]]) -> int:
-    peak = None
+def longest_drawdown_periods(
+    equity_values: list[tuple[date, float]],
+    initial_capital: float | None = None,
+) -> int:
+    peak = initial_capital if initial_capital is not None and initial_capital > 0 else None
     current = 0
     longest = 0
     for _row_date, value in equity_values:
@@ -235,9 +260,11 @@ def relative_metrics(
     portfolio_returns: list[tuple[date, float]],
     benchmark_returns: list[tuple[date, float]],
     annualization: float,
+    *,
+    min_periods: int = 2,
 ) -> dict[str, float | None]:
     pairs = paired_returns(portfolio_returns, benchmark_returns)
-    if len(pairs) < 2:
+    if len(pairs) < min_periods:
         return {
             "beta": None,
             "alpha": None,
@@ -301,7 +328,9 @@ def summarize_walkforward(
     final = summary_rows[-1]
     frequency = final.get("frequency") or first.get("frequency") or "unknown"
     annualization = periods_per_year(frequency)
+    min_risk_periods = minimum_risk_periods(frequency)
     initial_capital = infer_initial_capital(summary_rows)
+    final_portfolio_equity = parse_float(final.get("portfolio_equity_after_cost"))
     portfolio_equity = equity_series(summary_rows, "portfolio_equity_after_cost")
     portfolio_returns = period_returns(
         summary_rows,
@@ -310,8 +339,9 @@ def summarize_walkforward(
         return_column="portfolio_return_after_cost",
     )
     portfolio_return_values = [value for _date, value in portfolio_returns]
-    total = cumulative_return(portfolio_equity, initial_capital)
-    max_dd = max_drawdown(portfolio_equity)
+    total = return_from_equity(final_portfolio_equity, initial_capital)
+    max_dd = max_drawdown(portfolio_equity, initial_capital)
+    enough_risk_samples = len(portfolio_returns) >= min_risk_periods
     benchmark_equity = equity_series(summary_rows, "benchmark_equity")
     benchmark_returns = period_returns(
         summary_rows,
@@ -327,13 +357,18 @@ def summarize_walkforward(
     )
     benchmark_label = "market_benchmark" if market_returns else "filtered_universe_benchmark"
     selected_benchmark_returns = market_returns or benchmark_returns
-    relative = relative_metrics(portfolio_returns, selected_benchmark_returns, annualization)
-    final_benchmark_equity = (market_equity or benchmark_equity)[-1][1] if (market_equity or benchmark_equity) else None
-    benchmark_total = (
-        final_benchmark_equity / initial_capital - 1.0
-        if final_benchmark_equity is not None and initial_capital is not None and initial_capital > 0
-        else None
+    relative = relative_metrics(
+        portfolio_returns,
+        selected_benchmark_returns,
+        annualization,
+        min_periods=min_risk_periods,
     )
+    final_benchmark_equity = (
+        parse_float(final.get("market_benchmark_equity"))
+        if market_returns
+        else parse_float(final.get("benchmark_equity"))
+    )
+    benchmark_total = return_from_equity(final_benchmark_equity, initial_capital)
     cost = parse_float(final.get("cumulative_cost_base"))
     tax = parse_float(final.get("cumulative_tax"))
     rows = {
@@ -342,16 +377,25 @@ def summarize_walkforward(
         "frequency": frequency,
         "annualization": annualization,
         "period_count": len(summary_rows),
+        "risk_metric_min_periods": min_risk_periods,
+        "risk_metric_sample_count": len(portfolio_returns),
+        "risk_metric_status": "ok" if enough_risk_samples else INSUFFICIENT_SAMPLE_REASON,
         "initial_capital": initial_capital,
-        "final_equity": portfolio_equity[-1][1] if portfolio_equity else None,
+        "final_equity": final_portfolio_equity,
         "total_return": total,
-        "annualized_return": annualized_return(total, len(portfolio_returns), annualization),
-        "annualized_volatility": annualized_volatility(portfolio_return_values, annualization),
-        "sharpe_ratio": sharpe_ratio(portfolio_return_values, annualization),
-        "sortino_ratio": sortino_ratio(portfolio_return_values, annualization),
+        "annualized_return": annualized_return(total, len(portfolio_returns), annualization)
+        if enough_risk_samples
+        else None,
+        "annualized_volatility": annualized_volatility(portfolio_return_values, annualization)
+        if enough_risk_samples
+        else None,
+        "sharpe_ratio": sharpe_ratio(portfolio_return_values, annualization) if enough_risk_samples else None,
+        "sortino_ratio": sortino_ratio(portfolio_return_values, annualization) if enough_risk_samples else None,
         "max_drawdown": max_dd,
-        "calmar_ratio": calmar_ratio(total, len(portfolio_returns), annualization, max_dd),
-        "longest_drawdown_periods": longest_drawdown_periods(portfolio_equity),
+        "calmar_ratio": calmar_ratio(total, len(portfolio_returns), annualization, max_dd)
+        if enough_risk_samples
+        else None,
+        "longest_drawdown_periods": longest_drawdown_periods(portfolio_equity, initial_capital),
         "win_rate": average([1.0 if value > 0 else 0.0 for value in portfolio_return_values]),
         "best_period_return": max(portfolio_return_values) if portfolio_return_values else None,
         "worst_period_return": min(portfolio_return_values) if portfolio_return_values else None,
@@ -381,7 +425,7 @@ def summarize_walkforward(
         "benchmark_equity": market_equity or benchmark_equity,
         "portfolio_returns": portfolio_returns,
         "benchmark_returns": selected_benchmark_returns,
-        "drawdowns": drawdown_series(portfolio_equity),
+        "drawdowns": drawdown_series(portfolio_equity, initial_capital),
     }
     return rows
 
@@ -392,6 +436,9 @@ def metric_rows(summary: dict[str, Any]) -> list[dict[str, str]]:
         metric_row("run", "period_end", summary["period_end"]),
         metric_row("run", "frequency", summary["frequency"]),
         metric_row("run", "period_count", summary["period_count"]),
+        metric_row("run", "risk_metric_min_periods", summary["risk_metric_min_periods"]),
+        metric_row("run", "risk_metric_sample_count", summary["risk_metric_sample_count"]),
+        metric_row("run", "risk_metric_status", summary["risk_metric_status"]),
         metric_row("run", "initial_capital", summary["initial_capital"], money(summary["initial_capital"])),
         metric_row("run", "final_equity", summary["final_equity"], money(summary["final_equity"])),
         metric_row("performance", "total_return", summary["total_return"], pct(summary["total_return"])),
@@ -444,8 +491,16 @@ def write_svg_line_chart(
     margin_top = 48
     margin_bottom = 56
     points = [(row_date, value) for _label, rows, _color in series for row_date, value in rows]
+    path.parent.mkdir(parents=True, exist_ok=True)
     if not points:
-        path.write_text("", encoding="utf-8")
+        lines = [
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+            '<rect width="100%" height="100%" fill="#ffffff"/>',
+            f'<text x="{margin_left}" y="28" font-family="Arial" font-size="18" font-weight="700">{escape(title)}</text>',
+            f'<text x="{width / 2:.0f}" y="{height / 2:.0f}" text-anchor="middle" font-family="Arial" font-size="15" fill="#6b7280">No data available</text>',
+            "</svg>",
+        ]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return
     dates = sorted({row_date for row_date, _value in points})
     values = [value for _row_date, value in points]
@@ -498,5 +553,4 @@ def write_svg_line_chart(
         f'<text x="{margin_left}" y="{height - 42}" font-family="Arial" font-size="11" fill="#4b5563">{dates[0].isoformat()} to {dates[-1].isoformat()}</text>'
     )
     lines.append("</svg>")
-    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

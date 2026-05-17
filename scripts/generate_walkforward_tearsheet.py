@@ -48,6 +48,10 @@ def failure_table(summary: dict[str, Any]) -> list[str]:
     return lines
 
 
+def performance_conclusion_allowed(summary: dict[str, Any]) -> bool:
+    return str(summary.get("performance_conclusion_allowed", "")).strip().lower() == "true"
+
+
 def write_charts(summary: dict[str, Any], chart_dir: Path) -> dict[str, Path]:
     chart_dir.mkdir(parents=True, exist_ok=True)
     equity_path = chart_dir / "equity_curve.svg"
@@ -102,6 +106,18 @@ def write_report(path: Path, summary: dict[str, Any], metric_rows_list: list[dic
     lines = [
         f"# Walk-Forward Performance Tear Sheet {summary['period_start']}..{summary['period_end']}",
         "",
+    ]
+    if not performance_conclusion_allowed(summary):
+        lines.extend(
+            [
+                "## Data Warning",
+                "",
+                "NOT VALID FOR PERFORMANCE CONCLUSION: listing lifecycle coverage is not point-in-time complete.",
+                "",
+            ]
+        )
+    lines.extend(
+        [
         "## Scope",
         "",
         "| field | value |",
@@ -109,9 +125,22 @@ def write_report(path: Path, summary: dict[str, Any], metric_rows_list: list[dic
         f"| frequency | {summary['frequency']} |",
         f"| sampled periods | {summary['period_count']} |",
         f"| annualization | {summary['annualization']:.0f} |",
+        f"| risk metric status | {summary['risk_metric_status']} |",
+        f"| minimum risk periods | {summary['risk_metric_min_periods']} |",
         f"| lifecycle data status | {summary['lifecycle_data_status']} |",
         f"| performance conclusion allowed | {summary['performance_conclusion_allowed']} |",
         "",
+        ]
+    )
+    if summary["risk_metric_status"] != "ok":
+        lines.extend(
+            [
+                "Risk-adjusted and annualized metrics are suppressed because the run has too few sampled periods.",
+                "",
+            ]
+        )
+    lines.extend(
+        [
         "## Performance",
         "",
         *table_rows(
@@ -181,10 +210,13 @@ def write_report(path: Path, summary: dict[str, Any], metric_rows_list: list[dic
         "## Caveats",
         "",
         "- Metrics are sampled at the walk-forward rebalance frequency, not necessarily daily.",
+        "- Annualized and risk-adjusted metrics are blank when the sampled period count is below the configured minimum.",
+        "- Sharpe, Sortino, and downside deviation assume a 0 risk-free/MAR rate.",
         "- Sharpe, Sortino, volatility, beta, and drawdown are only comparable across runs with the same sampling frequency.",
         "- This report summarizes public-engine outputs only. Real decisions and private run ledgers belong in a private workspace.",
         "",
-    ]
+        ]
+    )
     path.write_text("\n".join(lines), encoding="utf-8")
 
 

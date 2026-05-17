@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import generate_walkforward_tearsheet  # noqa: E402
-from performance_analytics import metric_rows, summarize_walkforward  # noqa: E402
+from performance_analytics import metric_rows, summarize_walkforward, write_svg_line_chart  # noqa: E402
 from research_common import read_csv, write_csv  # noqa: E402
 
 
@@ -28,6 +28,8 @@ class PerformanceTearsheetTest(unittest.TestCase):
         rows = {row["metric"]: row for row in metric_rows(summary)}
         self.assertEqual("18.80%", rows["total_return"]["formatted_value"])
         self.assertEqual("-10.00%", rows["max_drawdown"]["formatted_value"])
+        self.assertEqual("insufficient_sample_count", rows["risk_metric_status"]["value"])
+        self.assertEqual("", rows["annualized_return"]["formatted_value"])
         self.assertIn("information_ratio", rows)
 
     def test_generate_walkforward_tearsheet_writes_metrics_report_and_svg_charts(self) -> None:
@@ -73,8 +75,99 @@ class PerformanceTearsheetTest(unittest.TestCase):
             self.assertEqual("18.80%", rows["total_return"]["formatted_value"])
             self.assertEqual("1", rows["cash_drag"]["value"])
 
+    def test_drawdown_starts_from_initial_capital_when_first_period_loses_money(self) -> None:
+        rows = synthetic_summary_rows(
+            values=[
+                ("2026-01-31", "1000", "900", "-0.1", "1000", "0", "1000"),
+                ("2026-02-28", "900", "950", "0.0555555556", "1000", "0", "1000"),
+            ]
+        )
 
-def synthetic_summary_rows() -> list[dict[str, str]]:
+        summary = summarize_walkforward(rows, [])
+
+        self.assertAlmostEqual(-0.1, summary["max_drawdown"])
+        self.assertEqual(2, summary["longest_drawdown_periods"])
+        self.assertEqual([("2026-01-31", -0.1), ("2026-02-28", -0.05)], [
+            (row_date.isoformat(), round(value, 4)) for row_date, value in summary["drawdowns"]
+        ])
+
+    def test_zero_final_equity_is_not_dropped_from_total_return(self) -> None:
+        rows = synthetic_summary_rows(
+            values=[
+                ("2026-01-31", "1000", "1100", "0.1", "1000", "0", "1000"),
+                ("2026-02-28", "1100", "0", "-1", "1000", "0", "1000"),
+            ]
+        )
+
+        summary = summarize_walkforward(rows, [])
+        metric_by_name = {row["metric"]: row for row in metric_rows(summary)}
+
+        self.assertEqual(0.0, summary["final_equity"])
+        self.assertEqual(-1.0, summary["total_return"])
+        self.assertEqual("-100.00%", metric_by_name["total_return"]["formatted_value"])
+        self.assertEqual("-100.00%", metric_by_name["max_drawdown"]["formatted_value"])
+
+    def test_blank_final_equity_does_not_fall_back_to_previous_equity(self) -> None:
+        rows = synthetic_summary_rows(
+            values=[
+                ("2026-01-31", "1000", "1100", "0.1", "1000", "0", "1000"),
+                ("2026-02-28", "1100", "", "", "1000", "0", "1000"),
+            ]
+        )
+
+        summary = summarize_walkforward(rows, [])
+        metric_by_name = {row["metric"]: row for row in metric_rows(summary)}
+
+        self.assertIsNone(summary["final_equity"])
+        self.assertIsNone(summary["total_return"])
+        self.assertEqual("", metric_by_name["final_equity"]["formatted_value"])
+        self.assertEqual("", metric_by_name["total_return"]["formatted_value"])
+
+    def test_tearsheet_prints_lifecycle_warning_at_top(self) -> None:
+        rows = synthetic_summary_rows()
+        for row in rows:
+            row["performance_conclusion_allowed"] = "False"
+            row["lifecycle_data_status"] = "snapshot_only"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            summary_path = temp / "summary.csv"
+            report_path = temp / "tearsheet.md"
+            write_csv(summary_path, rows, list(rows[0]))
+
+            original_argv = sys.argv[:]
+            try:
+                sys.argv = [
+                    "generate_walkforward_tearsheet.py",
+                    "--summary",
+                    str(summary_path),
+                    "--out",
+                    str(report_path),
+                    "--no-manifest",
+                ]
+                self.assertEqual(0, generate_walkforward_tearsheet.main())
+            finally:
+                sys.argv = original_argv
+
+            report = report_path.read_text(encoding="utf-8")
+            self.assertIn("## Data Warning", report)
+            self.assertIn("NOT VALID FOR PERFORMANCE CONCLUSION", report)
+
+    def test_empty_svg_chart_writes_no_data_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "charts" / "empty.svg"
+
+            write_svg_line_chart(path, [], title="Empty Chart")
+
+            text = path.read_text(encoding="utf-8")
+            self.assertGreater(path.stat().st_size, 0)
+            self.assertIn("No data available", text)
+            self.assertIn("<svg", text)
+
+
+def synthetic_summary_rows(
+    values: list[tuple[str, str, str, str, str, str, str]] | None = None,
+) -> list[dict[str, str]]:
     base = {
         "strategy_version": "synthetic",
         "frequency": "monthly",
@@ -115,7 +208,7 @@ def synthetic_summary_rows() -> list[dict[str, str]]:
         "skipped_orders": "0",
     }
     rows = []
-    values = [
+    values = values or [
         ("2026-01-31", "1000", "1100", "0.1", "1050", "0.05", "1050"),
         ("2026-02-28", "1100", "990", "-0.1", "1029", "-0.02", "1029"),
         ("2026-03-31", "990", "1188", "0.2", "1080.45", "0.05", "1080.45"),
