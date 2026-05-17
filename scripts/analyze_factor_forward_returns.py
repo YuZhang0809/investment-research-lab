@@ -103,7 +103,7 @@ def future_return(
     end = price_on_date(points, exit_date)
     if end is None:
         if not has_price_after(points, exit_date) and points[-1].date < exit_date:
-            return ForwardReturnResult(-1.0, "assumed_delisting_loss")
+            return ForwardReturnResult(None, "price_tail_gap")
         return ForwardReturnResult(None, "missing_exit_price")
     start_price = start.adjusted_close
     end_price = end.adjusted_close
@@ -200,7 +200,7 @@ def write_report(path: Path, rows: list[dict[str, Any]], holding_days: int) -> N
         f"- holding days: {holding_days}",
         f"- rows: {len(rows)}",
         "",
-        "| factor | months | observations | avg rank IC | IC std | IC IR | positive IC months | avg top return | avg bottom return | avg top-bottom | avg coverage | missing factor | missing forward | assumed delisting loss | bucket skipped |",
+        "| factor | months | observations | avg rank IC | IC std | IC IR | positive IC months | avg top return | avg bottom return | avg top-bottom | avg coverage | missing factor | missing forward | price tail gap | bucket skipped |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     by_factor: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -219,13 +219,13 @@ def write_report(path: Path, rows: list[dict[str, Any]], holding_days: int) -> N
         avg_coverage = average([float(row["coverage"]) for row in values if row.get("coverage") not in (None, "")])
         missing_factor = sum(int(row["missing_factor"]) for row in values)
         missing_forward = sum(int(row["missing_forward_return"]) for row in values)
-        delisting_losses = sum(int(row["assumed_delisting_loss"]) for row in values)
+        price_tail_gaps = sum(int(row["price_tail_gap"]) for row in values)
         bucket_skipped = sum(1 for row in values if row.get("bucket_status") != "ok")
         lines.append(
             f"| {factor} | {len(values)} | {observations} | "
             f"{number(avg_ic)} | {number(ic_std)} | {number(ic_ir)} | "
             f"{positive_ic_months}/{len(rank_ics)} | {pct(avg_top)} | {pct(avg_bottom)} | "
-            f"{pct(avg_spread)} | {pct(avg_coverage)} | {missing_factor} | {missing_forward} | {delisting_losses} | {bucket_skipped} |"
+            f"{pct(avg_spread)} | {pct(avg_coverage)} | {missing_factor} | {missing_forward} | {price_tail_gaps} | {bucket_skipped} |"
         )
     lines.extend(
         [
@@ -266,7 +266,7 @@ def main() -> int:
             missing_exit_price = 0
             insufficient_forward_window = 0
             invalid_start_price = 0
-            assumed_delisting_loss = 0
+            price_tail_gap = 0
             for row in factor_rows:
                 total_rows += 1
                 factor_value = parse_float(row.get(factor))
@@ -277,9 +277,8 @@ def main() -> int:
                 forward = future_return(price_index.get(code, []), calendar, rebalance_date, args.holding_days)
                 if forward.status == "ok" and forward.value is not None:
                     observations.append((factor_value, forward.value))
-                elif forward.status == "assumed_delisting_loss" and forward.value is not None:
-                    observations.append((factor_value, forward.value))
-                    assumed_delisting_loss += 1
+                elif forward.status == "price_tail_gap":
+                    price_tail_gap += 1
                 elif forward.status == "missing_price_history":
                     missing_price_history += 1
                 elif forward.status == "missing_start_price":
@@ -308,6 +307,7 @@ def main() -> int:
                 missing_price_history
                 + missing_start_price
                 + missing_exit_price
+                + price_tail_gap
                 + insufficient_forward_window
                 + invalid_start_price
             )
@@ -331,9 +331,9 @@ def main() -> int:
                     "missing_price_history": missing_price_history,
                     "missing_start_price": missing_start_price,
                     "missing_exit_price": missing_exit_price,
+                    "price_tail_gap": price_tail_gap,
                     "insufficient_forward_window": insufficient_forward_window,
                     "invalid_start_price": invalid_start_price,
-                    "assumed_delisting_loss": assumed_delisting_loss,
                 }
             )
 
@@ -360,9 +360,9 @@ def main() -> int:
         "missing_price_history",
         "missing_start_price",
         "missing_exit_price",
+        "price_tail_gap",
         "insufficient_forward_window",
         "invalid_start_price",
-        "assumed_delisting_loss",
     ]
     write_csv(output_path, [{key: fmt(value) for key, value in row.items()} for row in output_rows], fields)
     write_report(report_path, output_rows, args.holding_days)
@@ -372,7 +372,7 @@ def main() -> int:
             source="derived_factor_forward_returns",
             file_path=output_path,
             vendor="local",
-            schema_version="factor_forward_returns_v0_1",
+            schema_version="factor_forward_returns_v0_2",
             date_range=f"{start_date.isoformat()}..{end_date.isoformat()}",
             notes=f"{len(output_rows)} rows; holding_days={args.holding_days}",
         )

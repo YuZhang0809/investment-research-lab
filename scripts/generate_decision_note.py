@@ -79,6 +79,26 @@ def coalesce(*values: Any) -> str:
     return ""
 
 
+def pipeline_caveats(record: dict[str, str]) -> list[str]:
+    caveats: list[str] = []
+    lifecycle_status = record.get("lifecycle_data_status", "")
+    conclusion_allowed = str(record.get("performance_conclusion_allowed", "")).lower()
+    if lifecycle_status and conclusion_allowed != "true":
+        caveats.append(
+            f"Performance conclusion not allowed by lifecycle data status: {lifecycle_status}."
+        )
+    cost_scenario = record.get("cost_scenario", "")
+    execution_price = record.get("execution_price", "")
+    if cost_scenario or execution_price:
+        caveats.append(f"Run context: cost_scenario={cost_scenario}; execution_price={execution_price}.")
+    tail_policy = record.get("missing_price_tail_policy", "")
+    if tail_policy:
+        max_stale = record.get("missing_price_tail_max_stale_days", "")
+        detail = f"; max_stale_trading_days={max_stale}" if max_stale else ""
+        caveats.append(f"Missing price tail policy: {tail_policy}{detail}.")
+    return caveats
+
+
 def note_lines(record: dict[str, str], args: argparse.Namespace, rules: dict[str, Any]) -> list[str]:
     decision = coalesce(args.decision, record.get("decision"), rules.get("decision"), "EXPLORATORY")
     if decision not in DECISIONS:
@@ -87,7 +107,7 @@ def note_lines(record: dict[str, str], args: argparse.Namespace, rules: dict[str
     configured_caveats = rules.get("known_caveats", []) or []
     if isinstance(configured_caveats, str):
         configured_caveats = [configured_caveats]
-    caveats = list(configured_caveats) + list(args.known_caveat)
+    caveats = pipeline_caveats(record) + list(configured_caveats) + list(args.known_caveat)
     if not caveats:
         caveats = ["Research note only; not an approval, compliance artifact, or immutable record."]
     next_action = coalesce(args.next_action, rules.get("next_action"), "Review candidates, failures, and assumptions before another run.")
@@ -99,6 +119,11 @@ def note_lines(record: dict[str, str], args: argparse.Namespace, rules: dict[str
         ("max drawdown", pct(record.get("max_drawdown"))),
         ("avg cash pct", pct(record.get("avg_cash_pct"))),
         ("avg turnover", pct(record.get("avg_turnover"))),
+        ("rebalance count", number(record.get("rebalance_count"))),
+        ("lifecycle status", record.get("lifecycle_data_status", "")),
+        ("performance conclusion allowed", record.get("performance_conclusion_allowed", "")),
+        ("cost scenario", record.get("cost_scenario", "")),
+        ("execution price", record.get("execution_price", "")),
     ]
     optional_metrics = [
         ("market benchmark", record.get("market_benchmark_id", "")),

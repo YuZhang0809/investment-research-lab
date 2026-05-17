@@ -91,7 +91,7 @@ def drift_return(
     exit_point = price_on_date(points, exit_date)
     if exit_point is None:
         if not has_price_after(points, exit_date) and points[-1].date < exit_date:
-            return -1.0, "assumed_delisting_loss"
+            return None, "price_tail_gap"
         return None, "missing_exit_price"
     entry = entry_point.adjusted_close
     exit_value = exit_point.adjusted_close

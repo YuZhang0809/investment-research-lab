@@ -15,6 +15,26 @@ code,name,market,sector,listed_date,delisted_date,security_type,is_common_stock,
 date,code,unadjusted_close,adjusted_close,trading_value,tradable_flag,price_limit_flag
 ```
 
+## Market Benchmark Prices
+
+Optional input for `run_qvm_walkforward.py --market-benchmark-prices`.
+
+Minimum CSV contract:
+
+```text
+date,benchmark_id,close
+```
+
+The ID column is optional when the file contains only one series. Accepted ID
+columns are `benchmark_id`, `index_code`, `code`, `id`, or `ticker`. Accepted
+value columns are `adjusted_close`, `close`, `index_value`, `value`, `price`, or
+`unadjusted_close`, in that priority order.
+
+When a market benchmark is supplied, walk-forward summaries include
+`market_benchmark_id`, `market_benchmark_equity`, and
+`market_benchmark_return`. The run ledger derives market beta, annualized simple
+alpha, annualized tracking error, and information ratio from period returns.
+
 ## Fundamentals
 
 ```text
@@ -44,7 +64,7 @@ experiments/run_ledger.example.csv
 Minimum CSV contract:
 
 ```text
-run_id,run_at,experiment_id,phase,config_hash,data_hash,universe_label,period_start,period_end,strategy_label,rebalance_frequency,cost_scenario,execution_price,key_metric_after_cost,key_metric_after_tax,key_metric_benchmark,market_benchmark_id,market_beta,market_alpha,tracking_error,information_ratio,max_drawdown,avg_cash_pct,avg_turnover,notes_path,decision,decision_reason
+run_id,run_at,experiment_id,phase,config_hash,data_hash,code_version,engine_hash,universe_label,period_start,period_end,rebalance_count,strategy_label,rebalance_frequency,cost_scenario,execution_price,lifecycle_data_status,performance_conclusion_allowed,missing_price_tail_policy,missing_price_tail_max_stale_days,key_metric_after_cost,key_metric_after_tax,key_metric_benchmark,market_benchmark_id,market_beta,market_alpha,tracking_error,information_ratio,max_drawdown,avg_cash_pct,avg_turnover,notes_path,decision,decision_reason
 ```
 
 Allowed `decision` values:
@@ -56,6 +76,12 @@ REJECT
 PAPER_TEST
 ```
 
-The optional market fields are placeholders for later alpha/beta analysis and
-may be empty. Real run ledgers belong in private workspaces because they can
-contain real research results and decisions.
+`code_version` and `engine_hash` distinguish runs with identical config and data
+but different public-engine code. The optional market fields are populated when
+the summary has a market benchmark series; otherwise they remain empty. Real run
+ledgers belong in private workspaces because they can contain real research
+results and decisions.
+
+`lifecycle_data_status` is a caveat field, not an approval flag. Current
+walk-forward values include `snapshot_only`, `partial_lifecycle`,
+`pit_no_delistings_observed`, and `pit_with_delistings`.

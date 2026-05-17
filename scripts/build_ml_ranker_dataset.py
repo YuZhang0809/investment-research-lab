@@ -83,7 +83,7 @@ def future_return(
     exit_point = price_on_date(points, exit_date)
     if exit_point is None:
         if points and not has_price_after(points, exit_date) and points[-1].date < exit_date:
-            return -1.0, "assumed_delisting_loss"
+            return None, "price_tail_gap"
         return None, "missing_exit_price"
     entry = entry_point.adjusted_close
     exit_value = exit_point.adjusted_close
@@ -117,7 +117,6 @@ def write_report(path: Path, rows: list[dict[str, str]], start: date, end: date,
     returns = [parse_float(row.get("future_return")) for row in rows]
     clean = [value for value in returns if value is not None]
     avg_return = sum(clean) / len(clean) if clean else None
-    delisting_rows = sum(1 for row in rows if row.get("label_status") == "assumed_delisting_loss")
     lines = [
         "# ML Ranker Dataset Report",
         "",
@@ -126,7 +125,7 @@ def write_report(path: Path, rows: list[dict[str, str]], start: date, end: date,
         f"- holding_days label: {holding_days}",
         f"- rows: {len(rows):,}",
         f"- average future_return: {fmt(avg_return)}",
-        f"- assumed delisting loss rows: {delisting_rows:,}",
+        "- price tail gaps are excluded from labels unless lifecycle-aware data handling is added.",
         "",
         "## Guardrails",
         "",

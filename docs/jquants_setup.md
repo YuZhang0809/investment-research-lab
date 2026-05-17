@@ -30,6 +30,26 @@ python scripts\download_jquants.py `
 
 The generated files are written under `data/raw/` and ignored by git.
 
+## Market Benchmark
+
+TOPIX can be downloaded into the market benchmark contract:
+
+```powershell
+python scripts\download_jquants_market_benchmark.py `
+  --benchmark topix `
+  --from 2016-05-17 `
+  --to 2026-05-15
+```
+
+Use the output with walk-forward runs:
+
+```powershell
+python scripts\run_qvm_walkforward.py `
+  ... `
+  --market-benchmark-prices data\raw\jquants\contracts\market_benchmark_topix_20160517_20260515.csv `
+  --market-benchmark-id TOPIX
+```
+
 ## Bulk Fundamentals
 
 Bulk downloads are supported for financial summaries:

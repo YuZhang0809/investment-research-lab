@@ -7,6 +7,7 @@ import tempfile
 import time
 import shutil
 import unittest
+from argparse import Namespace
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -15,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from duckdb_query import parquet_scan, query  # noqa: E402
+from research_common import load_yaml  # noqa: E402
+import run_qvm_walkforward  # noqa: E402
 
 
 def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) -> None:
@@ -146,6 +149,24 @@ def write_synthetic_walkforward_fixture(temp: Path) -> tuple[Path, Path, Path]:
     return listings, prices, fundamentals
 
 
+def write_synthetic_market_benchmark(temp: Path) -> Path:
+    benchmark = temp / "market_benchmark.csv"
+    days = trading_days(date(2026, 3, 31), 280)
+    write_csv(
+        benchmark,
+        [
+            {
+                "date": day.isoformat(),
+                "benchmark_id": "SYNMKT",
+                "close": 1000 + day_index,
+            }
+            for day_index, day in enumerate(days)
+        ],
+        ["date", "benchmark_id", "close"],
+    )
+    return benchmark
+
+
 def cache_namespaces(cache_dir: Path, layer: str) -> list[Path]:
     layer_dir = cache_dir / layer
     if not layer_dir.exists():
@@ -233,7 +254,7 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
             summary_paths = sorted(out_dir.glob("qvm_walkforward_summary_*.csv"))
             with summary_paths[-1].open("r", encoding="utf-8", newline="") as file:
                 summary = list(csv.DictReader(file))
-            self.assertEqual("pit", summary[-1]["lifecycle_data_status"])
+            self.assertEqual("pit_with_delistings", summary[-1]["lifecycle_data_status"])
             self.assertEqual("True", summary[-1]["performance_conclusion_allowed"])
             self.assertIn("cache_fingerprint", summary[-1])
 
@@ -507,6 +528,40 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
             self.assertEqual(mtimes["factors"], factors_cache.stat().st_mtime_ns)
             self.assertEqual(mtimes["scores"], scores_cache.stat().st_mtime_ns)
 
+    def test_cache_fingerprints_include_stage_source_checksums(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            args = Namespace(
+                listings=listings,
+                prices=prices,
+                fundamentals=fundamentals,
+                strategy_version="qvm",
+                start_date="2026-03-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                execution_price="rebalance_close",
+                cost_scenario="base",
+                capital_jpy=5_000_000,
+                tax_rate=0.20315,
+            )
+
+            config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            fingerprints = run_qvm_walkforward.compute_cache_fingerprints(args, config)
+            original_source_checksum = run_qvm_walkforward.source_checksum
+            try:
+                run_qvm_walkforward.source_checksum = lambda name: f"changed-{name}"
+                changed = run_qvm_walkforward.compute_cache_fingerprints(args, config)
+            finally:
+                run_qvm_walkforward.source_checksum = original_source_checksum
+
+            self.assertEqual({"inputs", "universe", "factors", "scores", "run"}, set(fingerprints))
+            self.assertEqual(fingerprints["inputs"], changed["inputs"])
+            self.assertNotEqual(fingerprints["universe"], changed["universe"])
+            self.assertNotEqual(fingerprints["factors"], changed["factors"])
+            self.assertNotEqual(fingerprints["scores"], changed["scores"])
+            self.assertNotEqual(fingerprints["run"], changed["run"])
+
     def test_rebalance_candidate_cache_is_run_dependent_for_capital(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
@@ -556,6 +611,59 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
             self.assertEqual(1, len(cache_namespaces(cache_dir, "universe")))
             self.assertEqual(1, len(cache_namespaces(cache_dir, "factors")))
             self.assertEqual(1, len(cache_namespaces(cache_dir, "scores")))
+
+    def test_walkforward_outputs_market_benchmark_series(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            market_benchmark = write_synthetic_market_benchmark(temp)
+            out_dir = temp / "out"
+            report_dir = temp / "reports"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "run_qvm_walkforward.py"),
+                    "--config",
+                    str(ROOT / "configs" / "qvm_v0_1.example.yml"),
+                    "--listings",
+                    str(listings),
+                    "--prices",
+                    str(prices),
+                    "--fundamentals",
+                    str(fundamentals),
+                    "--start-date",
+                    "2026-01-01",
+                    "--end-date",
+                    "2026-03-31",
+                    "--rebalance",
+                    "monthly",
+                    "--market-benchmark-prices",
+                    str(market_benchmark),
+                    "--market-benchmark-id",
+                    "SYNMKT",
+                    "--out-dir",
+                    str(out_dir),
+                    "--report-dir",
+                    str(report_dir),
+                    "--no-manifest",
+                    "--skip-stage-manifest",
+                ],
+                cwd=ROOT,
+                check=True,
+            )
+
+            summary_paths = sorted(out_dir.glob("qvm_walkforward_summary_*.csv"))
+            with summary_paths[-1].open("r", encoding="utf-8", newline="") as file:
+                summary = list(csv.DictReader(file))
+            self.assertEqual("SYNMKT", summary[-1]["market_benchmark_id"])
+            self.assertGreater(float(summary[-1]["market_benchmark_equity"]), 5_000_000)
+            self.assertNotEqual("", summary[-1]["market_benchmark_return"])
+
+            equity_paths = sorted(out_dir.glob("qvm_walkforward_equity_*.csv"))
+            with equity_paths[-1].open("r", encoding="utf-8", newline="") as file:
+                equity = list(csv.DictReader(file))
+            self.assertEqual("SYNMKT", equity[-1]["market_benchmark_id"])
+            self.assertIn("market benchmark return", sorted(report_dir.glob("qvm_walkforward_*.md"))[-1].read_text())
 
 
 if __name__ == "__main__":

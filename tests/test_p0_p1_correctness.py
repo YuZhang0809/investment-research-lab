@@ -12,8 +12,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import run_qvm_walkforward  # noqa: E402
+from analyze_event_drift import PricePoint as DriftPricePoint  # noqa: E402
+from analyze_event_drift import drift_return  # noqa: E402
 from analyze_factor_forward_returns import PricePoint as FactorPricePoint  # noqa: E402
 from analyze_factor_forward_returns import future_return as factor_future_return  # noqa: E402
+from build_ml_ranker_dataset import PricePoint as MlPricePoint  # noqa: E402
+from build_ml_ranker_dataset import future_return as ml_future_return  # noqa: E402
 from build_universe import build_universe_from_rows  # noqa: E402
 from build_factors import return_with_skip  # noqa: E402
 from download_jquants import convert_master, has_trade  # noqa: E402
@@ -91,7 +95,42 @@ class P0P1CorrectnessTest(unittest.TestCase):
         error_checks = {row["check"] for row in issues if row["severity"] == "error"}
         self.assertIn("listing_lifecycle_coverage", error_checks)
 
-    def test_factor_forward_return_counts_terminal_price_as_delisting_loss(self) -> None:
+    def test_lifecycle_status_requires_more_than_one_delisting_marker(self) -> None:
+        self.assertEqual("unknown", run_qvm_walkforward.lifecycle_data_status([]))
+        self.assertEqual(
+            "snapshot_only",
+            run_qvm_walkforward.lifecycle_data_status(
+                [{"code": "1001", "listed_date": "", "delisted_date": ""}]
+            ),
+        )
+        self.assertEqual(
+            "partial_lifecycle",
+            run_qvm_walkforward.lifecycle_data_status(
+                [
+                    {"code": "1001", "listed_date": "2020-01-01", "delisted_date": ""},
+                    {"code": "1002", "listed_date": "", "delisted_date": ""},
+                ]
+            ),
+        )
+        self.assertEqual(
+            "pit_no_delistings_observed",
+            run_qvm_walkforward.lifecycle_data_status(
+                [{"code": "1001", "listed_date": "2020-01-01", "delisted_date": ""}]
+            ),
+        )
+        self.assertEqual(
+            "pit_with_delistings",
+            run_qvm_walkforward.lifecycle_data_status(
+                [
+                    {"code": "1001", "listed_date": "2020-01-01", "delisted_date": ""},
+                    {"code": "1002", "listed_date": "2020-01-01", "delisted_date": "2026-01-31"},
+                ]
+            ),
+        )
+        self.assertFalse(run_qvm_walkforward.performance_conclusion_allowed("pit_no_delistings_observed"))
+        self.assertTrue(run_qvm_walkforward.performance_conclusion_allowed("pit_with_delistings"))
+
+    def test_factor_forward_return_excludes_price_tail_gap_without_lifecycle_data(self) -> None:
         calendar = [date(2026, 1, 1) + timedelta(days=index) for index in range(5)]
         points = [
             FactorPricePoint(date=date(2026, 1, 1), adjusted_close=100.0),
@@ -100,8 +139,27 @@ class P0P1CorrectnessTest(unittest.TestCase):
 
         result = factor_future_return(points, calendar, date(2026, 1, 1), 3)
 
-        self.assertEqual("assumed_delisting_loss", result.status)
-        self.assertEqual(-1.0, result.value)
+        self.assertEqual("price_tail_gap", result.status)
+        self.assertIsNone(result.value)
+
+    def test_event_and_ml_diagnostics_exclude_price_tail_gap_without_lifecycle_data(self) -> None:
+        calendar = [date(2026, 1, 1) + timedelta(days=index) for index in range(5)]
+        drift_points = [
+            DriftPricePoint(date=date(2026, 1, 1), adjusted_close=100.0),
+            DriftPricePoint(date=date(2026, 1, 2), adjusted_close=90.0),
+        ]
+        ml_points = [
+            MlPricePoint(date=date(2026, 1, 1), adjusted_close=100.0),
+            MlPricePoint(date=date(2026, 1, 2), adjusted_close=90.0),
+        ]
+
+        drift_value, drift_status = drift_return(drift_points, calendar, date(2026, 1, 1), 3)
+        ml_value, ml_status = ml_future_return(ml_points, calendar, date(2026, 1, 1), 3)
+
+        self.assertEqual("price_tail_gap", drift_status)
+        self.assertIsNone(drift_value)
+        self.assertEqual("price_tail_gap", ml_status)
+        self.assertIsNone(ml_value)
 
     def test_factor_momentum_uses_market_calendar_not_per_code_row_count(self) -> None:
         calendar = [date(2026, 1, 1) + timedelta(days=index) for index in range(10)]

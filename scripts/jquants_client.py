@@ -89,6 +89,11 @@ def request_paginated(api_key: str, path: str, params: dict[str, str]) -> list[d
             code=params.get("code", ""),
             date_yyyymmdd=params.get("date", ""),
         )
+    elif path == "/indices/topix":
+        frame = client.get_idx_bars_daily_topix(
+            from_yyyymmdd=params.get("from", ""),
+            to_yyyymmdd=params.get("to", ""),
+        )
     else:
         raise ValueError(f"Unsupported endpoint for official J-Quants client: {path}")
     return frame_to_rows(frame)

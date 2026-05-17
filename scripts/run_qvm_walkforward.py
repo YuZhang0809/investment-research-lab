@@ -40,6 +40,12 @@ class PricePoint:
     price_limit_flag: bool
 
 
+@dataclass
+class MarketBenchmarkPoint:
+    date: date
+    value: float
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run QVM walk-forward rebalance loop.")
     parser.add_argument("--config", type=Path, default=Path("configs/qvm_v0_1.example.yml"))
@@ -66,6 +72,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-dir", type=Path, default=Path("data/processed/walkforward"))
     parser.add_argument("--report-dir", type=Path, default=Path("reports/walkforward"))
     parser.add_argument("--manifest", type=Path, default=Path("data/manifest/data_manifest.csv"))
+    parser.add_argument(
+        "--market-benchmark-prices",
+        type=Path,
+        help="Optional market benchmark series with date and adjusted_close/close/value columns.",
+    )
+    parser.add_argument(
+        "--market-benchmark-id",
+        help="Optional benchmark ID selected from benchmark_id/index_code/code/id/ticker columns.",
+    )
     parser.add_argument("--cache-dir", type=Path, help="Directory for reusable walk-forward Parquet cache.")
     parser.add_argument(
         "--cache-format",
@@ -115,6 +130,68 @@ def build_price_index(price_rows: list[dict[str, str]]) -> dict[str, list[PriceP
     for values in grouped.values():
         values.sort(key=lambda point: point.date)
     return grouped
+
+
+def market_benchmark_id_column(rows: list[dict[str, str]]) -> str | None:
+    if not rows:
+        return None
+    columns = set(rows[0])
+    for column in ["benchmark_id", "index_code", "code", "id", "ticker"]:
+        if column in columns:
+            return column
+    return None
+
+
+def market_benchmark_value(row: dict[str, str]) -> float | None:
+    for column in ["adjusted_close", "close", "index_value", "value", "price", "unadjusted_close"]:
+        value = parse_float(row.get(column))
+        if value is not None and value > 0:
+            return value
+    return None
+
+
+def build_market_benchmark_series(
+    rows: list[dict[str, str]],
+    benchmark_id: str | None = None,
+) -> tuple[str, list[MarketBenchmarkPoint]]:
+    if not rows:
+        return benchmark_id or "", []
+    id_column = market_benchmark_id_column(rows)
+    available_ids = sorted({(row.get(id_column) or "").strip() for row in rows if id_column and row.get(id_column)})
+    selected_id = benchmark_id or (available_ids[0] if len(available_ids) == 1 else "")
+    if id_column and len(available_ids) > 1 and not benchmark_id:
+        raise ValueError(f"Market benchmark file contains multiple IDs in {id_column}; pass --market-benchmark-id.")
+
+    points: list[MarketBenchmarkPoint] = []
+    for row in rows:
+        if id_column and benchmark_id and (row.get(id_column) or "").strip() != benchmark_id:
+            continue
+        row_date = parse_date(row.get("date"), field_name="market_benchmark.date")
+        value = market_benchmark_value(row)
+        if row_date is None or value is None:
+            continue
+        points.append(MarketBenchmarkPoint(row_date, value))
+    points.sort(key=lambda point: point.date)
+    if benchmark_id and not points:
+        raise ValueError(f"No market benchmark rows found for --market-benchmark-id {benchmark_id!r}.")
+    return selected_id or benchmark_id or "market_benchmark", points
+
+
+def market_benchmark_at(points: list[MarketBenchmarkPoint], as_of: date) -> MarketBenchmarkPoint | None:
+    latest: MarketBenchmarkPoint | None = None
+    for point in points:
+        if point.date > as_of:
+            break
+        latest = point
+    return latest
+
+
+def market_benchmark_return(points: list[MarketBenchmarkPoint], start: date, end: date) -> float | None:
+    start_point = market_benchmark_at(points, start)
+    end_point = market_benchmark_at(points, end)
+    if not start_point or not end_point or start_point.value <= 0:
+        return None
+    return end_point.value / start_point.value - 1.0
 
 
 def all_price_dates(price_index: dict[str, list[PricePoint]]) -> list[date]:
@@ -230,17 +307,20 @@ def snapshot_only_listings(rows: list[dict[str, str]]) -> bool:
 
 
 def lifecycle_data_status(rows: list[dict[str, str]]) -> str:
-    if snapshot_only_listings(rows):
-        return "snapshot_only"
     if not rows:
         return "unknown"
+    if snapshot_only_listings(rows):
+        return "snapshot_only"
+    listed_dates = [(row.get("listed_date") or "").strip() for row in rows]
+    if any(not value for value in listed_dates):
+        return "partial_lifecycle"
     if not any((row.get("delisted_date") or "").strip() for row in rows):
-        return "unknown"
-    return "pit"
+        return "pit_no_delistings_observed"
+    return "pit_with_delistings"
 
 
 def performance_conclusion_allowed(status: str) -> bool:
-    return status == "pit"
+    return status == "pit_with_delistings"
 
 
 def missing_price_tail_policy(config: dict[str, Any]) -> tuple[str, int]:
@@ -557,7 +637,14 @@ def cache_config(config: dict[str, Any], *keys: str) -> dict[str, Any]:
     return {key: config.get(key, {}) for key in keys}
 
 
+def source_checksum(name: str) -> str:
+    return checksum(Path(__file__).resolve().parent / name)
+
+
 def compute_cache_fingerprints(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, str]:
+    market_benchmark_prices = getattr(args, "market_benchmark_prices", None)
+    market_benchmark_id = getattr(args, "market_benchmark_id", None)
+    market_benchmark_checksum = checksum(market_benchmark_prices) if market_benchmark_prices else ""
     inputs_payload = {
         "schema_version": "walkforward_inputs_cache_v0_1",
         "inputs": {
@@ -572,6 +659,10 @@ def compute_cache_fingerprints(args: argparse.Namespace, config: dict[str, Any])
             "schema_version": "walkforward_universe_cache_v0_1",
             "inputs": inputs_fingerprint,
             "config": cache_config(config, "scope", "universe"),
+            "source": {
+                "build_universe.py": source_checksum("build_universe.py"),
+                "research_common.py": source_checksum("research_common.py"),
+            },
         }
     )
     factors_fingerprint = cache_digest(
@@ -579,6 +670,10 @@ def compute_cache_fingerprints(args: argparse.Namespace, config: dict[str, Any])
             "schema_version": "walkforward_factors_cache_v0_1",
             "inputs": inputs_fingerprint,
             "universe": universe_fingerprint,
+            "source": {
+                "build_factors.py": source_checksum("build_factors.py"),
+                "research_common.py": source_checksum("research_common.py"),
+            },
             "factor_engine": {
                 "return_12_1": {"lookback_days": 252, "skip_days": 21},
                 "return_6_1": {"lookback_days": 126, "skip_days": 21},
@@ -591,6 +686,10 @@ def compute_cache_fingerprints(args: argparse.Namespace, config: dict[str, Any])
             "factors": factors_fingerprint,
             "strategy_version": args.strategy_version,
             "config": cache_config(config, "strategy", "factors"),
+            "source": {
+                "build_scores.py": source_checksum("build_scores.py"),
+                "research_common.py": source_checksum("research_common.py"),
+            },
         }
     )
     run_fingerprint = cache_digest(
@@ -604,6 +703,12 @@ def compute_cache_fingerprints(args: argparse.Namespace, config: dict[str, Any])
             "cost_scenario": args.cost_scenario,
             "capital_jpy": args.capital_jpy,
             "tax_rate": args.tax_rate,
+            "market_benchmark_prices": market_benchmark_checksum,
+            "market_benchmark_id": market_benchmark_id or "",
+            "source": {
+                "run_qvm_walkforward.py": source_checksum("run_qvm_walkforward.py"),
+                "research_common.py": source_checksum("research_common.py"),
+            },
         }
     )
     return {
@@ -864,6 +969,11 @@ def write_report(path: Path, summary_rows: list[dict[str, Any]], initial_capital
     taxable_values = [float(row["after_tax_taxable_equity"]) for row in summary_rows]
     benchmark_values = [float(row["benchmark_equity"]) for row in summary_rows]
     research_values = [float(row["research_equity"]) for row in summary_rows]
+    market_values = [
+        value
+        for value in (parse_float(row.get("market_benchmark_equity")) for row in summary_rows)
+        if value is not None
+    ]
     avg_cash_pct = sum(float(row["cash_pct"]) for row in summary_rows) / len(summary_rows)
     avg_turnover = sum(float(row["turnover"]) for row in summary_rows) / len(summary_rows)
     avg_holdings = sum(float(row["holdings_count"]) for row in summary_rows) / len(summary_rows)
@@ -903,6 +1013,7 @@ def write_report(path: Path, summary_rows: list[dict[str, Any]], initial_capital
             f"| strict rebalance price filter | {first.get('strict_rebalance_price_filter', '')} |",
             f"| missing price tail policy | {first.get('missing_price_tail_policy', '')} |",
             f"| missing price tail max stale days | {first.get('missing_price_tail_max_stale_days', '')} |",
+            f"| market benchmark | {first.get('market_benchmark_id', '')} |",
             "",
         ]
     )
@@ -915,10 +1026,20 @@ def write_report(path: Path, summary_rows: list[dict[str, Any]], initial_capital
         f"- after-tax taxable return: {pct(float(final['after_tax_taxable_equity']) / initial_capital - 1)}",
         f"- filtered-universe benchmark return: {pct(float(final['benchmark_equity']) / initial_capital - 1)}",
         f"- theoretical research basket return: {pct(float(final['research_equity']) / initial_capital - 1)}",
+        *(
+            [f"- market benchmark return: {pct(float(final['market_benchmark_equity']) / initial_capital - 1)}"]
+            if final.get("market_benchmark_id")
+            else []
+        ),
         f"- portfolio max drawdown: {pct(max_drawdown(portfolio_values))}",
         f"- after-tax taxable max drawdown: {pct(max_drawdown(taxable_values))}",
         f"- benchmark max drawdown: {pct(max_drawdown(benchmark_values))}",
         f"- research basket max drawdown: {pct(max_drawdown(research_values))}",
+        *(
+            [f"- market benchmark max drawdown: {pct(max_drawdown(market_values))}"]
+            if final.get("market_benchmark_id")
+            else []
+        ),
         f"- average holdings: {avg_holdings:.1f}",
         f"- average zero-lot targets: {avg_zero_lot:.1f}",
         f"- average cash: {pct(avg_cash_pct)}",
@@ -990,6 +1111,13 @@ def main() -> int:
     dates = rebalance_dates(price_calendar, start_date, end_date, args.frequency)
     if not dates:
         raise ValueError("No rebalance dates found in price file for the requested window.")
+    market_benchmark_label = ""
+    market_benchmark_points: list[MarketBenchmarkPoint] = []
+    if args.market_benchmark_prices:
+        market_benchmark_label, market_benchmark_points = build_market_benchmark_series(
+            read_csv(args.market_benchmark_prices),
+            args.market_benchmark_id,
+        )
 
     max_order_to_adv = float(config["execution"].get("max_order_to_median_trading_value", 0.005))
     tail_gap_mode, tail_gap_max_stale_days = missing_price_tail_policy(config)
@@ -1008,6 +1136,7 @@ def main() -> int:
     previous_research_codes: list[str] = []
     benchmark_equity = args.capital_jpy
     research_equity = args.capital_jpy
+    market_benchmark_equity = args.capital_jpy
 
     trade_rows: list[dict[str, Any]] = []
     failure_rows: list[dict[str, Any]] = []
@@ -1042,6 +1171,15 @@ def main() -> int:
                 benchmark_equity *= 1 + benchmark_return
             if research_return is not None:
                 research_equity *= 1 + research_return
+            market_period_return = (
+                market_benchmark_return(market_benchmark_points, previous_date, rebalance_date)
+                if market_benchmark_points
+                else None
+            )
+            if market_period_return is not None:
+                market_benchmark_equity *= 1 + market_period_return
+        else:
+            market_period_return = 0.0 if market_benchmark_points else None
 
         for code, adjusted_shares in list(holdings.items()):
             delisted_date = delisting_dates.get(code)
@@ -1428,6 +1566,9 @@ def main() -> int:
             "portfolio_return_after_cost": portfolio_return,
             "benchmark_equity": benchmark_equity,
             "research_equity": research_equity,
+            "market_benchmark_id": market_benchmark_label,
+            "market_benchmark_equity": market_benchmark_equity if market_benchmark_points else "",
+            "market_benchmark_return": market_period_return if market_period_return is not None else "",
             "cash": cash,
             "cash_pct": cash_pct,
             "turnover": turnover_value / pre_equity if pre_equity else 0,
@@ -1453,6 +1594,9 @@ def main() -> int:
                 "after_tax_nisa_like_equity": after_equity,
                 "benchmark_equity": benchmark_equity,
                 "research_equity": research_equity,
+                "market_benchmark_id": market_benchmark_label,
+                "market_benchmark_equity": market_benchmark_equity if market_benchmark_points else "",
+                "market_benchmark_return": market_period_return if market_period_return is not None else "",
                 "cash": cash,
             }
         )
@@ -1518,6 +1662,9 @@ def main() -> int:
             "portfolio_return_after_cost",
             "benchmark_equity",
             "research_equity",
+            "market_benchmark_id",
+            "market_benchmark_equity",
+            "market_benchmark_return",
             "cash",
             "cash_pct",
             "turnover",
@@ -1567,6 +1714,9 @@ def main() -> int:
             "after_tax_nisa_like_equity",
             "benchmark_equity",
             "research_equity",
+            "market_benchmark_id",
+            "market_benchmark_equity",
+            "market_benchmark_return",
             "cash",
         ],
     )
