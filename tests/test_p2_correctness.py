@@ -90,6 +90,82 @@ class P2CorrectnessTest(unittest.TestCase):
             self.assertEqual("1", rank_by_code["1001"])
             self.assertEqual("2", rank_by_code["2002"])
 
+    def test_build_targets_does_not_execute_stale_research_price(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            scores = temp / "scores.csv"
+            universe = temp / "universe.csv"
+            out_dir = temp / "targets"
+            write_csv(
+                scores,
+                [
+                    {
+                        "rebalance_date": "2026-03-31",
+                        "rank": "1",
+                        "code": "1001",
+                        "name": "Stale",
+                        "sector": "Tech",
+                        "latest_unadjusted_close": "1000",
+                        "qvm_score": "1.0",
+                    }
+                ],
+                [
+                    "rebalance_date",
+                    "rank",
+                    "code",
+                    "name",
+                    "sector",
+                    "latest_unadjusted_close",
+                    "qvm_score",
+                ],
+            )
+            write_csv(
+                universe,
+                [
+                    {
+                        "code": "1001",
+                        "lot_size": "100",
+                        "latest_unadjusted_close": "1000",
+                        "rebalance_price_available": "false",
+                        "median_60d_trading_value": "10000000",
+                    }
+                ],
+                [
+                    "code",
+                    "lot_size",
+                    "latest_unadjusted_close",
+                    "rebalance_price_available",
+                    "median_60d_trading_value",
+                ],
+            )
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "build_targets.py"),
+                    "--config",
+                    str(ROOT / "configs" / "qvm_v0_1.example.yml"),
+                    "--rebalance-date",
+                    "2026-03-31",
+                    "--scores",
+                    str(scores),
+                    "--universe",
+                    str(universe),
+                    "--target-count",
+                    "1",
+                    "--out-dir",
+                    str(out_dir),
+                    "--no-manifest",
+                ],
+                cwd=ROOT,
+                check=True,
+            )
+
+            with (out_dir / "targets_202603.csv").open("r", encoding="utf-8", newline="") as file:
+                rows = list(csv.DictReader(file))
+            self.assertEqual("0", rows[0]["target_shares"])
+            self.assertEqual("no_rebalance_price", rows[0]["target_constraint_reason"])
+
     def test_price_limit_fill_is_marked_uncertain(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

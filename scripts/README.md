@@ -57,6 +57,14 @@ parameter overrides, so config or input changes do not silently reuse stale
 tables. `--force-rebuild` refreshes files inside the current namespace. Summary,
 trades, holdings, equity, and failure-case outputs remain CSV.
 
+The research universe can retain names whose latest price is stale at the
+rebalance date. Those rows carry `rebalance_price_available=false` and
+`latest_price_stale=true`. Executable target generation treats those names as
+non-orderable unless `strict_rebalance_price_filter` removes them upstream.
+Walk-forward tail gaps are explicit through `missing_price_tail_policy`: the
+public example defaults to `warn_only`, while conservative runs can use
+`assume_zero_after_n_trading_days` with `max_stale_trading_days`.
+
 ## J-Quants
 
 ```powershell

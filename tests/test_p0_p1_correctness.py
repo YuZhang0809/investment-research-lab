@@ -298,6 +298,133 @@ class P0P1CorrectnessTest(unittest.TestCase):
             self.assertLess(float(summary_rows[-1]["portfolio_equity_after_cost"]), 200)
             self.assertIn("assumed_delisting_loss", {row["failure_type"] for row in failure_rows})
 
+    def test_walkforward_tail_gap_policy_can_close_stale_holding_at_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            prices = temp / "prices.csv"
+            listings = temp / "listings.csv"
+            fundamentals = temp / "fundamentals.csv"
+            config_path = temp / "qvm_tail_gap.yml"
+            out_dir = temp / "out"
+            report_dir = temp / "reports"
+
+            config_text = (ROOT / "configs" / "qvm_v0_1.example.yml").read_text(encoding="utf-8")
+            config_text = config_text.replace("mode: warn_only", "mode: assume_zero_after_n_trading_days")
+            config_text = config_text.replace("max_stale_trading_days: 5", "max_stale_trading_days: 1")
+            config_path.write_text(config_text, encoding="utf-8")
+
+            write_csv(
+                prices,
+                [
+                    {
+                        "date": "2026-01-31",
+                        "code": "1001",
+                        "unadjusted_open": 100,
+                        "unadjusted_close": 100,
+                        "adjusted_close": 100,
+                        "trading_value": 10_000_000,
+                        "price_limit_flag": "false",
+                    },
+                    {
+                        "date": "2026-02-28",
+                        "code": "2002",
+                        "unadjusted_open": 100,
+                        "unadjusted_close": 100,
+                        "adjusted_close": 100,
+                        "trading_value": 10_000_000,
+                        "price_limit_flag": "false",
+                    },
+                ],
+                [
+                    "date",
+                    "code",
+                    "unadjusted_open",
+                    "unadjusted_close",
+                    "adjusted_close",
+                    "trading_value",
+                    "price_limit_flag",
+                ],
+            )
+            write_csv(
+                listings,
+                [{"code": "1001", "listed_date": "2020-01-01", "delisted_date": ""}],
+                ["code", "listed_date", "delisted_date"],
+            )
+            write_csv(fundamentals, [], ["code"])
+
+            original_argv = sys.argv[:]
+            original_run_stages = run_qvm_walkforward.run_stages
+
+            def fake_run_stages(args, rebalance_date):
+                suffix = rebalance_date.strftime("%Y%m%d")
+                universe = temp / "stage" / f"universe_{suffix}.csv"
+                factors = temp / "stage" / f"factors_{suffix}.csv"
+                scores = temp / "stage" / f"scores_{suffix}.csv"
+                write_csv(
+                    universe,
+                    [{"code": "1001", "lot_size": "100", "median_60d_trading_value": "10000000"}],
+                    ["code", "lot_size", "median_60d_trading_value"],
+                )
+                write_csv(factors, [{"code": "1001"}], ["code"])
+                write_csv(scores, [{"code": "1001", "rank": "1"}], ["code", "rank"])
+                return universe, factors, scores
+
+            try:
+                run_qvm_walkforward.run_stages = fake_run_stages
+                sys.argv = [
+                    "run_qvm_walkforward.py",
+                    "--config",
+                    str(config_path),
+                    "--listings",
+                    str(listings),
+                    "--prices",
+                    str(prices),
+                    "--fundamentals",
+                    str(fundamentals),
+                    "--start-date",
+                    "2026-01-31",
+                    "--end-date",
+                    "2026-02-28",
+                    "--frequency",
+                    "monthly",
+                    "--execution-price",
+                    "rebalance_close",
+                    "--capital-jpy",
+                    "10100",
+                    "--out-dir",
+                    str(out_dir),
+                    "--report-dir",
+                    str(report_dir),
+                    "--no-manifest",
+                    "--skip-stage-manifest",
+                    "--run-label",
+                    "tail_gap_test",
+                ]
+
+                self.assertEqual(0, run_qvm_walkforward.main())
+            finally:
+                run_qvm_walkforward.run_stages = original_run_stages
+                sys.argv = original_argv
+
+            with (out_dir / "qvm_walkforward_summary_tail_gap_test_202601_202602.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as file:
+                summary_rows = list(csv.DictReader(file))
+            with (out_dir / "qvm_walkforward_failure_cases_tail_gap_test_202601_202602.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as file:
+                failure_rows = list(csv.DictReader(file))
+            with (out_dir / "qvm_walkforward_trades_tail_gap_test_202601_202602.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as file:
+                trade_rows = list(csv.DictReader(file))
+
+            self.assertLess(float(summary_rows[-1]["portfolio_equity_after_cost"]), 200)
+            self.assertEqual("assume_zero_after_n_trading_days", summary_rows[-1]["missing_price_tail_policy"])
+            self.assertIn("price_tail_gap", {row["failure_type"] for row in failure_rows})
+            self.assertIn("assumed_tail_gap_zero", {row["failure_type"] for row in failure_rows})
+            self.assertIn("TAIL_GAP_ZERO", {row["side"] for row in trade_rows})
+
 
 if __name__ == "__main__":
     unittest.main()

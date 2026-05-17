@@ -229,6 +229,36 @@ def snapshot_only_listings(rows: list[dict[str, str]]) -> bool:
     return not any((row.get("listed_date") or "").strip() for row in rows)
 
 
+def lifecycle_data_status(rows: list[dict[str, str]]) -> str:
+    if snapshot_only_listings(rows):
+        return "snapshot_only"
+    if not rows:
+        return "unknown"
+    if not any((row.get("delisted_date") or "").strip() for row in rows):
+        return "unknown"
+    return "pit"
+
+
+def performance_conclusion_allowed(status: str) -> bool:
+    return status == "pit"
+
+
+def missing_price_tail_policy(config: dict[str, Any]) -> tuple[str, int]:
+    policy = config.get("missing_price_tail_policy", {}) or {}
+    mode = str(policy.get("mode", "warn_only") or "warn_only").strip()
+    allowed_modes = {"warn_only", "freeze_last_price", "assume_zero_after_n_trading_days"}
+    if mode not in allowed_modes:
+        raise ValueError(f"Unsupported missing_price_tail_policy.mode: {mode}")
+    max_stale_days = parse_int(policy.get("max_stale_trading_days"), default=5)
+    if max_stale_days is None or max_stale_days < 0:
+        raise ValueError("missing_price_tail_policy.max_stale_trading_days must be non-negative.")
+    return mode, max_stale_days
+
+
+def trading_staleness_days(calendar: list[date], last_price_date: date, as_of: date) -> int:
+    return sum(1 for value in calendar if last_price_date < value <= as_of)
+
+
 def adjusted_return(
     price_index: dict[str, list[PricePoint]],
     code: str,
@@ -555,6 +585,31 @@ def parameter_cache_token(args: argparse.Namespace) -> str:
     return f"{strategy_cache_token(args)}_{target}_{adv}"
 
 
+def token_value(value: Any) -> str:
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    text = str(value)
+    return (
+        text.replace("-", "m")
+        .replace(".", "p")
+        .replace(":", "")
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace(" ", "_")
+    )
+
+
+def run_dependent_candidate_token(args: argparse.Namespace) -> str:
+    start = token_value(args.start_date.replace("-", ""))
+    end = token_value(args.end_date.replace("-", ""))
+    capital = token_value(args.capital_jpy)
+    tax = token_value(args.tax_rate)
+    return (
+        f"{parameter_cache_token(args)}_{start}_{end}_{args.execution_price}_"
+        f"{args.cost_scenario}_capital{capital}_tax{tax}"
+    )
+
+
 def read_or_build_input_cache(args: argparse.Namespace, source_path: Path, name: str) -> tuple[list[dict[str, str]], Path]:
     if not cache_enabled(args):
         return read_csv(source_path), source_path
@@ -665,10 +720,8 @@ def write_rebalance_candidates_cache(
     output_path = cache_path(
         args,
         "rebalance_candidates",
-        f"rebalance_candidates_{suffix}_{parameter_cache_token(args)}",
+        f"rebalance_candidates_{suffix}_{run_dependent_candidate_token(args)}",
     )
-    if output_path.exists() and not args.force_rebuild:
-        return
     write_table(rows, output_path, format=args.cache_format or "parquet", fieldnames=CANDIDATE_CACHE_FIELDS)
 
 
@@ -738,6 +791,7 @@ def write_report(path: Path, summary_rows: list[dict[str, Any]], initial_capital
         path.write_text("# QVM Walk-Forward Report\n\nNo rows.\n", encoding="utf-8")
         return
     final = summary_rows[-1]
+    first = summary_rows[0]
     portfolio_values = [float(row["portfolio_equity_after_cost"]) for row in summary_rows]
     taxable_values = [float(row["after_tax_taxable_equity"]) for row in summary_rows]
     benchmark_values = [float(row["benchmark_equity"]) for row in summary_rows]
@@ -751,6 +805,41 @@ def write_report(path: Path, summary_rows: list[dict[str, Any]], initial_capital
     lines = [
         f"# QVM Walk-Forward Report {summary_rows[0]['rebalance_date']}..{final['rebalance_date']}",
         "",
+    ]
+    if str(final.get("performance_conclusion_allowed", "")).lower() != "true":
+        lines.extend(
+            [
+                "## Lifecycle Warning",
+                "",
+                "NOT VALID FOR PERFORMANCE CONCLUSION: listing lifecycle coverage is not point-in-time complete.",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Parameters",
+            "",
+            "| parameter | value |",
+            "|---|---:|",
+            f"| strategy version | {first.get('strategy_version', '')} |",
+            f"| frequency | {first.get('frequency', '')} |",
+            f"| execution price | {first.get('execution_price', '')} |",
+            f"| cost scenario | {first.get('cost_scenario', '')} |",
+            f"| capital JPY | {money(float(first.get('capital_jpy', initial_capital)))} |",
+            f"| target holdings | {first.get('target_holdings', '')} |",
+            f"| ADV cap | {first.get('adv_cap', '')} |",
+            f"| tax rate | {first.get('tax_rate', '')} |",
+            f"| cache fingerprint | {first.get('cache_fingerprint', '')} |",
+            f"| lifecycle data status | {first.get('lifecycle_data_status', '')} |",
+            f"| performance conclusion allowed | {first.get('performance_conclusion_allowed', '')} |",
+            f"| strict rebalance price filter | {first.get('strict_rebalance_price_filter', '')} |",
+            f"| missing price tail policy | {first.get('missing_price_tail_policy', '')} |",
+            f"| missing price tail max stale days | {first.get('missing_price_tail_max_stale_days', '')} |",
+            "",
+        ]
+    )
+    lines.extend(
+        [
         "## Summary",
         "",
         f"- months: {len(summary_rows)}",
@@ -791,7 +880,8 @@ def write_report(path: Path, summary_rows: list[dict[str, Any]], initial_capital
         "## Caveat",
         "",
         "This is an engineering walk-forward run. It supports execution timing and rough FIFO realized-tax accounting, but still uses simplified fills, costs, and tax treatment.",
-    ]
+        ]
+    )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -816,7 +906,9 @@ def main() -> int:
     args.prices = prices_path
     args.fundamentals = fundamentals_path
 
-    if snapshot_only_listings(listing_rows_for_check) and not args.allow_snapshot_listings:
+    lifecycle_status = lifecycle_data_status(listing_rows_for_check)
+    conclusion_allowed = performance_conclusion_allowed(lifecycle_status)
+    if lifecycle_status == "snapshot_only" and not args.allow_snapshot_listings:
         raise ValueError(
             "Listings look snapshot-only: listed_date is missing or listing_lifecycle_status marks missing lifecycle dates. "
             "This creates survivorship bias in historical walk-forward runs. Provide PIT lifecycle listings or pass "
@@ -825,11 +917,13 @@ def main() -> int:
 
     delisting_dates = build_delisting_index(listing_rows_for_check)
     price_index = build_price_index(price_rows)
-    dates = rebalance_dates(all_price_dates(price_index), start_date, end_date, args.frequency)
+    price_calendar = all_price_dates(price_index)
+    dates = rebalance_dates(price_calendar, start_date, end_date, args.frequency)
     if not dates:
         raise ValueError("No rebalance dates found in price file for the requested window.")
 
     max_order_to_adv = float(config["execution"].get("max_order_to_median_trading_value", 0.005))
+    tail_gap_mode, tail_gap_max_stale_days = missing_price_tail_policy(config)
     # Holdings and tax lots are tracked in adjusted-share units so split events
     # do not mechanically distort portfolio equity. Order sizing still uses
     # actual unadjusted shares and prices.
@@ -884,17 +978,59 @@ def main() -> int:
             terminal_point = price_at(price_index, code, delisted_date or rebalance_date)
             if delisted_date is None or delisted_date > rebalance_date:
                 tail_point = terminal_before(price_index, code, rebalance_date)
-                if tail_point is not None and (code, tail_point.date) not in warned_price_tail_gaps:
-                    warned_price_tail_gaps.add((code, tail_point.date))
-                    failure_rows.append(
-                        {
-                            "date": rebalance_date,
-                            "code": code,
-                            "failure_type": "price_tail_gap",
-                            "detail": f"last_price_date={tail_point.date}; no delisted_date in listings",
-                            "value": position_value(adjusted_shares, tail_point),
-                        }
-                    )
+                if tail_point is not None:
+                    stale_days = trading_staleness_days(price_calendar, tail_point.date, rebalance_date)
+                    if (code, tail_point.date) not in warned_price_tail_gaps:
+                        warned_price_tail_gaps.add((code, tail_point.date))
+                        failure_rows.append(
+                            {
+                                "date": rebalance_date,
+                                "code": code,
+                                "failure_type": "price_tail_gap",
+                                "detail": (
+                                    f"last_price_date={tail_point.date};stale_trading_days={stale_days};"
+                                    f"policy={tail_gap_mode}; no delisted_date in listings"
+                                ),
+                                "value": position_value(adjusted_shares, tail_point),
+                            }
+                        )
+                    if tail_gap_mode == "assume_zero_after_n_trading_days" and stale_days >= tail_gap_max_stale_days:
+                        actual_shares = actual_shares_from_adjusted(adjusted_shares, tail_point)
+                        basis = remaining_basis(tax_lots.get(code, []))
+                        cumulative_realized_gain -= basis
+                        holdings.pop(code, None)
+                        tax_lots.pop(code, None)
+                        failure_rows.append(
+                            {
+                                "date": rebalance_date,
+                                "code": code,
+                                "failure_type": "assumed_tail_gap_zero",
+                                "detail": (
+                                    f"last_price_date={tail_point.date};stale_trading_days={stale_days};"
+                                    f"max_stale_trading_days={tail_gap_max_stale_days}"
+                                ),
+                                "value": 0,
+                            }
+                        )
+                        trade_rows.append(
+                            {
+                                "signal_date": rebalance_date,
+                                "execution_date": rebalance_date,
+                                "code": code,
+                                "side": "TAIL_GAP_ZERO",
+                                "requested_shares": -display_shares(actual_shares),
+                                "filled_shares": -display_shares(actual_shares),
+                                "price": 0,
+                                "value": 0,
+                                "estimated_cost_optimistic": 0,
+                                "estimated_cost_base": 0,
+                                "estimated_cost_pessimistic": 0,
+                                "selected_cost": 0,
+                                "realized_gain": -basis,
+                                "estimated_tax": 0,
+                                "constraint_reason": "assumed_tail_gap_zero",
+                            }
+                        )
                 continue
             actual_shares = actual_shares_from_adjusted(adjusted_shares, terminal_point) if terminal_point else adjusted_shares
             basis = remaining_basis(tax_lots.get(code, []))
@@ -1194,9 +1330,20 @@ def main() -> int:
             )
         row = {
             "rebalance_date": rebalance_date,
+            "strategy_version": args.strategy_version,
             "frequency": args.frequency,
             "execution_price": args.execution_price,
             "cost_scenario": args.cost_scenario,
+            "capital_jpy": args.capital_jpy,
+            "target_holdings": args.target_holdings or config["portfolio"]["executable_portfolio"].get("target_holdings_max", ""),
+            "adv_cap": max_order_to_adv,
+            "tax_rate": args.tax_rate,
+            "cache_fingerprint": getattr(args, "_cache_fingerprint", ""),
+            "lifecycle_data_status": lifecycle_status,
+            "performance_conclusion_allowed": conclusion_allowed,
+            "strict_rebalance_price_filter": config["universe"].get("strict_rebalance_price_filter", False),
+            "missing_price_tail_policy": tail_gap_mode,
+            "missing_price_tail_max_stale_days": tail_gap_max_stale_days,
             "universe_count": len(universe_rows),
             "selected_count": len(selected_codes),
             "zero_lot_targets": zero_lot_targets,
@@ -1273,9 +1420,20 @@ def main() -> int:
         summary_rows,
         [
             "rebalance_date",
+            "strategy_version",
             "frequency",
             "execution_price",
             "cost_scenario",
+            "capital_jpy",
+            "target_holdings",
+            "adv_cap",
+            "tax_rate",
+            "cache_fingerprint",
+            "lifecycle_data_status",
+            "performance_conclusion_allowed",
+            "strict_rebalance_price_filter",
+            "missing_price_tail_policy",
+            "missing_price_tail_max_stale_days",
             "universe_count",
             "selected_count",
             "zero_lot_targets",

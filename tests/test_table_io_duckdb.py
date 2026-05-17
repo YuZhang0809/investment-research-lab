@@ -108,6 +108,32 @@ class TableIODuckDBTest(unittest.TestCase):
             ranked = [row for row in scores if row.get("rank")]
             self.assertTrue(ranked, strategy_version)
 
+    def test_constant_factor_values_are_neutral_not_missing(self) -> None:
+        config = {
+            "factors": {
+                "winsorize": {"lower_pct": 0, "upper_pct": 100},
+                "quality": {
+                    "weight": 0.4,
+                    "variables": ["operating_profit_to_total_assets", "equity_to_assets"],
+                },
+                "value": {"weight": 0.4, "variables": ["earnings_yield", "book_to_market"]},
+                "momentum": {"weight": 0.2, "variables": ["return_12_1", "return_6_1"]},
+            }
+        }
+        factors = [factor_row("1001", 1.0), factor_row("1002", 1.0), factor_row("1003", 1.0)]
+
+        scores, raw_factors = build_scores(config=config, factor_rows=factors, strategy_version="qvm")
+
+        self.assertEqual(
+            [],
+            [row for row in scores if row["missing_score_components"]],
+        )
+        self.assertEqual(["1", "2", "3"], [str(row["rank"]) for row in scores])
+        for row in scores:
+            self.assertEqual(0.0, row["qvm_score"])
+            for factor in raw_factors:
+                self.assertEqual(0.0, row[f"{factor}_z"])
+
 
 def factor_row(code: str, value: float) -> dict[str, str]:
     return {

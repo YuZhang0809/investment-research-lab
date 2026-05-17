@@ -166,8 +166,10 @@ def build_scores(
         scale = pstdev(clean_clipped) if len(clean_clipped) > 1 else 0.0
         factor_stats[factor] = {"lower": lower, "upper": upper, "mean": center, "std": scale}
         for row, value in zip(rows, clipped):
-            if value is None or not scale:
+            if value is None:
                 zscores_by_code[row["code"]][factor] = None
+            elif not scale:
+                zscores_by_code[row["code"]][factor] = 0.0
             else:
                 zscores_by_code[row["code"]][factor] = (value - center) / scale
 

@@ -203,12 +203,13 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
                 namespace / "universe" / "universe_202603.parquet",
                 namespace / "factors" / "factors_202603.parquet",
                 namespace / "scores" / "scores_202603_qvm.parquet",
-                namespace
-                / "rebalance_candidates"
-                / "rebalance_candidates_202603_qvm_target15_adv0p005.parquet",
             ]
             for path in expected_cache_files:
                 self.assertTrue(path.exists(), path)
+            candidate_files = list((namespace / "rebalance_candidates").glob("rebalance_candidates_202603_*.parquet"))
+            self.assertEqual(1, len(candidate_files))
+            self.assertIn("capital5000000", candidate_files[0].name)
+            self.assertIn("rebalance_close_base", candidate_files[0].name)
 
             for prefix in [
                 "qvm_walkforward_summary_",
@@ -218,6 +219,12 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
                 "qvm_walkforward_failure_cases_",
             ]:
                 self.assertTrue(list(out_dir.glob(f"{prefix}*.csv")), prefix)
+            summary_paths = sorted(out_dir.glob("qvm_walkforward_summary_*.csv"))
+            with summary_paths[-1].open("r", encoding="utf-8", newline="") as file:
+                summary = list(csv.DictReader(file))
+            self.assertEqual("pit", summary[-1]["lifecycle_data_status"])
+            self.assertEqual("True", summary[-1]["performance_conclusion_allowed"])
+            self.assertIn("cache_fingerprint", summary[-1])
 
             scores_cache = namespace / "scores" / "scores_202603_qvm.parquet"
             cache_mtime = scores_cache.stat().st_mtime_ns
@@ -359,6 +366,49 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
             second_namespaces = {path.name for path in cache_dir.iterdir() if path.is_dir()}
             self.assertEqual(2, len(second_namespaces))
             self.assertTrue(first_namespaces < second_namespaces)
+
+    def test_rebalance_candidate_cache_is_run_dependent_for_capital(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            cache_dir = temp / "cache"
+            base_command = [
+                sys.executable,
+                str(ROOT / "scripts" / "run_qvm_walkforward.py"),
+                "--config",
+                str(ROOT / "configs" / "qvm_v0_1.example.yml"),
+                "--listings",
+                str(listings),
+                "--prices",
+                str(prices),
+                "--fundamentals",
+                str(fundamentals),
+                "--start-date",
+                "2026-03-01",
+                "--end-date",
+                "2026-03-31",
+                "--cache-format",
+                "parquet",
+                "--cache-dir",
+                str(cache_dir),
+                "--out-dir",
+                str(temp / "out"),
+                "--report-dir",
+                str(temp / "reports"),
+                "--no-manifest",
+                "--skip-stage-manifest",
+            ]
+
+            subprocess.run(base_command, cwd=ROOT, check=True)
+            subprocess.run([*base_command, "--capital-jpy", "20000000"], cwd=ROOT, check=True)
+
+            namespace = cache_namespace(cache_dir)
+            candidate_names = sorted(
+                path.name for path in (namespace / "rebalance_candidates").glob("rebalance_candidates_202603_*.parquet")
+            )
+            self.assertEqual(2, len(candidate_names))
+            self.assertTrue(any("capital5000000" in name for name in candidate_names))
+            self.assertTrue(any("capital20000000" in name for name in candidate_names))
 
 
 if __name__ == "__main__":

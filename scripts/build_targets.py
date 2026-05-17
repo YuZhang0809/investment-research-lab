@@ -5,7 +5,17 @@ import math
 from pathlib import Path
 from typing import Any
 
-from research_common import append_manifest, load_yaml, month_key, parse_date, parse_float, parse_int, read_csv, write_csv
+from research_common import (
+    append_manifest,
+    load_yaml,
+    month_key,
+    parse_bool,
+    parse_date,
+    parse_float,
+    parse_int,
+    read_csv,
+    write_csv,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,9 +64,17 @@ def main() -> int:
         universe = universe_by_code.get(row["code"], {})
         price = parse_float(row.get("latest_unadjusted_close")) or parse_float(universe.get("latest_unadjusted_close")) or 0.0
         lot = parse_int(universe.get("lot_size"), default=100) or 100
-        target_shares = floor_lot(target_value, price, lot)
+        rebalance_price_available = parse_bool(
+            universe.get("rebalance_price_available"),
+            default=True,
+        )
+        if rebalance_price_available is False:
+            target_shares = 0
+            target_constraint_reason = "no_rebalance_price"
+        else:
+            target_shares = floor_lot(target_value, price, lot)
+            target_constraint_reason = "below_lot_size" if target_shares == 0 and target_value > 0 else ""
         executable_value = target_shares * price
-        target_constraint_reason = "below_lot_size" if target_shares == 0 and target_value > 0 else ""
         total_executable_value += executable_value
         target_rows.append(
             {
