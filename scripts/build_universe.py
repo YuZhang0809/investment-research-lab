@@ -140,6 +140,7 @@ def evaluate_row(
     config: dict[str, Any],
     rebalance_date: Any,
     prices_by_code: dict[str, list[PricePoint]],
+    market_calendar: list[Any],
     fundamentals_by_code: dict[str, bool],
 ) -> tuple[dict[str, Any], list[str]]:
     code = (row.get("code") or "").strip()
@@ -178,10 +179,17 @@ def evaluate_row(
 
     rebalance_price = price_on_date(prices_by_code.get(code, []), rebalance_date)
     latest = rebalance_price or (all_price_points[-1] if all_price_points else None)
+    rebalance_price_available = rebalance_price is not None
+    latest_price_stale = latest is not None and not rebalance_price_available
+    price_staleness_trading_days = (
+        sum(1 for value in market_calendar if latest and latest.date < value <= rebalance_date)
+        if latest_price_stale
+        else 0 if latest else None
+    )
     if latest is None:
         reasons.append("no_price_on_or_before_rebalance")
-    elif config["universe"].get("require_tradable_on_rebalance_date", True):
-        if rebalance_price is None:
+    elif config["universe"].get("strict_rebalance_price_filter", False):
+        if not rebalance_price_available:
             reasons.append("no_price_on_rebalance_date")
         elif rebalance_price.tradable_flag is False:
             reasons.append("price_not_tradable_on_rebalance_date")
@@ -204,6 +212,9 @@ def evaluate_row(
         "median_60d_trading_value": median_trading_value,
         "latest_price_date": latest.date if latest else None,
         "latest_unadjusted_close": latest.unadjusted_close if latest else None,
+        "rebalance_price_available": rebalance_price_available,
+        "latest_price_stale": latest_price_stale,
+        "price_staleness_trading_days": price_staleness_trading_days,
         "has_fundamentals": has_fundamentals,
         "tradable_flag": (listing_tradable is not False) and (rebalance_price.tradable_flag if rebalance_price else False),
         "price_limit_flag": latest.price_limit_flag if latest else False,
@@ -219,10 +230,26 @@ def build_universe(
     prices_path: Path,
     fundamentals_path: Path,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    listing_rows = read_csv(listings_path)
-    prices_by_code = group_prices(read_csv(prices_path))
-    fundamentals_by_code = group_fundamentals(read_csv(fundamentals_path), rebalance_date)
+    return build_universe_from_rows(
+        config=config,
+        rebalance_date=rebalance_date,
+        listing_rows=read_csv(listings_path),
+        price_rows=read_csv(prices_path),
+        fundamental_rows=read_csv(fundamentals_path),
+    )
 
+
+def build_universe_from_rows(
+    *,
+    config: dict[str, Any],
+    rebalance_date: Any,
+    listing_rows: list[dict[str, str]],
+    price_rows: list[dict[str, str]],
+    fundamental_rows: list[dict[str, str]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    prices_by_code = group_prices(price_rows)
+    market_calendar = sorted({point.date for points in prices_by_code.values() for point in points if point.date <= rebalance_date})
+    fundamentals_by_code = group_fundamentals(fundamental_rows, rebalance_date)
     universe_rows: list[dict[str, Any]] = []
     exclusion_rows: list[dict[str, Any]] = []
     for row in listing_rows:
@@ -231,6 +258,7 @@ def build_universe(
             config=config,
             rebalance_date=rebalance_date,
             prices_by_code=prices_by_code,
+            market_calendar=market_calendar,
             fundamentals_by_code=fundamentals_by_code,
         )
         if reasons:
@@ -281,6 +309,9 @@ def main() -> int:
         "median_60d_trading_value",
         "latest_price_date",
         "latest_unadjusted_close",
+        "rebalance_price_available",
+        "latest_price_stale",
+        "price_staleness_trading_days",
         "has_fundamentals",
         "tradable_flag",
         "price_limit_flag",

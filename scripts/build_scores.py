@@ -12,6 +12,12 @@ from research_common import append_manifest, load_yaml, month_key, parse_date, p
 DEFAULT_QUALITY_FACTORS = ["operating_profit_to_total_assets", "equity_to_assets"]
 DEFAULT_VALUE_FACTORS = ["earnings_yield", "book_to_market"]
 DEFAULT_MOMENTUM_FACTORS = ["return_12_1", "return_6_1"]
+STRATEGY_VERSION_CHOICES = [
+    "value_only",
+    "qv",
+    "qvm",
+    "value_dominant_quality_filter_momentum_exclusion",
+]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -19,6 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, default=Path("configs/qvm_v0_1.example.yml"))
     parser.add_argument("--rebalance-date", required=True)
     parser.add_argument("--factors", required=True, type=Path)
+    parser.add_argument("--strategy-version", choices=STRATEGY_VERSION_CHOICES, default="qvm")
     parser.add_argument("--out-dir", type=Path, default=Path("data/processed/scores"))
     parser.add_argument("--manifest", type=Path, default=Path("data/manifest/data_manifest.csv"))
     parser.add_argument("--no-manifest", action="store_true")
@@ -65,16 +72,82 @@ def fmt(value: Any) -> Any:
     return value
 
 
-def main() -> int:
-    args = build_parser().parse_args()
-    config = load_yaml(args.config)
-    rebalance_date = parse_date(args.rebalance_date, field_name="rebalance_date")
-    if rebalance_date is None:
-        raise ValueError("rebalance_date is required")
-    rows = read_csv(args.factors)
+def strategy_factor_groups(
+    config: dict[str, Any],
+    strategy_version: str,
+) -> tuple[list[str], list[str], list[str]]:
     quality_factors = configured_factors(config, "quality", DEFAULT_QUALITY_FACTORS)
     value_factors = configured_factors(config, "value", DEFAULT_VALUE_FACTORS)
     momentum_factors = configured_factors(config, "momentum", DEFAULT_MOMENTUM_FACTORS)
+
+    if strategy_version == "value_only":
+        return [], value_factors, []
+    if strategy_version == "qv":
+        return quality_factors, value_factors, []
+    return quality_factors, value_factors, momentum_factors
+
+
+def strategy_score(
+    strategy_version: str,
+    *,
+    quality: float | None,
+    value: float | None,
+    momentum: float | None,
+    quality_weight: float,
+    value_weight: float,
+    momentum_weight: float,
+) -> tuple[float | None, list[str]]:
+    missing: list[str] = []
+    if strategy_version == "value_only":
+        if value is None:
+            missing.append("value_score")
+            return None, missing
+        return value, missing
+
+    if strategy_version == "qv":
+        if quality is None:
+            missing.append("quality_score")
+        if value is None:
+            missing.append("value_score")
+        if missing:
+            return None, missing
+        return 0.5 * (quality or 0.0) + 0.5 * (value or 0.0), missing
+
+    if strategy_version == "value_dominant_quality_filter_momentum_exclusion":
+        if value is None:
+            missing.append("value_score")
+        if quality is None:
+            missing.append("quality_score")
+        if momentum is not None and momentum < 0:
+            missing.append("momentum_exclusion")
+        if missing:
+            return None, missing
+        return 0.7 * (value or 0.0) + 0.3 * (quality or 0.0), missing
+
+    for name, value_item in [
+        ("quality_score", quality),
+        ("value_score", value),
+        ("momentum_score", momentum),
+    ]:
+        if value_item is None:
+            missing.append(name)
+    if missing:
+        return None, missing
+    return (
+        quality_weight * (quality or 0.0)
+        + value_weight * (value or 0.0)
+        + momentum_weight * (momentum or 0.0)
+    ), missing
+
+
+def build_scores(
+    *,
+    config: dict[str, Any],
+    factor_rows: list[dict[str, str]],
+    strategy_version: str = "qvm",
+) -> tuple[list[dict[str, Any]], list[str]]:
+    quality_factors, value_factors, momentum_factors = strategy_factor_groups(config, strategy_version)
+    rows = factor_rows
     raw_factors = list(dict.fromkeys([*quality_factors, *value_factors, *momentum_factors]))
 
     lower_pct = float(config["factors"]["winsorize"].get("lower_pct", 1))
@@ -109,21 +182,18 @@ def main() -> int:
         quality = average_available([z.get(factor) for factor in quality_factors])
         value = average_available([z.get(factor) for factor in value_factors])
         momentum = average_available([z.get(factor) for factor in momentum_factors])
-        missing_score_components = [
-            name
-            for name, value_item in [
-                ("quality_score", quality),
-                ("value_score", value),
-                ("momentum_score", momentum),
-            ]
-            if value_item is None
-        ]
-        qvm_score = None
-        if not missing_score_components:
-            qvm_score = quality_weight * quality + value_weight * value + momentum_weight * momentum
+        qvm_score, missing_score_components = strategy_score(
+            strategy_version,
+            quality=quality,
+            value=value,
+            momentum=momentum,
+            quality_weight=quality_weight,
+            value_weight=value_weight,
+            momentum_weight=momentum_weight,
+        )
         score_rows.append(
             {
-                "rebalance_date": row.get("rebalance_date", args.rebalance_date),
+                "rebalance_date": row.get("rebalance_date", ""),
                 "code": code,
                 "name": row.get("name", ""),
                 "sector": row.get("sector", ""),
@@ -145,6 +215,23 @@ def main() -> int:
         row["rank"] = rank
     for row in score_rows:
         row.setdefault("rank", "")
+
+    return score_rows, raw_factors
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    config = load_yaml(args.config)
+    rebalance_date = parse_date(args.rebalance_date, field_name="rebalance_date")
+    if rebalance_date is None:
+        raise ValueError("rebalance_date is required")
+    score_rows, raw_factors = build_scores(
+        config=config,
+        factor_rows=read_csv(args.factors),
+        strategy_version=args.strategy_version,
+    )
+    for row in score_rows:
+        row["rebalance_date"] = row.get("rebalance_date") or args.rebalance_date
 
     output_path = args.out_dir / f"scores_{month_key(rebalance_date)}.csv"
     fieldnames = [

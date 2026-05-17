@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import math
 from bisect import bisect_left, bisect_right
 from datetime import date, datetime
 from pathlib import Path
 from statistics import median
-from typing import Any
+from typing import Any, Iterable
 
 
 DATE_FORMAT = "%Y-%m-%d"
@@ -27,18 +28,121 @@ def load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
+def resolve_table_format(path: Path, table_format: str = "auto") -> str:
+    normalized = table_format.lower()
+    if normalized != "auto":
+        if normalized not in {"csv", "parquet"}:
+            raise ValueError(f"Unsupported table format: {table_format}")
+        return normalized
+    if path.suffix.lower() == ".csv":
+        return "csv"
+    if path.suffix.lower() == ".parquet" or path.is_dir():
+        return "parquet"
+    raise ValueError(f"Cannot infer table format from {path}; pass format='csv' or format='parquet'")
+
+
+def require_pandas():
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise RuntimeError("pandas is required for table IO. Install requirements.txt first.") from exc
+    return pd
+
+
+def require_pyarrow() -> None:
+    try:
+        import pyarrow  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError("pyarrow is required for Parquet IO. Install requirements.txt first.") from exc
+
+
+def read_table(path: Path, format: str = "auto"):
+    table_format = resolve_table_format(path, format)
+    pd = require_pandas()
+    if table_format == "csv":
+        return pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
+    require_pyarrow()
+    return pd.read_parquet(path)
+
+
+def frame_from_rows(rows: Iterable[dict[str, Any]], fieldnames: list[str] | None = None):
+    pd = require_pandas()
+    normalized_rows = [
+        {str(key): format_csv_value(value) for key, value in row.items()}
+        for row in rows
+    ]
+    frame = pd.DataFrame(normalized_rows)
+    if fieldnames is not None:
+        for field in fieldnames:
+            if field not in frame.columns:
+                frame[field] = ""
+        frame = frame[fieldnames]
+    return frame
+
+
+def write_table(
+    data: Any,
+    path: Path,
+    format: str = "parquet",
+    *,
+    fieldnames: list[str] | None = None,
+) -> None:
+    table_format = resolve_table_format(path, format)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if hasattr(data, "to_dict") and hasattr(data, "columns"):
+        frame = data.copy()
+        if fieldnames is not None:
+            for field in fieldnames:
+                if field not in frame.columns:
+                    frame[field] = ""
+            frame = frame[fieldnames]
+    else:
+        frame = frame_from_rows(data, fieldnames)
+
+    if table_format == "csv":
+        rows = frame.to_dict(orient="records")
+        fields = fieldnames or [str(column) for column in frame.columns]
+        with path.open("w", encoding="utf-8", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=fields, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({key: format_csv_value(row.get(key)) for key in fields})
+        return
+
+    require_pyarrow()
+    if path.suffix.lower() == ".parquet":
+        frame.to_parquet(path, index=False)
+        return
+
+    path.mkdir(parents=True, exist_ok=True)
+    dataset_file = path / "part-00000.parquet"
+    frame.to_parquet(dataset_file, index=False)
+
+
+def normalize_row_value(value: Any) -> str:
+    pd = require_pandas()
+    if value is None:
+        return ""
+    if pd.isna(value):
+        return ""
+    return format_csv_value(value)
+
+
 def read_csv(path: Path) -> list[dict[str, str]]:
+    frame = read_table(path, format="auto")
+    return [
+        {str(key): normalize_row_value(value) for key, value in row.items()}
+        for row in frame.to_dict(orient="records")
+    ]
+
+
+def read_raw_csv(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8-sig", newline="") as file:
         return list(csv.DictReader(file))
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({key: format_csv_value(row.get(key)) for key in fieldnames})
+    write_table(rows, path, format="csv", fieldnames=fieldnames)
 
 
 def format_csv_value(value: Any) -> str:
@@ -49,9 +153,13 @@ def format_csv_value(value: Any) -> str:
     return str(value)
 
 
-def parse_date(value: str | None, *, field_name: str) -> date | None:
+def parse_date(value: Any, *, field_name: str) -> date | None:
     if value is None or str(value).strip() == "":
         return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
     try:
         return datetime.strptime(str(value).strip(), DATE_FORMAT).date()
     except ValueError as exc:
@@ -75,9 +183,12 @@ def parse_float(value: Any, *, default: float | None = None) -> float | None:
     if value is None or value == "":
         return default
     try:
-        return float(str(value).replace(",", ""))
+        number = float(str(value).replace(",", ""))
     except ValueError:
         return default
+    if not math.isfinite(number):
+        return default
+    return number
 
 
 def parse_int(value: Any, *, default: int | None = None) -> int | None:
@@ -89,6 +200,13 @@ def parse_int(value: Any, *, default: int | None = None) -> int | None:
 
 def checksum(path: Path) -> str:
     hasher = hashlib.sha256()
+    if path.is_dir():
+        for file_path in sorted(item for item in path.rglob("*") if item.is_file()):
+            hasher.update(file_path.relative_to(path).as_posix().encode("utf-8"))
+            with file_path.open("rb") as file:
+                for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+        return hasher.hexdigest()
     with path.open("rb") as file:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             hasher.update(chunk)

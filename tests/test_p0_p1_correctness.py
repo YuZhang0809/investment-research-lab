@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import run_qvm_walkforward  # noqa: E402
 from analyze_factor_forward_returns import PricePoint as FactorPricePoint  # noqa: E402
 from analyze_factor_forward_returns import future_return as factor_future_return  # noqa: E402
+from build_universe import build_universe_from_rows  # noqa: E402
 from build_factors import return_with_skip  # noqa: E402
 from download_jquants import convert_master, has_trade  # noqa: E402
 from validate_contracts import validate_contracts  # noqa: E402
@@ -115,6 +116,68 @@ class P0P1CorrectnessTest(unittest.TestCase):
 
         self.assertAlmostEqual(-0.45, value or 0)
 
+    def test_universe_keeps_stale_price_rows_for_research_layer(self) -> None:
+        config = {
+            "scope": {
+                "instruments": {"include": ["common_stock"], "exclude": []},
+            },
+            "universe": {
+                "min_ipo_age_trading_days": 0,
+                "liquidity_lookback_days": 1,
+                "require_fundamentals": False,
+                "require_tradable_on_rebalance_date": True,
+            },
+        }
+        listings = [
+            {
+                "code": "1001",
+                "name": "Stale Price",
+                "market": "Prime",
+                "sector": "Tech",
+                "listed_date": "2020-01-01",
+                "delisted_date": "",
+                "security_type": "common_stock",
+                "is_common_stock": "true",
+                "is_etf_reit_infra": "false",
+                "tradable_flag": "true",
+                "lot_size": "100",
+            }
+        ]
+        prices = [
+            {
+                "date": "2026-03-30",
+                "code": "1001",
+                "unadjusted_close": "1000",
+                "adjusted_close": "1000",
+                "trading_value": "1000000",
+                "tradable_flag": "true",
+                "price_limit_flag": "false",
+            },
+            {
+                "date": "2026-03-31",
+                "code": "9999",
+                "unadjusted_close": "1000",
+                "adjusted_close": "1000",
+                "trading_value": "1000000",
+                "tradable_flag": "true",
+                "price_limit_flag": "false",
+            },
+        ]
+
+        universe_rows, exclusion_rows = build_universe_from_rows(
+            config=config,
+            rebalance_date=date(2026, 3, 31),
+            listing_rows=listings,
+            price_rows=prices,
+            fundamental_rows=[],
+        )
+
+        self.assertEqual([], exclusion_rows)
+        self.assertEqual("1001", universe_rows[0]["code"])
+        self.assertFalse(universe_rows[0]["rebalance_price_available"])
+        self.assertTrue(universe_rows[0]["latest_price_stale"])
+        self.assertEqual(1, universe_rows[0]["price_staleness_trading_days"])
+
     def test_walkforward_closes_terminal_holding_at_zero(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
@@ -156,7 +219,17 @@ class P0P1CorrectnessTest(unittest.TestCase):
                     "price_limit_flag",
                 ],
             )
-            write_csv(listings, [], ["code"])
+            write_csv(
+                listings,
+                [
+                    {
+                        "code": "1001",
+                        "listed_date": "2020-01-01",
+                        "delisted_date": "2026-02-01",
+                    }
+                ],
+                ["code", "listed_date", "delisted_date"],
+            )
             write_csv(fundamentals, [], ["code"])
 
             original_argv = sys.argv[:]

@@ -17,6 +17,46 @@ python scripts\build_universe.py `
 The bundled synthetic examples are schema examples. For a full pipeline run,
 provide enough trading history for the configured lookback windows.
 
+## Table IO
+
+Shared IO goes through `research_common.read_table()` and
+`research_common.write_table()`. They support:
+
+```text
+.csv
+.parquet
+directory-style Parquet datasets
+```
+
+Script-level `read_csv()` and `write_csv()` remain compatibility wrappers. New
+large intermediates should use Parquet cache files; human review outputs should
+stay CSV.
+
+## Walk-Forward Cache
+
+```powershell
+python scripts\run_qvm_walkforward.py `
+  --config configs\qvm_v0_1.example.yml `
+  --listings <listings.csv> `
+  --prices <prices.csv> `
+  --fundamentals <fundamentals.csv> `
+  --start-date 2026-01-01 `
+  --end-date 2026-12-31 `
+  --cache-format parquet `
+  --rebalance quarterly `
+  --target-holdings 15 `
+  --adv-cap 0.005 `
+  --strategy-version qvm `
+  --no-manifest
+```
+
+`--cache-format parquet` enables `data/processed/cache` by default unless
+`--cache-dir` is provided. Cache files live under a fingerprinted namespace
+derived from the effective config, input checksums, strategy, frequency, and
+parameter overrides, so config or input changes do not silently reuse stale
+tables. `--force-rebuild` refreshes files inside the current namespace. Summary,
+trades, holdings, equity, and failure-case outputs remain CSV.
+
 ## J-Quants
 
 ```powershell

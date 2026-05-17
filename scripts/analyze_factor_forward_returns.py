@@ -113,15 +113,18 @@ def future_return(
 
 
 def factor_files(path: Path, start: date, end: date) -> list[Path]:
-    result: list[Path] = []
-    for file_path in sorted(path.glob("factors_*.csv")):
+    by_month: dict[str, Path] = {}
+    candidates = [*path.glob("factors_*.csv"), *path.glob("factors_*.parquet")]
+    for file_path in sorted(candidates):
         suffix = file_path.stem.replace("factors_", "")
         if len(suffix) != 6 or not suffix.isdigit():
             continue
         month_date = parse_date(f"{suffix[:4]}-{suffix[4:]}-01", field_name="factor_file_month")
         if month_date and start.replace(day=1) <= month_date <= end.replace(day=1):
-            result.append(file_path)
-    return result
+            existing = by_month.get(suffix)
+            if existing is None or file_path.suffix.lower() == ".parquet":
+                by_month[suffix] = file_path
+    return [by_month[key] for key in sorted(by_month)]
 
 
 def pearson(xs: list[float], ys: list[float]) -> float | None:

@@ -309,6 +309,7 @@ def check_listing_lifecycle(issues: list[dict[str, str]], *, listing_rows: list[
     if not listing_rows:
         return
     listed_dates = [row.get("listed_date", "").strip() for row in listing_rows]
+    delisted_dates = [row.get("delisted_date", "").strip() for row in listing_rows]
     lifecycle_statuses = {
         row.get("listing_lifecycle_status", "").strip().lower()
         for row in listing_rows
@@ -322,6 +323,15 @@ def check_listing_lifecycle(issues: list[dict[str, str]], *, listing_rows: list[
             check="listing_lifecycle_coverage",
             column="listed_date",
             message="Listings have no listed_date values; this is a snapshot-only universe and is survivor-biased for historical research",
+        )
+    elif not any(delisted_dates):
+        issue(
+            issues,
+            severity="warning",
+            dataset="listings",
+            check="delisting_lifecycle_coverage",
+            column="delisted_date",
+            message="Listings have listed_date coverage but no delisted_date values; delisting handling will be disabled unless the source proves no delistings exist",
         )
     if "snapshot_only_missing_lifecycle_dates" in lifecycle_statuses:
         issue(
@@ -339,6 +349,18 @@ def check_price_values(issues: list[dict[str, str]], *, price_rows: list[dict[st
     for row_index, row in enumerate(price_rows, start=2):
         code = row.get("code", "")
         for column in ["unadjusted_close", "adjusted_close"]:
+            if row.get(column) in (None, ""):
+                issue(
+                    issues,
+                    severity="error",
+                    dataset="prices",
+                    check="missing_price",
+                    code=code,
+                    column=column,
+                    value=row.get(column, ""),
+                    message=f"Row {row_index}: price is required",
+                )
+                continue
             value = parse_float(row.get(column))
             if value is not None and value <= 0:
                 issue(

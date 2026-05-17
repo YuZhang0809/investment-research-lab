@@ -162,12 +162,13 @@ manual use becomes painful.
 
 ## Dependency Direction
 
-Phase 1 may add `pandas` and `numpy` if they reduce brittle list/dict logic.
-They should be used as computation tools, not as a replacement for CSV
-contracts.
+Phase 1 may add `pandas`, `numpy`, `pyarrow`, and DuckDB if they reduce brittle
+list/dict logic or repeated CSV IO. They should be used as local computation
+and file-query tools, not as a replacement for public-safe contracts and
+human-readable CSV review outputs.
 
-Do not make Qlib, Backtrader, Zipline, LEAN, DuckDB, or a dashboard framework a
-core dependency in Phase 1.
+Do not make Qlib, Backtrader, Zipline, LEAN, Postgres, ClickHouse, Airflow, or a
+dashboard framework a core dependency in Phase 1.
 
 ## Success Criteria
 

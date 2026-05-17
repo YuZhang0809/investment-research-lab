@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+from copy import deepcopy
 import math
 import subprocess
 import sys
@@ -10,7 +13,21 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from research_common import append_manifest, load_yaml, month_key, parse_date, parse_float, parse_int, read_csv, write_csv
+from build_factors import build_factors
+from build_scores import STRATEGY_VERSION_CHOICES, build_scores
+from build_universe import build_universe_from_rows
+from research_common import (
+    append_manifest,
+    checksum,
+    load_yaml,
+    month_key,
+    parse_date,
+    parse_float,
+    parse_int,
+    read_csv,
+    write_csv,
+    write_table,
+)
 
 
 @dataclass
@@ -32,6 +49,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-date", required=True)
     parser.add_argument("--end-date", required=True)
     parser.add_argument("--frequency", choices=["monthly", "quarterly"], default="monthly")
+    parser.add_argument("--rebalance", choices=["monthly", "quarterly"], help="Alias for --frequency.")
+    parser.add_argument("--strategy-version", choices=STRATEGY_VERSION_CHOICES, default="qvm")
+    parser.add_argument("--target-holdings", type=int, help="Override executable target holdings min/max.")
+    parser.add_argument("--adv-cap", type=float, help="Override max order value as a fraction of median ADV.")
     parser.add_argument(
         "--execution-price",
         choices=["rebalance_close", "next_open", "next_close"],
@@ -45,6 +66,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-dir", type=Path, default=Path("data/processed/walkforward"))
     parser.add_argument("--report-dir", type=Path, default=Path("reports/walkforward"))
     parser.add_argument("--manifest", type=Path, default=Path("data/manifest/data_manifest.csv"))
+    parser.add_argument("--cache-dir", type=Path, help="Directory for reusable walk-forward Parquet cache.")
+    parser.add_argument(
+        "--cache-format",
+        choices=["parquet"],
+        help="Enable cache writes in this format. Defaults to parquet when --cache-dir is set.",
+    )
+    parser.add_argument("--force-rebuild", action="store_true", help="Rebuild cached inputs and rebalance stages.")
     parser.add_argument("--no-manifest", action="store_true")
     parser.add_argument("--skip-stage-manifest", action="store_true")
     parser.add_argument(
@@ -134,6 +162,18 @@ def terminal_before(price_index: dict[str, list[PricePoint]], code: str, as_of: 
     return None
 
 
+def build_delisting_index(listing_rows: list[dict[str, str]]) -> dict[str, date]:
+    values: dict[str, date] = {}
+    for row in listing_rows:
+        code = (row.get("code") or "").strip()
+        if not code:
+            continue
+        delisted_date = parse_date(row.get("delisted_date"), field_name="listings.delisted_date")
+        if delisted_date is not None:
+            values[code] = delisted_date
+    return values
+
+
 def next_price(points: list[PricePoint], after_date: date) -> PricePoint | None:
     for point in points:
         if point.date > after_date:
@@ -189,12 +229,18 @@ def snapshot_only_listings(rows: list[dict[str, str]]) -> bool:
     return not any((row.get("listed_date") or "").strip() for row in rows)
 
 
-def adjusted_return(price_index: dict[str, list[PricePoint]], code: str, start: date, end: date) -> float | None:
+def adjusted_return(
+    price_index: dict[str, list[PricePoint]],
+    code: str,
+    start: date,
+    end: date,
+    delisting_dates: dict[str, date] | None = None,
+) -> float | None:
     start_point = price_at(price_index, code, start)
     if not start_point or start_point.adjusted_close <= 0:
         return None
-    terminal_point = terminal_before(price_index, code, end)
-    if terminal_point is not None and terminal_point.date >= start_point.date:
+    delisted_date = (delisting_dates or {}).get(code)
+    if delisted_date is not None and start < delisted_date <= end:
         return -1.0
     end_point = price_at(price_index, code, end)
     if not end_point:
@@ -202,8 +248,14 @@ def adjusted_return(price_index: dict[str, list[PricePoint]], code: str, start: 
     return end_point.adjusted_close / start_point.adjusted_close - 1.0
 
 
-def mean_return(price_index: dict[str, list[PricePoint]], codes: list[str], start: date, end: date) -> float | None:
-    returns = [adjusted_return(price_index, code, start, end) for code in codes]
+def mean_return(
+    price_index: dict[str, list[PricePoint]],
+    codes: list[str],
+    start: date,
+    end: date,
+    delisting_dates: dict[str, date] | None = None,
+) -> float | None:
+    returns = [adjusted_return(price_index, code, start, end, delisting_dates) for code in codes]
     clean = [value for value in returns if value is not None]
     if not clean:
         return None
@@ -364,7 +416,266 @@ def add_reason(current: str, value: str) -> str:
     return f"{current};{value}"
 
 
+UNIVERSE_CACHE_FIELDS = [
+    "rebalance_date",
+    "code",
+    "name",
+    "market",
+    "sector",
+    "listed_date",
+    "delisted_date",
+    "security_type",
+    "lot_size",
+    "ipo_age_trading_days",
+    "median_60d_trading_value",
+    "latest_price_date",
+    "latest_unadjusted_close",
+    "rebalance_price_available",
+    "latest_price_stale",
+    "price_staleness_trading_days",
+    "has_fundamentals",
+    "tradable_flag",
+    "price_limit_flag",
+]
+EXCLUSION_CACHE_FIELDS = ["rebalance_date", "code", "name", "reason", "detail"]
+FACTOR_CACHE_FIELDS = [
+    "rebalance_date",
+    "code",
+    "name",
+    "market",
+    "sector",
+    "price_date",
+    "latest_unadjusted_close",
+    "fundamentals_available_date",
+    "document_type",
+    "market_cap",
+    "operating_profit",
+    "net_profit",
+    "equity",
+    "total_assets",
+    "shares",
+    "operating_profit_to_total_assets",
+    "equity_to_assets",
+    "earnings_yield",
+    "book_to_market",
+    "return_12_1",
+    "return_6_1",
+    "missing_flags",
+]
+CANDIDATE_CACHE_FIELDS = [
+    "rebalance_date",
+    "code",
+    "rank",
+    "selected_flag",
+    "research_flag",
+    "target_shares",
+    "latest_unadjusted_close",
+]
+
+
+def score_cache_fields(raw_factors: list[str]) -> list[str]:
+    return [
+        "rebalance_date",
+        "rank",
+        "code",
+        "name",
+        "sector",
+        "latest_unadjusted_close",
+        "quality_score",
+        "value_score",
+        "momentum_score",
+        "qvm_score",
+        "missing_score_components",
+        *[f"{factor}_z" for factor in raw_factors],
+    ]
+
+
+def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
+    if args.rebalance:
+        args.frequency = args.rebalance
+    if args.cache_dir is None and args.cache_format is not None:
+        args.cache_dir = Path("data/processed/cache")
+    if args.cache_dir is not None and args.cache_format is None:
+        args.cache_format = "parquet"
+    return args
+
+
+def apply_config_overrides(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    updated = deepcopy(config)
+    if args.target_holdings is not None:
+        executable = updated.setdefault("portfolio", {}).setdefault("executable_portfolio", {})
+        executable["target_holdings_min"] = args.target_holdings
+        executable["target_holdings_max"] = args.target_holdings
+    if args.adv_cap is not None:
+        updated.setdefault("execution", {})["max_order_to_median_trading_value"] = args.adv_cap
+    return updated
+
+
+def cache_enabled(args: argparse.Namespace) -> bool:
+    return args.cache_dir is not None
+
+
+def stable_config_hash(config: dict[str, Any]) -> str:
+    payload = json.dumps(config, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def compute_cache_fingerprint(args: argparse.Namespace, config: dict[str, Any]) -> str:
+    payload = {
+        "schema_version": "walkforward_cache_v0_2",
+        "config": stable_config_hash(config),
+        "inputs": {
+            "listings": checksum(args.listings),
+            "prices": checksum(args.prices),
+            "fundamentals": checksum(args.fundamentals),
+        },
+        "strategy_version": args.strategy_version,
+        "frequency": args.frequency,
+        "target_holdings": args.target_holdings,
+        "adv_cap": args.adv_cap,
+    }
+    text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def cache_path(args: argparse.Namespace, category: str, name: str) -> Path:
+    if args.cache_dir is None:
+        raise ValueError("Cache path requested while cache is disabled")
+    fingerprint = getattr(args, "_cache_fingerprint", "unfingerprinted")
+    return args.cache_dir / fingerprint / category / f"{name}.{args.cache_format or 'parquet'}"
+
+
+def strategy_cache_token(args: argparse.Namespace) -> str:
+    return args.strategy_version.replace("-", "_")
+
+
+def parameter_cache_token(args: argparse.Namespace) -> str:
+    target = f"target{args.target_holdings}" if args.target_holdings is not None else "target_config"
+    adv = f"adv{str(args.adv_cap).replace('.', 'p')}" if args.adv_cap is not None else "adv_config"
+    return f"{strategy_cache_token(args)}_{target}_{adv}"
+
+
+def read_or_build_input_cache(args: argparse.Namespace, source_path: Path, name: str) -> tuple[list[dict[str, str]], Path]:
+    if not cache_enabled(args):
+        return read_csv(source_path), source_path
+
+    output_path = cache_path(args, "inputs", name)
+    if output_path.exists() and not args.force_rebuild:
+        return read_csv(output_path), output_path
+
+    rows = read_csv(source_path)
+    write_table(rows, output_path, format=args.cache_format or "parquet")
+    return rows, output_path
+
+
+def run_cached_stages(args: argparse.Namespace, rebalance_date: date) -> tuple[Path, Path, Path]:
+    suffix = month_key(rebalance_date)
+    strategy_token = strategy_cache_token(args)
+    universe_path = cache_path(args, "universe", f"universe_{suffix}")
+    exclusions_path = cache_path(args, "universe", f"excluded_{suffix}")
+    factors_path = cache_path(args, "factors", f"factors_{suffix}")
+    scores_path = cache_path(args, "scores", f"scores_{suffix}_{strategy_token}")
+
+    config = args._config if hasattr(args, "_config") else load_yaml(args.config)
+    listing_rows = args._listing_rows if hasattr(args, "_listing_rows") else read_csv(args.listings)
+    price_rows = args._price_rows if hasattr(args, "_price_rows") else read_csv(args.prices)
+    fundamental_rows = (
+        args._fundamental_rows if hasattr(args, "_fundamental_rows") else read_csv(args.fundamentals)
+    )
+
+    if universe_path.exists() and not args.force_rebuild:
+        universe_rows = read_csv(universe_path)
+    else:
+        universe_rows, exclusion_rows = build_universe_from_rows(
+            config=config,
+            rebalance_date=rebalance_date,
+            listing_rows=listing_rows,
+            price_rows=price_rows,
+            fundamental_rows=fundamental_rows,
+        )
+        write_table(universe_rows, universe_path, format=args.cache_format or "parquet", fieldnames=UNIVERSE_CACHE_FIELDS)
+        write_table(
+            exclusion_rows,
+            exclusions_path,
+            format=args.cache_format or "parquet",
+            fieldnames=EXCLUSION_CACHE_FIELDS,
+        )
+
+    if factors_path.exists() and not args.force_rebuild:
+        factor_rows = read_csv(factors_path)
+    else:
+        factor_rows = build_factors(
+            rebalance_date=rebalance_date,
+            universe_rows=universe_rows,
+            price_rows=price_rows,
+            fundamental_rows=fundamental_rows,
+        )
+        write_table(factor_rows, factors_path, format=args.cache_format or "parquet", fieldnames=FACTOR_CACHE_FIELDS)
+
+    if not scores_path.exists() or args.force_rebuild:
+        score_rows, raw_factors = build_scores(
+            config=config,
+            factor_rows=factor_rows,
+            strategy_version=args.strategy_version,
+        )
+        for row in score_rows:
+            row["rebalance_date"] = row.get("rebalance_date") or rebalance_date
+        write_table(
+            score_rows,
+            scores_path,
+            format=args.cache_format or "parquet",
+            fieldnames=score_cache_fields(raw_factors),
+        )
+
+    return universe_path, factors_path, scores_path
+
+
+def write_rebalance_candidates_cache(
+    args: argparse.Namespace,
+    *,
+    rebalance_date: date,
+    scores: list[dict[str, str]],
+    selected_codes: list[str],
+    research_codes: list[str],
+    targets: dict[str, int],
+) -> None:
+    if not cache_enabled(args):
+        return
+    selected_set = set(selected_codes)
+    research_set = set(research_codes)
+    rows = []
+    for row in scores:
+        code = row.get("code", "")
+        if not code:
+            continue
+        if code not in selected_set and code not in research_set:
+            continue
+        rows.append(
+            {
+                "rebalance_date": rebalance_date,
+                "code": code,
+                "rank": row.get("rank", ""),
+                "selected_flag": str(code in selected_set).lower(),
+                "research_flag": str(code in research_set).lower(),
+                "target_shares": targets.get(code, ""),
+                "latest_unadjusted_close": row.get("latest_unadjusted_close", ""),
+            }
+        )
+    suffix = month_key(rebalance_date)
+    output_path = cache_path(
+        args,
+        "rebalance_candidates",
+        f"rebalance_candidates_{suffix}_{parameter_cache_token(args)}",
+    )
+    if output_path.exists() and not args.force_rebuild:
+        return
+    write_table(rows, output_path, format=args.cache_format or "parquet", fieldnames=CANDIDATE_CACHE_FIELDS)
+
+
 def run_stages(args: argparse.Namespace, rebalance_date: date) -> tuple[Path, Path, Path]:
+    if cache_enabled(args):
+        return run_cached_stages(args, rebalance_date)
+
     suffix = month_key(rebalance_date)
     py = sys.executable
     common_manifest_flag = ["--no-manifest"] if args.skip_stage_manifest else []
@@ -412,6 +723,8 @@ def run_stages(args: argparse.Namespace, rebalance_date: date) -> tuple[Path, Pa
             rebalance_date.isoformat(),
             "--factors",
             str(factors_path),
+            "--strategy-version",
+            args.strategy_version,
             *common_manifest_flag,
         ]
     )
@@ -483,14 +796,26 @@ def write_report(path: Path, summary_rows: list[dict[str, Any]], initial_capital
 
 
 def main() -> int:
-    args = build_parser().parse_args()
-    config = load_yaml(args.config)
+    args = normalize_args(build_parser().parse_args())
+    config = apply_config_overrides(load_yaml(args.config), args)
+    args._config = config
+    if cache_enabled(args):
+        args._cache_fingerprint = compute_cache_fingerprint(args, config)
     start_date = parse_date(args.start_date, field_name="start_date")
     end_date = parse_date(args.end_date, field_name="end_date")
     if start_date is None or end_date is None:
         raise ValueError("start-date and end-date are required")
 
-    listing_rows_for_check = read_csv(args.listings)
+    listing_rows_for_check, listings_path = read_or_build_input_cache(args, args.listings, "processed_listings")
+    price_rows, prices_path = read_or_build_input_cache(args, args.prices, "processed_prices")
+    fundamental_rows, fundamentals_path = read_or_build_input_cache(args, args.fundamentals, "processed_fundamentals")
+    args._listing_rows = listing_rows_for_check
+    args._price_rows = price_rows
+    args._fundamental_rows = fundamental_rows
+    args.listings = listings_path
+    args.prices = prices_path
+    args.fundamentals = fundamentals_path
+
     if snapshot_only_listings(listing_rows_for_check) and not args.allow_snapshot_listings:
         raise ValueError(
             "Listings look snapshot-only: listed_date is missing or listing_lifecycle_status marks missing lifecycle dates. "
@@ -498,7 +823,8 @@ def main() -> int:
             "--allow-snapshot-listings for exploratory samples only."
         )
 
-    price_index = build_price_index(read_csv(args.prices))
+    delisting_dates = build_delisting_index(listing_rows_for_check)
+    price_index = build_price_index(price_rows)
     dates = rebalance_dates(all_price_dates(price_index), start_date, end_date, args.frequency)
     if not dates:
         raise ValueError("No rebalance dates found in price file for the requested window.")
@@ -525,6 +851,7 @@ def main() -> int:
     holdings_rows: list[dict[str, Any]] = []
     summary_rows: list[dict[str, Any]] = []
     equity_rows: list[dict[str, Any]] = []
+    warned_price_tail_gaps: set[tuple[str, date]] = set()
 
     for rebalance_date in dates:
         universe_path, _factors_path, scores_path = run_stages(args, rebalance_date)
@@ -533,18 +860,43 @@ def main() -> int:
         universe_by_code = {row["code"]: row for row in universe_rows}
 
         if previous_date is not None:
-            benchmark_return = mean_return(price_index, previous_benchmark_codes, previous_date, rebalance_date)
-            research_return = mean_return(price_index, previous_research_codes, previous_date, rebalance_date)
+            benchmark_return = mean_return(
+                price_index,
+                previous_benchmark_codes,
+                previous_date,
+                rebalance_date,
+                delisting_dates,
+            )
+            research_return = mean_return(
+                price_index,
+                previous_research_codes,
+                previous_date,
+                rebalance_date,
+                delisting_dates,
+            )
             if benchmark_return is not None:
                 benchmark_equity *= 1 + benchmark_return
             if research_return is not None:
                 research_equity *= 1 + research_return
 
         for code, adjusted_shares in list(holdings.items()):
-            terminal_point = terminal_before(price_index, code, rebalance_date)
-            if terminal_point is None:
+            delisted_date = delisting_dates.get(code)
+            terminal_point = price_at(price_index, code, delisted_date or rebalance_date)
+            if delisted_date is None or delisted_date > rebalance_date:
+                tail_point = terminal_before(price_index, code, rebalance_date)
+                if tail_point is not None and (code, tail_point.date) not in warned_price_tail_gaps:
+                    warned_price_tail_gaps.add((code, tail_point.date))
+                    failure_rows.append(
+                        {
+                            "date": rebalance_date,
+                            "code": code,
+                            "failure_type": "price_tail_gap",
+                            "detail": f"last_price_date={tail_point.date}; no delisted_date in listings",
+                            "value": position_value(adjusted_shares, tail_point),
+                        }
+                    )
                 continue
-            actual_shares = actual_shares_from_adjusted(adjusted_shares, terminal_point)
+            actual_shares = actual_shares_from_adjusted(adjusted_shares, terminal_point) if terminal_point else adjusted_shares
             basis = remaining_basis(tax_lots.get(code, []))
             cumulative_realized_gain -= basis
             holdings.pop(code, None)
@@ -554,7 +906,7 @@ def main() -> int:
                     "date": rebalance_date,
                     "code": code,
                     "failure_type": "assumed_delisting_loss",
-                    "detail": f"last_price_date={terminal_point.date}; recovery_price=0",
+                    "detail": f"delisted_date={delisted_date}; recovery_price=0",
                     "value": 0,
                 }
             )
@@ -588,6 +940,14 @@ def main() -> int:
 
         selected_codes, research_codes = select_codes(scores, holdings, config)
         targets = build_targets(selected_codes, universe_by_code, price_index, rebalance_date, pre_equity)
+        write_rebalance_candidates_cache(
+            args,
+            rebalance_date=rebalance_date,
+            scores=scores,
+            selected_codes=selected_codes,
+            research_codes=research_codes,
+            targets=targets,
+        )
         zero_lot_targets = sum(1 for code in selected_codes if targets.get(code, 0) == 0)
         for code in selected_codes:
             if targets.get(code, 0) == 0:
@@ -886,7 +1246,19 @@ def main() -> int:
 
     start_suffix = month_key(dates[0])
     end_suffix = month_key(dates[-1])
-    label = args.run_label or f"{args.frequency}_{args.execution_price}_{args.cost_scenario}"
+    parameter_label = []
+    if args.target_holdings is not None:
+        parameter_label.append(f"target{args.target_holdings}")
+    if args.adv_cap is not None:
+        parameter_label.append(f"adv{str(args.adv_cap).replace('.', 'p')}")
+    default_label_parts = [
+        args.strategy_version,
+        args.frequency,
+        args.execution_price,
+        args.cost_scenario,
+        *parameter_label,
+    ]
+    label = args.run_label or "_".join(default_label_parts)
     token = f"{label}_{start_suffix}_{end_suffix}"
     args.out_dir.mkdir(parents=True, exist_ok=True)
     summary_path = args.out_dir / f"qvm_walkforward_summary_{token}.csv"

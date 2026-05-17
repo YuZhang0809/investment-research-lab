@@ -119,6 +119,110 @@ class ValidateContractsTest(unittest.TestCase):
         self.assertIn("number_parse", error_checks)
         self.assertIn("duplicate_key", error_checks)
 
+    def test_missing_or_nan_price_values_are_errors(self) -> None:
+        config = {"universe": {}}
+        listings = [
+            {
+                "code": "1001",
+                "name": "Sample",
+                "market": "Prime",
+                "sector": "Tech",
+                "listed_date": "2020-01-01",
+                "delisted_date": "",
+                "security_type": "common_stock",
+                "is_common_stock": "true",
+                "is_etf_reit_infra": "false",
+                "tradable_flag": "true",
+                "lot_size": "100",
+            }
+        ]
+        fundamentals = [
+            {
+                "code": "1001",
+                "available_date": "2025-01-02",
+                "available_time": "15:00",
+                "document_type": "annual",
+                "operating_profit": "100",
+                "net_profit": "80",
+                "equity": "1000",
+                "total_assets": "2000",
+                "shares_outstanding": "100",
+            }
+        ]
+
+        issues, _summary = validate_contracts(
+            config=config,
+            listing_rows=listings,
+            price_rows=[
+                {
+                    "date": "2025-01-01",
+                    "code": "1001",
+                    "unadjusted_close": "",
+                    "adjusted_close": "nan",
+                    "trading_value": "1000000",
+                    "tradable_flag": "true",
+                    "price_limit_flag": "false",
+                }
+            ],
+            fundamental_rows=fundamentals,
+        )
+
+        error_checks = {row["check"] for row in issues if row["severity"] == "error"}
+        self.assertIn("missing_price", error_checks)
+        self.assertIn("number_parse", error_checks)
+
+    def test_all_empty_delisted_dates_are_warned(self) -> None:
+        config = {"universe": {"min_ipo_age_trading_days": 0, "liquidity_lookback_days": 0}}
+        listings = [
+            {
+                "code": "1001",
+                "name": "Sample",
+                "market": "Prime",
+                "sector": "Tech",
+                "listed_date": "2020-01-01",
+                "delisted_date": "",
+                "security_type": "common_stock",
+                "is_common_stock": "true",
+                "is_etf_reit_infra": "false",
+                "tradable_flag": "true",
+                "lot_size": "100",
+            }
+        ]
+        prices = [
+            {
+                "date": "2025-01-01",
+                "code": "1001",
+                "unadjusted_close": "1000",
+                "adjusted_close": "1000",
+                "trading_value": "1000000",
+                "tradable_flag": "true",
+                "price_limit_flag": "false",
+            }
+        ]
+        fundamentals = [
+            {
+                "code": "1001",
+                "available_date": "2025-01-02",
+                "available_time": "15:00",
+                "document_type": "annual",
+                "operating_profit": "100",
+                "net_profit": "80",
+                "equity": "1000",
+                "total_assets": "2000",
+                "shares_outstanding": "100",
+            }
+        ]
+
+        issues, _summary = validate_contracts(
+            config=config,
+            listing_rows=listings,
+            price_rows=prices,
+            fundamental_rows=fundamentals,
+        )
+
+        warning_checks = {row["check"] for row in issues if row["severity"] == "warning"}
+        self.assertIn("delisting_lifecycle_coverage", warning_checks)
+
 
 if __name__ == "__main__":
     unittest.main()

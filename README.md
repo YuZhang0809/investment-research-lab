@@ -14,7 +14,8 @@ not a general quant platform, live trading system, or broker integration.
 
 - Japan equity research experiments
 - J-Quants API download adapters
-- CSV-first data contracts
+- Parquet processed/cache data with CSV import/export contracts
+- Local DuckDB queries over Parquet files
 - Point-in-time universe construction
 - QVM factor, score, target, order, and walk-forward pipelines
 - TDnet event-observation scaffolding
@@ -26,6 +27,7 @@ The first product milestone is a complete QVM research loop:
 
 ```text
 clean contract data
+  -> Parquet processed/cache tables
   -> point-in-time universe
   -> QVM factors and ranks
   -> research and executable targets
@@ -92,6 +94,25 @@ python scripts\smoke_test_universe.py
 
 The smoke test generates synthetic data in a temporary directory and verifies
 the point-in-time universe logic without using real vendor data.
+
+Walk-forward runs can opt into the Parquet cache and parameter overrides while
+keeping human review outputs as CSV:
+
+```powershell
+python scripts\run_qvm_walkforward.py `
+  --config configs\qvm_v0_1.example.yml `
+  --listings <public-safe-listings.csv> `
+  --prices <public-safe-prices.csv> `
+  --fundamentals <public-safe-fundamentals.csv> `
+  --start-date 2026-01-01 `
+  --end-date 2026-12-31 `
+  --cache-format parquet `
+  --rebalance quarterly `
+  --strategy-version qvm `
+  --target-holdings 15 `
+  --adv-cap 0.005 `
+  --no-manifest
+```
 
 ## Data Policy
 
