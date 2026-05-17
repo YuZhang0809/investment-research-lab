@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from factor_expressions import (
-    configured_factor_definitions,
     evaluate_factor_expression,
     factor_definition_names,
+    ordered_factor_definitions,
 )
 from research_common import (
     append_manifest,
@@ -52,6 +52,18 @@ FACTOR_METADATA_FIELDS = [
     "total_assets",
     "shares",
 ]
+FACTOR_EXPRESSION_BASE_FIELDS = frozenset(
+    {
+        "latest_unadjusted_close",
+        "market_cap",
+        "operating_profit",
+        "net_profit",
+        "equity",
+        "total_assets",
+        "shares",
+        *BASE_FACTOR_FIELDS,
+    }
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -198,7 +210,11 @@ def build_factors(
     config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     validate_custom_factor_names(config)
-    custom_definitions = configured_factor_definitions(config)
+    custom_definitions = ordered_factor_definitions(
+        config,
+        base_variables=FACTOR_EXPRESSION_BASE_FIELDS,
+        functions={"ts_return"},
+    )
     prices_by_code = group_by_code(price_rows)
     calendar = trading_calendar_from_rows(price_rows)
     fundamentals_by_code = group_by_code(fundamental_rows)

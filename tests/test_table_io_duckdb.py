@@ -15,6 +15,7 @@ from duckdb_query import parquet_scan, query  # noqa: E402
 from analyze_factor_forward_returns import factor_files  # noqa: E402
 from build_factors import build_factors  # noqa: E402
 from build_scores import STRATEGY_VERSION_CHOICES, build_scores  # noqa: E402
+from factor_expressions import factor_definition_dependency_graph, factor_definition_fingerprints  # noqa: E402
 from research_common import read_csv, read_table, write_table  # noqa: E402
 
 
@@ -281,6 +282,66 @@ class TableIODuckDBTest(unittest.TestCase):
         self.assertAlmostEqual(0.2, float(rows[0]["recent_return"]))
         self.assertNotIn("profit_margin_proxy", rows[0]["missing_flags"])
 
+    def test_factor_definition_dependencies_are_topologically_sorted(self) -> None:
+        config = {
+            "factors": {
+                "definitions": [
+                    {
+                        "name": "value_blend",
+                        "group": "value",
+                        "expr": "avg(positive_value_proxy, book_to_market)",
+                    },
+                    {
+                        "name": "positive_value_proxy",
+                        "group": "value",
+                        "expr": "where(earnings_yield > 0, earnings_yield, book_to_market)",
+                    },
+                ]
+            }
+        }
+
+        rows = build_factors(
+            config=config,
+            rebalance_date=date(2026, 1, 1),
+            universe_rows=[{"code": "1001", "latest_unadjusted_close": "100"}],
+            price_rows=[{"date": "2026-01-01", "code": "1001", "adjusted_close": "100", "unadjusted_close": "100"}],
+            fundamental_rows=[
+                {
+                    "code": "1001",
+                    "available_date": "2025-12-31",
+                    "operating_profit": "100",
+                    "net_profit": "50",
+                    "equity": "500",
+                    "total_assets": "1000",
+                    "shares_outstanding": "10",
+                }
+            ],
+        )
+
+        self.assertAlmostEqual(0.05, float(rows[0]["positive_value_proxy"]))
+        self.assertAlmostEqual(0.275, float(rows[0]["value_blend"]))
+
+    def test_factor_definition_dependency_graph_and_fingerprints_are_stable(self) -> None:
+        config = {
+            "factors": {
+                "definitions": [
+                    {"name": "quality_blend", "group": "quality", "expr": "avg(equity_to_assets, operating_profit_to_total_assets)"},
+                    {"name": "quality_plus", "group": "quality", "expr": "quality_blend + 1"},
+                ]
+            }
+        }
+
+        graph = factor_definition_dependency_graph(
+            config,
+            base_variables={"equity_to_assets", "operating_profit_to_total_assets"},
+        )
+        fingerprints = factor_definition_fingerprints(config)
+
+        self.assertEqual([], graph["quality_blend"])
+        self.assertEqual(["quality_blend"], graph["quality_plus"])
+        self.assertEqual({"quality_blend", "quality_plus"}, set(fingerprints))
+        self.assertNotEqual(fingerprints["quality_blend"], fingerprints["quality_plus"])
+
     def test_factor_expression_rejects_unsafe_calls(self) -> None:
         config = {
             "factors": {
@@ -294,12 +355,49 @@ class TableIODuckDBTest(unittest.TestCase):
             }
         }
 
-        with self.assertRaisesRegex(ValueError, "Unsupported function call"):
+        with self.assertRaisesRegex(ValueError, "Unsupported factor expression function"):
             build_factors(
                 config=config,
                 rebalance_date=date(2026, 1, 1),
                 universe_rows=[{"code": "1001", "latest_unadjusted_close": "100"}],
                 price_rows=[{"date": "2026-01-01", "code": "1001", "adjusted_close": "100", "unadjusted_close": "100"}],
+                fundamental_rows=[],
+            )
+
+    def test_factor_expression_rejects_unknown_dependency_names(self) -> None:
+        config = {
+            "factors": {
+                "definitions": [
+                    {"name": "bad_factor", "group": "quality", "expr": "typo_factor + 1"},
+                ]
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, "Unknown factor expression variable in bad_factor: typo_factor"):
+            build_factors(
+                config=config,
+                rebalance_date=date(2026, 1, 1),
+                universe_rows=[],
+                price_rows=[],
+                fundamental_rows=[],
+            )
+
+    def test_factor_expression_rejects_cyclic_dependencies(self) -> None:
+        config = {
+            "factors": {
+                "definitions": [
+                    {"name": "factor_a", "group": "quality", "expr": "factor_b + 1"},
+                    {"name": "factor_b", "group": "quality", "expr": "factor_a + 1"},
+                ]
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, "Cyclic factor definition dependency: factor_a -> factor_b -> factor_a"):
+            build_factors(
+                config=config,
+                rebalance_date=date(2026, 1, 1),
+                universe_rows=[],
+                price_rows=[],
                 fundamental_rows=[],
             )
 

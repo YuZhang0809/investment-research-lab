@@ -14,7 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from build_factors import build_factors, factor_output_fields
-from factor_expressions import factor_definition_names
+from factor_expressions import (
+    factor_definition_dependency_graph,
+    factor_definition_fingerprints,
+    factor_definition_names,
+)
 from build_scores import STRATEGY_VERSION_CHOICES, build_scores
 from build_universe import build_universe_from_rows
 from research_common import (
@@ -663,7 +667,7 @@ def compute_cache_fingerprints(args: argparse.Namespace, config: dict[str, Any])
     )
     factors_fingerprint = cache_digest(
         {
-            "schema_version": "walkforward_factors_cache_v0_1",
+            "schema_version": "walkforward_factors_cache_v0_2",
             "inputs": inputs_fingerprint,
             "universe": universe_fingerprint,
             "factor_engine": {
@@ -671,6 +675,12 @@ def compute_cache_fingerprints(args: argparse.Namespace, config: dict[str, Any])
                 "return_6_1": {"lookback_days": 126, "skip_days": 21},
             },
             "factor_definitions": factor_definition_names(config),
+            "factor_definition_fingerprints": factor_definition_fingerprints(config, functions={"ts_return"}),
+            "factor_definition_dependency_graph": factor_definition_dependency_graph(
+                config,
+                functions={"ts_return"},
+                validate_unknown=False,
+            ),
             "factor_definition_config": ((config.get("factors", {}) or {}).get("definitions", []) or []),
             "source": {
                 "build_factors.py": source_checksum("build_factors.py"),

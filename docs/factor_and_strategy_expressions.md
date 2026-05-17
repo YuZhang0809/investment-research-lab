@@ -74,6 +74,12 @@ return_6_1
 Configured factor names must be simple identifiers and cannot overwrite
 reserved output fields.
 
+Definitions are dependency-checked before row evaluation. A definition may
+reference another configured factor even if the dependency is listed later in
+the YAML file; the engine builds a small DAG and evaluates dependencies first.
+Unknown variables, unsupported function names, and cyclic dependencies fail
+fast with `ValueError`.
+
 Missing inputs propagate through expressions. Arithmetic functions, comparison
 operators, boolean operators, and `where()` return `None` when the result cannot
 be determined from available point-in-time data. This keeps configured factors
@@ -169,6 +175,54 @@ field such as `earnings_yield_z` when the threshold is in z-score units.
 
 Unknown weighted factor fields and unknown filter fields fail fast with
 `ValueError` instead of producing an empty ranked output.
+
+## Factor Diagnostics
+
+`analyze_factor_forward_returns.py` writes three public-safe artifacts:
+
+```text
+factor_forward_returns_<range>_<holding>d.csv
+alphalens_factor_data_<range>_<holding>d.csv
+factor_forward_returns_<range>_<holding>d.md
+```
+
+The summary CSV keeps one row per factor and rebalance date. It includes IC,
+rank IC, top/bottom bucket returns, quantile returns, top quantile turnover,
+rank autocorrelation, coverage, and missing-data counters.
+
+The `alphalens_factor_data` CSV is a file-first adapter for Alphalens-style
+analysis. It uses one row per `(date, asset, factor)` observation and includes:
+
+```text
+date
+asset
+factor
+factor_value
+forward_return_<holding>d
+factor_quantile
+group
+sector
+name
+forward_status
+```
+
+`factor_quantile` follows the Alphalens convention that `1` is the lowest factor
+bucket and the highest number is the strongest factor bucket. `group` is mapped
+from `sector` so a downstream notebook can compute grouped IC or grouped
+returns without changing the public data pipeline.
+
+The Markdown report is still intentionally lightweight. It is closer to an
+Alphalens tear sheet than the earlier report because it now surfaces IC,
+quantile returns, turnover, rank autocorrelation, and monthly diagnostics, but
+it does not claim sector or size neutralization.
+
+## Cache Fingerprints
+
+Walkforward factor cache fingerprints include both the full `factors.definitions`
+block and per-factor definition fingerprints. Each factor fingerprint covers the
+definition name, group, scoring inclusion flag, expression text, and expression
+dependencies. This keeps cache invalidation auditable today and leaves a clean
+path to split factor caches by definition later.
 
 ## Boundary
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import hashlib
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -10,6 +12,7 @@ from research_common import parse_bool, parse_float
 
 
 NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+DEFAULT_FUNCTION_NAMES = frozenset({"abs", "avg", "clamp", "log", "max", "min", "ratio", "sqrt", "where"})
 
 
 @dataclass(frozen=True)
@@ -19,6 +22,12 @@ class FactorDefinition:
     group: str = ""
     include_in_score: bool = True
     description: str = ""
+
+
+@dataclass(frozen=True)
+class ExpressionNames:
+    variables: frozenset[str]
+    functions: frozenset[str]
 
 
 def configured_factor_definitions(config: dict[str, Any] | None) -> list[FactorDefinition]:
@@ -52,6 +61,133 @@ def configured_factor_definitions(config: dict[str, Any] | None) -> list[FactorD
             )
         )
     return definitions
+
+
+class ExpressionNameCollector(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.variables: set[str] = set()
+        self.functions: set[str] = set()
+
+    def visit_Name(self, node: ast.Name) -> None:
+        self.variables.add(node.id)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if isinstance(node.func, ast.Name):
+            self.functions.add(node.func.id)
+        else:
+            self.visit(node.func)
+        for arg in node.args:
+            self.visit(arg)
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                raise ValueError("Unsupported keyword unpacking in factor expression.")
+            self.visit(keyword.value)
+
+
+def expression_names(expression: str) -> ExpressionNames:
+    try:
+        tree = ast.parse(expression, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"Invalid factor expression: {expression}") from exc
+    collector = ExpressionNameCollector()
+    collector.visit(tree)
+    return ExpressionNames(
+        variables=frozenset(collector.variables),
+        functions=frozenset(collector.functions),
+    )
+
+
+def factor_definition_dependency_graph(
+    config: dict[str, Any] | None,
+    *,
+    base_variables: set[str] | frozenset[str] | None = None,
+    functions: set[str] | frozenset[str] | None = None,
+    validate_unknown: bool = True,
+) -> dict[str, list[str]]:
+    definitions = configured_factor_definitions(config)
+    definition_names = {definition.name for definition in definitions}
+    allowed_variables = set(base_variables or set()) | definition_names
+    allowed_functions = set(DEFAULT_FUNCTION_NAMES) | set(functions or set())
+    graph: dict[str, list[str]] = {}
+    for definition in definitions:
+        names = expression_names(definition.expr)
+        unknown_functions = sorted(names.functions - allowed_functions)
+        if unknown_functions:
+            raise ValueError(
+                f"Unsupported factor expression function in {definition.name}: {', '.join(unknown_functions)}"
+            )
+        unknown_variables = sorted(names.variables - allowed_variables)
+        if validate_unknown and unknown_variables:
+            raise ValueError(
+                f"Unknown factor expression variable in {definition.name}: {', '.join(unknown_variables)}"
+            )
+        graph[definition.name] = sorted(names.variables & definition_names)
+    return graph
+
+
+def factor_definition_fingerprints(
+    config: dict[str, Any] | None,
+    *,
+    functions: set[str] | frozenset[str] | None = None,
+) -> dict[str, str]:
+    definitions = configured_factor_definitions(config)
+    graph = factor_definition_dependency_graph(
+        config,
+        functions=functions,
+        validate_unknown=False,
+    )
+    fingerprints: dict[str, str] = {}
+    for definition in definitions:
+        payload = {
+            "schema_version": "factor_definition_fingerprint_v0_1",
+            "name": definition.name,
+            "group": definition.group,
+            "include_in_score": definition.include_in_score,
+            "expr": definition.expr,
+            "dependencies": graph.get(definition.name, []),
+        }
+        text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        fingerprints[definition.name] = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return fingerprints
+
+
+def ordered_factor_definitions(
+    config: dict[str, Any] | None,
+    *,
+    base_variables: set[str] | frozenset[str],
+    functions: set[str] | frozenset[str] | None = None,
+) -> list[FactorDefinition]:
+    definitions = configured_factor_definitions(config)
+    if not definitions:
+        return []
+    by_name = {definition.name: definition for definition in definitions}
+    order_index = {definition.name: index for index, definition in enumerate(definitions)}
+    graph = factor_definition_dependency_graph(
+        config,
+        base_variables=base_variables,
+        functions=functions,
+        validate_unknown=True,
+    )
+    ordered: list[FactorDefinition] = []
+    state: dict[str, str] = {}
+
+    def visit(name: str, stack: list[str]) -> None:
+        current_state = state.get(name)
+        if current_state == "done":
+            return
+        if current_state == "visiting":
+            cycle_start = stack.index(name) if name in stack else 0
+            cycle = [*stack[cycle_start:], name]
+            raise ValueError(f"Cyclic factor definition dependency: {' -> '.join(cycle)}")
+        state[name] = "visiting"
+        for dependency in sorted(graph[name], key=lambda item: order_index[item]):
+            visit(dependency, [*stack, name])
+        state[name] = "done"
+        ordered.append(by_name[name])
+
+    for definition in definitions:
+        visit(definition.name, [])
+    return ordered
 
 
 def factor_definition_names(config: dict[str, Any] | None, *, include_all: bool = True) -> list[str]:

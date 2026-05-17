@@ -41,6 +41,16 @@ class ForwardReturnResult:
     status: str
 
 
+@dataclass
+class FactorObservation:
+    code: str
+    name: str
+    sector: str
+    factor_value: float
+    forward_return: float
+    factor_quantile: int | None = None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Analyze simple factor forward returns from QVM factor files.")
     parser.add_argument("--factors-dir", type=Path, default=Path("data/processed/factors"))
@@ -50,7 +60,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--holding-days", type=int, default=63)
     parser.add_argument("--factor", action="append", dest="factors", help="Factor column to analyze. Can be repeated.")
     parser.add_argument("--top-frac", type=float, default=0.2)
+    parser.add_argument("--quantiles", type=int, default=5)
     parser.add_argument("--out-dir", type=Path, default=Path("data/processed/factor_analysis"))
+    parser.add_argument("--alphalens-out", type=Path, default=None)
     parser.add_argument("--report-dir", type=Path, default=Path("reports/factor_analysis"))
     parser.add_argument("--manifest", type=Path, default=Path("data/manifest/data_manifest.csv"))
     parser.add_argument("--no-manifest", action="store_true")
@@ -161,6 +173,26 @@ def rank_ic(xs: list[float], ys: list[float]) -> float | None:
     return pearson(ranks(xs), ranks(ys))
 
 
+def assign_quantiles(observations: list[FactorObservation], requested_quantiles: int) -> int:
+    if requested_quantiles < 2:
+        raise ValueError("quantiles must be at least 2.")
+    if not observations:
+        return 0
+    quantile_count = min(requested_quantiles, len(observations))
+    ordered = sorted(observations, key=lambda item: (item.factor_value, item.code))
+    for index, item in enumerate(ordered):
+        item.factor_quantile = min(quantile_count, int(index * quantile_count / len(ordered)) + 1)
+    return quantile_count
+
+
+def factor_rank_map(observations: list[FactorObservation]) -> dict[str, float]:
+    values = [item.factor_value for item in observations]
+    return {
+        item.code: rank
+        for item, rank in zip(observations, ranks(values))
+    }
+
+
 def average(values: list[float]) -> float | None:
     if not values:
         return None
@@ -192,16 +224,19 @@ def number(value: float | None, digits: int = 4) -> str:
     return f"{value:.{digits}f}"
 
 
-def write_report(path: Path, rows: list[dict[str, Any]], holding_days: int) -> None:
+def write_report(path: Path, rows: list[dict[str, Any]], holding_days: int, quantiles: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "# Factor Forward Return Report",
         "",
         f"- holding days: {holding_days}",
+        f"- quantiles: {quantiles} (1 = lowest factor values; higher = stronger factor values)",
         f"- rows: {len(rows)}",
         "",
-        "| factor | months | observations | avg rank IC | IC std | IC IR | positive IC months | avg top return | avg bottom return | avg top-bottom | avg coverage | missing factor | missing forward | price tail gap | bucket skipped |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "## Summary",
+        "",
+        "| factor | months | observations | avg rank IC | avg pearson IC | IC std | IC IR | positive IC months | top quantile | bottom quantile | top-bottom | top turnover | rank autocorr | coverage | missing factor | missing forward |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     by_factor: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -209,30 +244,67 @@ def write_report(path: Path, rows: list[dict[str, Any]], holding_days: int) -> N
     for factor, values in sorted(by_factor.items()):
         observations = sum(int(row["observations"]) for row in values)
         rank_ics = [float(row["rank_ic"]) for row in values if row.get("rank_ic") not in (None, "")]
+        pearson_ics = [float(row["pearson_ic"]) for row in values if row.get("pearson_ic") not in (None, "")]
         avg_ic = average(rank_ics)
         ic_std = sample_std(rank_ics)
         ic_ir = avg_ic / ic_std if avg_ic is not None and ic_std and ic_std > 0 else None
         positive_ic_months = sum(1 for value in rank_ics if value > 0)
-        avg_top = average([float(row["top_return"]) for row in values if row.get("top_return") not in (None, "")])
-        avg_bottom = average([float(row["bottom_return"]) for row in values if row.get("bottom_return") not in (None, "")])
-        avg_spread = average([float(row["top_bottom_spread"]) for row in values if row.get("top_bottom_spread") not in (None, "")])
+        avg_top = average([float(row["top_quantile_return"]) for row in values if row.get("top_quantile_return") not in (None, "")])
+        avg_bottom = average(
+            [float(row["bottom_quantile_return"]) for row in values if row.get("bottom_quantile_return") not in (None, "")]
+        )
+        avg_spread = average(
+            [float(row["top_bottom_quantile_spread"]) for row in values if row.get("top_bottom_quantile_spread") not in (None, "")]
+        )
+        avg_turnover = average(
+            [float(row["top_quantile_turnover"]) for row in values if row.get("top_quantile_turnover") not in (None, "")]
+        )
+        avg_rank_autocorr = average(
+            [float(row["rank_autocorr"]) for row in values if row.get("rank_autocorr") not in (None, "")]
+        )
         avg_coverage = average([float(row["coverage"]) for row in values if row.get("coverage") not in (None, "")])
         missing_factor = sum(int(row["missing_factor"]) for row in values)
         missing_forward = sum(int(row["missing_forward_return"]) for row in values)
-        price_tail_gaps = sum(int(row["price_tail_gap"]) for row in values)
-        bucket_skipped = sum(1 for row in values if row.get("bucket_status") != "ok")
         lines.append(
             f"| {factor} | {len(values)} | {observations} | "
-            f"{number(avg_ic)} | {number(ic_std)} | {number(ic_ir)} | "
+            f"{number(avg_ic)} | {number(average(pearson_ics))} | {number(ic_std)} | {number(ic_ir)} | "
             f"{positive_ic_months}/{len(rank_ics)} | {pct(avg_top)} | {pct(avg_bottom)} | "
-            f"{pct(avg_spread)} | {pct(avg_coverage)} | {missing_factor} | {missing_forward} | {price_tail_gaps} | {bucket_skipped} |"
+            f"{pct(avg_spread)} | {pct(avg_turnover)} | {number(avg_rank_autocorr)} | "
+            f"{pct(avg_coverage)} | {missing_factor} | {missing_forward} |"
+        )
+    lines.extend(["", "## Quantile Returns", ""])
+    quantile_headers = " | ".join(f"Q{index}" for index in range(1, quantiles + 1))
+    quantile_separators = "|".join(["---", *["---:" for _index in range(quantiles)]])
+    lines.append(f"| factor | {quantile_headers} |")
+    lines.append(f"|{quantile_separators}|")
+    for factor, values in sorted(by_factor.items()):
+        quantile_cells = []
+        for index in range(1, quantiles + 1):
+            column = f"quantile_{index}_return"
+            quantile_cells.append(pct(average([float(row[column]) for row in values if row.get(column) not in (None, "")])))
+        lines.append(f"| {factor} | {' | '.join(quantile_cells)} |")
+    lines.extend(
+        [
+            "",
+            "## Monthly Diagnostics",
+            "",
+            "| date | factor | observations | rank IC | top-bottom | turnover | rank autocorr | bucket status | forward missing |",
+            "|---|---|---:|---:|---:|---:|---:|---|---:|",
+        ]
+    )
+    for row in sorted(rows, key=lambda item: (str(item["factor"]), str(item["rebalance_date"]))):
+        lines.append(
+            f"| {row['rebalance_date']} | {row['factor']} | {row['observations']} | "
+            f"{number(row.get('rank_ic'))} | {pct(row.get('top_bottom_quantile_spread'))} | "
+            f"{pct(row.get('top_quantile_turnover'))} | {number(row.get('rank_autocorr'))} | "
+            f"{row.get('bucket_status', '')} | {row.get('missing_forward_return', '')} |"
         )
     lines.extend(
         [
             "",
             "## Caveat",
             "",
-            "This is a lightweight factor diagnostic. It is not a full Alphalens-style study and does not control for sector, size, liquidity, or transaction costs.",
+            "This is an Alphalens-style file-first diagnostic, not a full Alphalens tear sheet. It reports IC, quantile returns, turnover, rank autocorrelation, and coverage, but does not neutralize by sector or size and does not include transaction costs.",
         ]
     )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -244,12 +316,17 @@ def main() -> int:
     end_date = parse_date(args.end_date, field_name="end_date")
     if start_date is None or end_date is None:
         raise ValueError("start-date and end-date are required")
+    if args.quantiles < 2:
+        raise ValueError("quantiles must be at least 2.")
     factors = args.factors or DEFAULT_FACTORS
     price_rows = read_csv(args.prices)
     price_index = build_price_index(price_rows)
     calendar = trading_calendar_from_rows(price_rows)
 
     output_rows: list[dict[str, Any]] = []
+    factor_data_rows: list[dict[str, Any]] = []
+    previous_top_assets: dict[str, set[str]] = {}
+    previous_factor_ranks: dict[str, dict[str, float]] = {}
     for file_path in factor_files(args.factors_dir, start_date, end_date):
         factor_rows = read_csv(file_path)
         if not factor_rows:
@@ -258,7 +335,7 @@ def main() -> int:
         if rebalance_date is None:
             continue
         for factor in factors:
-            observations: list[tuple[float, float]] = []
+            observations: list[FactorObservation] = []
             total_rows = 0
             missing_factor = 0
             missing_price_history = 0
@@ -276,7 +353,15 @@ def main() -> int:
                     continue
                 forward = future_return(price_index.get(code, []), calendar, rebalance_date, args.holding_days)
                 if forward.status == "ok" and forward.value is not None:
-                    observations.append((factor_value, forward.value))
+                    observations.append(
+                        FactorObservation(
+                            code=code,
+                            name=row.get("name", ""),
+                            sector=row.get("sector", ""),
+                            factor_value=factor_value,
+                            forward_return=forward.value,
+                        )
+                    )
                 elif forward.status == "price_tail_gap":
                     price_tail_gap += 1
                 elif forward.status == "missing_price_history":
@@ -289,20 +374,53 @@ def main() -> int:
                     insufficient_forward_window += 1
                 elif forward.status == "invalid_start_price":
                     invalid_start_price += 1
-            observations.sort(key=lambda item: item[0], reverse=True)
+            observations.sort(key=lambda item: item.factor_value, reverse=True)
             bucket_size = max(1, int(math.ceil(len(observations) * args.top_frac))) if observations else 0
             bucket_status = "ok"
             if not bucket_size or len(observations) < bucket_size * 2:
                 bucket_status = "insufficient_non_overlapping_observations"
-                top: list[tuple[float, float]] = []
-                bottom: list[tuple[float, float]] = []
+                top: list[FactorObservation] = []
+                bottom: list[FactorObservation] = []
             else:
                 top = observations[:bucket_size]
                 bottom = observations[-bucket_size:]
-            top_return = average([item[1] for item in top])
-            bottom_return = average([item[1] for item in bottom])
-            factor_values = [item[0] for item in observations]
-            forward_values = [item[1] for item in observations]
+            top_return = average([item.forward_return for item in top])
+            bottom_return = average([item.forward_return for item in bottom])
+            factor_values = [item.factor_value for item in observations]
+            forward_values = [item.forward_return for item in observations]
+            quantile_count = assign_quantiles(observations, args.quantiles)
+            quantile_returns = {
+                index: average([item.forward_return for item in observations if item.factor_quantile == index])
+                for index in range(1, quantile_count + 1)
+            }
+            bottom_quantile_return = quantile_returns.get(1)
+            top_quantile_return = quantile_returns.get(quantile_count)
+            top_bottom_quantile_spread = (
+                top_quantile_return - bottom_quantile_return
+                if top_quantile_return is not None and bottom_quantile_return is not None
+                else None
+            )
+            top_quantile_assets = {
+                item.code
+                for item in observations
+                if quantile_count and item.factor_quantile == quantile_count
+            }
+            previous_assets = previous_top_assets.get(factor)
+            top_quantile_turnover = None
+            if previous_assets is not None and top_quantile_assets:
+                top_quantile_turnover = 1.0 - len(top_quantile_assets & previous_assets) / len(top_quantile_assets)
+            current_ranks = factor_rank_map(observations)
+            previous_ranks = previous_factor_ranks.get(factor)
+            rank_autocorr = None
+            if previous_ranks is not None:
+                overlap = sorted(set(previous_ranks) & set(current_ranks))
+                if len(overlap) >= 2:
+                    rank_autocorr = pearson(
+                        [previous_ranks[code] for code in overlap],
+                        [current_ranks[code] for code in overlap],
+                    )
+            previous_top_assets[factor] = top_quantile_assets
+            previous_factor_ranks[factor] = current_ranks
             missing_forward = (
                 missing_price_history
                 + missing_start_price
@@ -326,6 +444,14 @@ def main() -> int:
                     "top_return": top_return,
                     "bottom_return": bottom_return,
                     "top_bottom_spread": top_return - bottom_return if top_return is not None and bottom_return is not None else None,
+                    "quantile_count": quantile_count,
+                    "quantile_status": "ok" if quantile_count >= 2 else "insufficient_quantile_observations",
+                    "top_quantile_return": top_quantile_return,
+                    "bottom_quantile_return": bottom_quantile_return,
+                    "top_bottom_quantile_spread": top_bottom_quantile_spread,
+                    "top_quantile_turnover": top_quantile_turnover,
+                    "rank_autocorr": rank_autocorr,
+                    **{f"quantile_{index}_return": quantile_returns.get(index) for index in range(1, args.quantiles + 1)},
                     "missing_factor": missing_factor,
                     "missing_forward_return": missing_forward,
                     "missing_price_history": missing_price_history,
@@ -336,10 +462,27 @@ def main() -> int:
                     "invalid_start_price": invalid_start_price,
                 }
             )
+            forward_column = f"forward_return_{args.holding_days}d"
+            for item in sorted(observations, key=lambda value: (value.factor_quantile or 0, value.code)):
+                factor_data_rows.append(
+                    {
+                        "date": rebalance_date,
+                        "asset": item.code,
+                        "factor": factor,
+                        "factor_value": item.factor_value,
+                        forward_column: item.forward_return,
+                        "factor_quantile": item.factor_quantile,
+                        "group": item.sector,
+                        "sector": item.sector,
+                        "name": item.name,
+                        "forward_status": "ok",
+                    }
+                )
 
     token = f"{start_date.strftime('%Y%m')}_{end_date.strftime('%Y%m')}_{args.holding_days}d"
     args.out_dir.mkdir(parents=True, exist_ok=True)
     output_path = args.out_dir / f"factor_forward_returns_{token}.csv"
+    alphalens_path = args.alphalens_out or args.out_dir / f"alphalens_factor_data_{token}.csv"
     report_path = args.report_dir / f"factor_forward_returns_{token}.md"
     fields = [
         "rebalance_date",
@@ -355,6 +498,14 @@ def main() -> int:
         "top_return",
         "bottom_return",
         "top_bottom_spread",
+        "quantile_count",
+        "quantile_status",
+        "top_quantile_return",
+        "bottom_quantile_return",
+        "top_bottom_quantile_spread",
+        "top_quantile_turnover",
+        "rank_autocorr",
+        *[f"quantile_{index}_return" for index in range(1, args.quantiles + 1)],
         "missing_factor",
         "missing_forward_return",
         "missing_price_history",
@@ -365,27 +516,50 @@ def main() -> int:
         "invalid_start_price",
     ]
     write_csv(output_path, [{key: fmt(value) for key, value in row.items()} for row in output_rows], fields)
-    write_report(report_path, output_rows, args.holding_days)
+    factor_data_fields = [
+        "date",
+        "asset",
+        "factor",
+        "factor_value",
+        f"forward_return_{args.holding_days}d",
+        "factor_quantile",
+        "group",
+        "sector",
+        "name",
+        "forward_status",
+    ]
+    write_csv(alphalens_path, [{key: fmt(value) for key, value in row.items()} for row in factor_data_rows], factor_data_fields)
+    write_report(report_path, output_rows, args.holding_days, args.quantiles)
     if not args.no_manifest:
         append_manifest(
             args.manifest,
             source="derived_factor_forward_returns",
             file_path=output_path,
             vendor="local",
-            schema_version="factor_forward_returns_v0_2",
+            schema_version="factor_forward_returns_v0_3",
             date_range=f"{start_date.isoformat()}..{end_date.isoformat()}",
             notes=f"{len(output_rows)} rows; holding_days={args.holding_days}",
+        )
+        append_manifest(
+            args.manifest,
+            source="derived_alphalens_factor_data",
+            file_path=alphalens_path,
+            vendor="local",
+            schema_version="alphalens_factor_data_v0_1",
+            date_range=f"{start_date.isoformat()}..{end_date.isoformat()}",
+            notes=f"{len(factor_data_rows)} rows; holding_days={args.holding_days}; quantiles={args.quantiles}",
         )
         append_manifest(
             args.manifest,
             source="derived_factor_forward_returns_report",
             file_path=report_path,
             vendor="local",
-            schema_version="factor_forward_returns_report_v0_1",
+            schema_version="factor_forward_returns_report_v0_2",
             date_range=f"{start_date.isoformat()}..{end_date.isoformat()}",
             notes=f"holding_days={args.holding_days}",
         )
     print(f"Wrote factor forward returns to {output_path}")
+    print(f"Wrote Alphalens-style factor data to {alphalens_path}")
     print(f"Wrote factor forward return report to {report_path}")
     return 0
 
