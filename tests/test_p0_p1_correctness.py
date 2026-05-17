@@ -98,6 +98,12 @@ class P0P1CorrectnessTest(unittest.TestCase):
     def test_lifecycle_status_requires_more_than_one_delisting_marker(self) -> None:
         self.assertEqual("unknown", run_qvm_walkforward.lifecycle_data_status([]))
         self.assertEqual(
+            "pit_snapshot_panel",
+            run_qvm_walkforward.lifecycle_data_status(
+                [{"code": "1001", "listed_date": "", "listing_lifecycle_status": "pit_snapshot_panel_missing_lifecycle_dates"}]
+            ),
+        )
+        self.assertEqual(
             "snapshot_only",
             run_qvm_walkforward.lifecycle_data_status(
                 [{"code": "1001", "listed_date": "", "delisted_date": ""}]
@@ -129,6 +135,86 @@ class P0P1CorrectnessTest(unittest.TestCase):
         )
         self.assertFalse(run_qvm_walkforward.performance_conclusion_allowed("pit_no_delistings_observed"))
         self.assertTrue(run_qvm_walkforward.performance_conclusion_allowed("pit_with_delistings"))
+
+    def test_build_universe_uses_latest_listing_snapshot_as_of_rebalance(self) -> None:
+        config = {
+            "scope": {
+                "instruments": {
+                    "include": ["common_stock"],
+                    "exclude": ["etf", "reit"],
+                }
+            },
+            "universe": {
+                "min_ipo_age_trading_days": 0,
+                "liquidity_lookback_days": 1,
+                "require_tradable_on_rebalance_date": True,
+                "strict_rebalance_price_filter": False,
+                "require_fundamentals": False,
+            },
+        }
+        listing_rows = [
+            {
+                "code": "1001",
+                "name": "Still Listed",
+                "source_date": "2026-01-31",
+                "security_type": "common_stock",
+                "is_common_stock": "true",
+                "is_etf_reit_infra": "false",
+                "tradable_flag": "true",
+                "lot_size": "100",
+            },
+            {
+                "code": "1002",
+                "name": "Gone By Feb",
+                "source_date": "2026-01-31",
+                "security_type": "common_stock",
+                "is_common_stock": "true",
+                "is_etf_reit_infra": "false",
+                "tradable_flag": "true",
+                "lot_size": "100",
+            },
+            {
+                "code": "1001",
+                "name": "Still Listed",
+                "source_date": "2026-02-28",
+                "security_type": "common_stock",
+                "is_common_stock": "true",
+                "is_etf_reit_infra": "false",
+                "tradable_flag": "true",
+                "lot_size": "100",
+            },
+        ]
+        price_rows = [
+            {
+                "date": "2026-03-31",
+                "code": "1001",
+                "unadjusted_close": "100",
+                "trading_value": "1000000",
+                "tradable_flag": "true",
+                "price_limit_flag": "false",
+            },
+            {
+                "date": "2026-03-31",
+                "code": "1002",
+                "unadjusted_close": "100",
+                "trading_value": "1000000",
+                "tradable_flag": "true",
+                "price_limit_flag": "false",
+            },
+        ]
+
+        included, excluded = build_universe_from_rows(
+            config=config,
+            rebalance_date=date(2026, 3, 31),
+            listing_rows=listing_rows,
+            price_rows=price_rows,
+            fundamental_rows=[],
+        )
+
+        self.assertEqual(["1001"], [row["code"] for row in included])
+        self.assertEqual("2026-02-28", included[0]["source_date"])
+        self.assertEqual("pit_snapshot_panel_missing_lifecycle_dates", included[0]["listing_lifecycle_status"])
+        self.assertNotIn("1002", [row["code"] for row in included])
 
     def test_factor_forward_return_excludes_price_tail_gap_without_lifecycle_data(self) -> None:
         calendar = [date(2026, 1, 1) + timedelta(days=index) for index in range(5)]

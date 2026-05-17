@@ -309,6 +309,9 @@ def snapshot_only_listings(rows: list[dict[str, str]]) -> bool:
 def lifecycle_data_status(rows: list[dict[str, str]]) -> str:
     if not rows:
         return "unknown"
+    lifecycle_markers = {(row.get("listing_lifecycle_status") or "").strip() for row in rows}
+    if "pit_snapshot_panel_missing_lifecycle_dates" in lifecycle_markers:
+        return "pit_snapshot_panel"
     if snapshot_only_listings(rows):
         return "snapshot_only"
     listed_dates = [(row.get("listed_date") or "").strip() for row in rows]

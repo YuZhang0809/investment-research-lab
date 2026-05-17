@@ -105,6 +105,28 @@ def group_fundamentals(rows: list[dict[str, str]], rebalance_date: Any) -> dict[
     return available
 
 
+def listing_source_date(row: dict[str, str]) -> Any | None:
+    return parse_date(row.get("source_date") or row.get("snapshot_date"), field_name="listings.source_date")
+
+
+def listings_as_of_snapshot(rows: list[dict[str, str]], rebalance_date: Any) -> list[dict[str, str]]:
+    source_dates = [listing_source_date(row) for row in rows if row.get("source_date") or row.get("snapshot_date")]
+    clean_dates = [value for value in source_dates if value is not None and value <= rebalance_date]
+    if not clean_dates:
+        return rows
+    selected_date = max(clean_dates)
+    selected: list[dict[str, str]] = []
+    for row in rows:
+        source_date = listing_source_date(row)
+        if source_date != selected_date:
+            continue
+        copied = dict(row)
+        if not copied.get("listed_date"):
+            copied["listing_lifecycle_status"] = "pit_snapshot_panel_missing_lifecycle_dates"
+        selected.append(copied)
+    return selected
+
+
 def active_as_of(row: dict[str, str], rebalance_date: Any) -> tuple[bool, str]:
     listed_date = parse_date(row.get("listed_date"), field_name="listings.listed_date")
     delisted_date = parse_date(row.get("delisted_date"), field_name="listings.delisted_date")
@@ -204,6 +226,8 @@ def evaluate_row(
         "name": row.get("name", ""),
         "market": row.get("market", ""),
         "sector": row.get("sector", ""),
+        "source_date": row.get("source_date", ""),
+        "listing_lifecycle_status": row.get("listing_lifecycle_status", ""),
         "listed_date": row.get("listed_date", ""),
         "delisted_date": row.get("delisted_date", ""),
         "security_type": row.get("security_type", ""),
@@ -250,6 +274,7 @@ def build_universe_from_rows(
     prices_by_code = group_prices(price_rows)
     market_calendar = sorted({point.date for points in prices_by_code.values() for point in points if point.date <= rebalance_date})
     fundamentals_by_code = group_fundamentals(fundamental_rows, rebalance_date)
+    listing_rows = listings_as_of_snapshot(listing_rows, rebalance_date)
     universe_rows: list[dict[str, Any]] = []
     exclusion_rows: list[dict[str, Any]] = []
     for row in listing_rows:
@@ -301,6 +326,8 @@ def main() -> int:
         "name",
         "market",
         "sector",
+        "source_date",
+        "listing_lifecycle_status",
         "listed_date",
         "delisted_date",
         "security_type",

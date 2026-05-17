@@ -9,6 +9,18 @@ fields should be converted into these contracts before research steps run.
 code,name,market,sector,listed_date,delisted_date,security_type,is_common_stock,is_etf_reit_infra,tradable_flag,lot_size
 ```
 
+J-Quants master snapshots may also include:
+
+```text
+source_date,listing_lifecycle_status
+```
+
+When multiple `source_date` snapshots are present in the listings file,
+`build_universe.py` uses only the latest snapshot available on or before the
+rebalance date. This is cleaner than using a current master snapshot for all
+historical dates, but if exact `listed_date` and `delisted_date` are still
+missing the run is marked `pit_snapshot_panel`, not performance-conclusive.
+
 ## Daily Prices
 
 ```text
@@ -84,4 +96,4 @@ results and decisions.
 
 `lifecycle_data_status` is a caveat field, not an approval flag. Current
 walk-forward values include `snapshot_only`, `partial_lifecycle`,
-`pit_no_delistings_observed`, and `pit_with_delistings`.
+`pit_snapshot_panel`, `pit_no_delistings_observed`, and `pit_with_delistings`.
