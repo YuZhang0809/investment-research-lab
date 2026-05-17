@@ -327,20 +327,35 @@ class TableIODuckDBTest(unittest.TestCase):
                 "definitions": [
                     {"name": "quality_blend", "group": "quality", "expr": "avg(equity_to_assets, operating_profit_to_total_assets)"},
                     {"name": "quality_plus", "group": "quality", "expr": "quality_blend + 1"},
+                    {"name": "independent_value", "group": "value", "expr": "earnings_yield + 1"},
+                ]
+            }
+        }
+        changed_upstream_config = {
+            "factors": {
+                "definitions": [
+                    {"name": "quality_blend", "group": "quality", "expr": "avg(equity_to_assets, operating_profit_to_total_assets) + 0.01"},
+                    {"name": "quality_plus", "group": "quality", "expr": "quality_blend + 1"},
+                    {"name": "independent_value", "group": "value", "expr": "earnings_yield + 1"},
                 ]
             }
         }
 
         graph = factor_definition_dependency_graph(
             config,
-            base_variables={"equity_to_assets", "operating_profit_to_total_assets"},
+            base_variables={"earnings_yield", "equity_to_assets", "operating_profit_to_total_assets"},
         )
         fingerprints = factor_definition_fingerprints(config)
+        changed_fingerprints = factor_definition_fingerprints(changed_upstream_config)
 
         self.assertEqual([], graph["quality_blend"])
         self.assertEqual(["quality_blend"], graph["quality_plus"])
-        self.assertEqual({"quality_blend", "quality_plus"}, set(fingerprints))
+        self.assertEqual([], graph["independent_value"])
+        self.assertEqual({"quality_blend", "quality_plus", "independent_value"}, set(fingerprints))
         self.assertNotEqual(fingerprints["quality_blend"], fingerprints["quality_plus"])
+        self.assertNotEqual(fingerprints["quality_blend"], changed_fingerprints["quality_blend"])
+        self.assertNotEqual(fingerprints["quality_plus"], changed_fingerprints["quality_plus"])
+        self.assertEqual(fingerprints["independent_value"], changed_fingerprints["independent_value"])
 
     def test_factor_expression_rejects_unsafe_calls(self) -> None:
         config = {

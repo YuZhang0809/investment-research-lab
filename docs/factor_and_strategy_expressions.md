@@ -220,9 +220,10 @@ it does not claim sector or size neutralization.
 
 Walkforward factor cache fingerprints include both the full `factors.definitions`
 block and per-factor definition fingerprints. Each factor fingerprint covers the
-definition name, group, scoring inclusion flag, expression text, and expression
-dependencies. This keeps cache invalidation auditable today and leaves a clean
-path to split factor caches by definition later.
+definition name, group, scoring inclusion flag, expression text, and immediate
+dependency fingerprints, so a changed upstream definition also moves dependent
+definition fingerprints. This keeps cache invalidation auditable today and
+leaves a clean path to split factor caches by definition later.
 
 ## Boundary
 

@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from analyze_factor_forward_returns import main as analyze_factor_forward_returns_main  # noqa: E402
+from analyze_factor_forward_returns import main as analyze_factor_forward_returns_main, write_report  # noqa: E402
 
 
 def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) -> None:
@@ -119,6 +119,59 @@ class FactorDiagnosticsTest(unittest.TestCase):
             self.assertEqual("0.04", top_january["forward_return_1d"])
             self.assertIn("## Quantile Returns", report_text)
             self.assertIn("rank autocorrelation", report_text)
+
+    def test_report_quantile_averages_ignore_insufficient_quantile_months(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "factor_forward_returns.md"
+            rows = [
+                {
+                    "rebalance_date": "2026-01-01",
+                    "factor": "custom_factor",
+                    "observations": 4,
+                    "coverage": 1.0,
+                    "pearson_ic": 0.4,
+                    "rank_ic": 0.5,
+                    "quantile_status": "ok",
+                    "top_quantile_return": 0.10,
+                    "bottom_quantile_return": 0.02,
+                    "top_bottom_quantile_spread": 0.08,
+                    "top_quantile_turnover": 0.5,
+                    "rank_autocorr": 0.25,
+                    "quantile_1_return": 0.02,
+                    "quantile_2_return": 0.10,
+                    "missing_factor": 0,
+                    "missing_forward_return": 0,
+                    "bucket_status": "ok",
+                },
+                {
+                    "rebalance_date": "2026-02-01",
+                    "factor": "custom_factor",
+                    "observations": 1,
+                    "coverage": 1.0,
+                    "pearson_ic": None,
+                    "rank_ic": None,
+                    "quantile_status": "insufficient_quantile_observations",
+                    "top_quantile_return": -0.5,
+                    "bottom_quantile_return": -0.5,
+                    "top_bottom_quantile_spread": 0.0,
+                    "top_quantile_turnover": 0.0,
+                    "rank_autocorr": None,
+                    "quantile_1_return": -0.5,
+                    "quantile_2_return": "",
+                    "missing_factor": 0,
+                    "missing_forward_return": 0,
+                    "bucket_status": "insufficient_non_overlapping_observations",
+                },
+            ]
+
+            write_report(report_path, rows, holding_days=1, quantiles=2)
+
+            report_lines = report_path.read_text(encoding="utf-8").splitlines()
+            summary_line = next(line for line in report_lines if line.startswith("| custom_factor | 2 |"))
+            quantile_line = next(line for line in report_lines if line == "| custom_factor | 2.00% | 10.00% |")
+
+            self.assertIn("| 10.00% | 2.00% | 8.00% | 50.00% |", summary_line)
+            self.assertEqual("| custom_factor | 2.00% | 10.00% |", quantile_line)
 
 
 if __name__ == "__main__":

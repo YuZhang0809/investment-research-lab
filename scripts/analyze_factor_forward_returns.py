@@ -224,6 +224,10 @@ def number(value: float | None, digits: int = 4) -> str:
     return f"{value:.{digits}f}"
 
 
+def numeric_values(rows: list[dict[str, Any]], field: str) -> list[float]:
+    return [float(row[field]) for row in rows if row.get(field) not in (None, "")]
+
+
 def write_report(path: Path, rows: list[dict[str, Any]], holding_days: int, quantiles: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -245,20 +249,15 @@ def write_report(path: Path, rows: list[dict[str, Any]], holding_days: int, quan
         observations = sum(int(row["observations"]) for row in values)
         rank_ics = [float(row["rank_ic"]) for row in values if row.get("rank_ic") not in (None, "")]
         pearson_ics = [float(row["pearson_ic"]) for row in values if row.get("pearson_ic") not in (None, "")]
+        quantile_ok_rows = [row for row in values if row.get("quantile_status") == "ok"]
         avg_ic = average(rank_ics)
         ic_std = sample_std(rank_ics)
         ic_ir = avg_ic / ic_std if avg_ic is not None and ic_std and ic_std > 0 else None
         positive_ic_months = sum(1 for value in rank_ics if value > 0)
-        avg_top = average([float(row["top_quantile_return"]) for row in values if row.get("top_quantile_return") not in (None, "")])
-        avg_bottom = average(
-            [float(row["bottom_quantile_return"]) for row in values if row.get("bottom_quantile_return") not in (None, "")]
-        )
-        avg_spread = average(
-            [float(row["top_bottom_quantile_spread"]) for row in values if row.get("top_bottom_quantile_spread") not in (None, "")]
-        )
-        avg_turnover = average(
-            [float(row["top_quantile_turnover"]) for row in values if row.get("top_quantile_turnover") not in (None, "")]
-        )
+        avg_top = average(numeric_values(quantile_ok_rows, "top_quantile_return"))
+        avg_bottom = average(numeric_values(quantile_ok_rows, "bottom_quantile_return"))
+        avg_spread = average(numeric_values(quantile_ok_rows, "top_bottom_quantile_spread"))
+        avg_turnover = average(numeric_values(quantile_ok_rows, "top_quantile_turnover"))
         avg_rank_autocorr = average(
             [float(row["rank_autocorr"]) for row in values if row.get("rank_autocorr") not in (None, "")]
         )
@@ -278,10 +277,11 @@ def write_report(path: Path, rows: list[dict[str, Any]], holding_days: int, quan
     lines.append(f"| factor | {quantile_headers} |")
     lines.append(f"|{quantile_separators}|")
     for factor, values in sorted(by_factor.items()):
+        quantile_ok_rows = [row for row in values if row.get("quantile_status") == "ok"]
         quantile_cells = []
         for index in range(1, quantiles + 1):
             column = f"quantile_{index}_return"
-            quantile_cells.append(pct(average([float(row[column]) for row in values if row.get(column) not in (None, "")])))
+            quantile_cells.append(pct(average(numeric_values(quantile_ok_rows, column))))
         lines.append(f"| {factor} | {' | '.join(quantile_cells)} |")
     lines.extend(
         [

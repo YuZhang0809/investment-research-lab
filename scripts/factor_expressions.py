@@ -136,19 +136,41 @@ def factor_definition_fingerprints(
         functions=functions,
         validate_unknown=False,
     )
+    by_name = {definition.name: definition for definition in definitions}
     fingerprints: dict[str, str] = {}
-    for definition in definitions:
+    state: dict[str, str] = {}
+
+    def visit(name: str, stack: list[str]) -> None:
+        current_state = state.get(name)
+        if current_state == "done":
+            return
+        if current_state == "visiting":
+            cycle_start = stack.index(name) if name in stack else 0
+            cycle = [*stack[cycle_start:], name]
+            raise ValueError(f"Cyclic factor definition dependency: {' -> '.join(cycle)}")
+        state[name] = "visiting"
+        for dependency in graph.get(name, []):
+            visit(dependency, [*stack, name])
+        state[name] = "done"
+
+        definition = by_name[name]
         payload = {
-            "schema_version": "factor_definition_fingerprint_v0_1",
+            "schema_version": "factor_definition_fingerprint_v0_2",
             "name": definition.name,
             "group": definition.group,
             "include_in_score": definition.include_in_score,
             "expr": definition.expr,
-            "dependencies": graph.get(definition.name, []),
+            "dependencies": [
+                {"name": dependency, "fingerprint": fingerprints[dependency]}
+                for dependency in graph.get(definition.name, [])
+            ],
         }
         text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         fingerprints[definition.name] = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-    return fingerprints
+
+    for definition in definitions:
+        visit(definition.name, [])
+    return {definition.name: fingerprints[definition.name] for definition in definitions}
 
 
 def ordered_factor_definitions(
