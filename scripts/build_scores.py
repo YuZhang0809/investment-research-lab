@@ -180,9 +180,11 @@ def configured_filters(config: dict[str, Any]) -> list[dict[str, Any]]:
             raise ValueError(f"Unsupported filter rule in strategy.filters[{index}]: {rule}")
         normalized = {"group": group, "field": field, "rule": rule}
         if rule in {"exclude_bottom_pct", "exclude_top_pct"}:
+            if "pct" not in item:
+                raise ValueError(f"strategy.filters[{index}].pct is required for {rule}.")
             pct = float((item or {}).get("pct", 0.0) or 0.0)
-            if pct < 0 or pct > 100:
-                raise ValueError(f"Filter pct must be between 0 and 100 in strategy.filters[{index}].")
+            if pct <= 0 or pct > 100:
+                raise ValueError(f"Filter pct must be greater than 0 and no more than 100 in strategy.filters[{index}].")
             normalized["pct"] = pct
         if rule in {"exclude_below", "exclude_above"}:
             threshold = parse_float((item or {}).get("value"))
@@ -232,13 +234,35 @@ def weighted_factor_score(
     return score, []
 
 
+def available_columns(rows: list[dict[str, Any]]) -> set[str]:
+    columns: set[str] = set()
+    for row in rows:
+        columns.update(str(key) for key in row)
+    return columns
+
+
+def validate_weighted_factor_fields(weights: dict[str, float], rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    columns = available_columns(rows)
+    unknown = sorted(factor for factor in weights if factor not in columns)
+    if unknown:
+        raise ValueError(f"Unknown weighted_factors field(s): {', '.join(unknown)}")
+
+
 def filter_field(filter_config: dict[str, Any], row: dict[str, Any] | None = None) -> tuple[str, str]:
     group = str(filter_config.get("group", "") or "")
     if group:
         return GROUP_SCORE_FIELDS[group], group
     configured_field = str(filter_config.get("field", "") or "")
-    if row is not None and configured_field not in row and f"{configured_field}_z" in row:
+    rule = str(filter_config.get("rule", ""))
+    allow_z_resolution = rule in {"exclude_bottom_pct", "exclude_top_pct", "require_not_missing"}
+    if row is not None and configured_field in row:
+        return configured_field, configured_field
+    if row is not None and allow_z_resolution and f"{configured_field}_z" in row:
         return f"{configured_field}_z", configured_field
+    if row is not None:
+        raise ValueError(f"Unknown filter field: {configured_field}")
     return configured_field, configured_field
 
 
@@ -376,6 +400,7 @@ def build_scores(
     rows = factor_rows
     scoring_mode = configured_scoring_mode(config, strategy_version)
     factor_weights = configured_factor_weights(config) if scoring_mode == "weighted_factors" else {}
+    validate_weighted_factor_fields(factor_weights, rows)
     raw_factors = list(dict.fromkeys([*quality_factors, *value_factors, *momentum_factors, *factor_weights.keys()]))
     group_weighted_mode = scoring_mode == "weighted_groups"
     factor_weighted_mode = scoring_mode == "weighted_factors"

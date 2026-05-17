@@ -101,7 +101,15 @@ def clamp(value: Any, lower: Any, upper: Any) -> float | None:
 
 
 def choose(condition: Any, if_true: Any, if_false: Any) -> Any:
+    if condition is None:
+        return None
     return if_true if bool(condition) else if_false
+
+
+def logical_value(value: Any) -> bool | None:
+    if value is None:
+        return None
+    return bool(value)
 
 
 class FactorExpressionEvaluator(ast.NodeVisitor):
@@ -163,22 +171,46 @@ class FactorExpressionEvaluator(ast.NodeVisitor):
         if isinstance(node.op, ast.Div):
             return None if right == 0 else left / right
         if isinstance(node.op, ast.Pow):
-            return left**right
+            if left == 0 and right < 0:
+                return None
+            try:
+                value = left**right
+            except (OverflowError, ZeroDivisionError, ValueError):
+                return None
+            if isinstance(value, complex) or not math.isfinite(value):
+                return None
+            return value
         raise ValueError("Unsupported binary operator in factor expression.")
 
-    def visit_BoolOp(self, node: ast.BoolOp) -> bool:
-        values = [bool(self.visit(value)) for value in node.values]
+    def visit_BoolOp(self, node: ast.BoolOp) -> bool | None:
         if isinstance(node.op, ast.And):
-            return all(values)
+            saw_missing = False
+            for value_node in node.values:
+                value = logical_value(self.visit(value_node))
+                if value is False:
+                    return False
+                if value is None:
+                    saw_missing = True
+            return None if saw_missing else True
         if isinstance(node.op, ast.Or):
-            return any(values)
+            saw_missing = False
+            for value_node in node.values:
+                value = logical_value(self.visit(value_node))
+                if value is True:
+                    return True
+                if value is None:
+                    saw_missing = True
+            return None if saw_missing else False
         raise ValueError("Unsupported boolean operator in factor expression.")
 
-    def visit_Compare(self, node: ast.Compare) -> bool:
+    def visit_Compare(self, node: ast.Compare) -> bool | None:
         left = self.visit(node.left)
         for operator, comparator in zip(node.ops, node.comparators):
             right = self.visit(comparator)
-            if not self._compare(left, operator, right):
+            result = self._compare(left, operator, right)
+            if result is None:
+                return None
+            if not result:
                 return False
             left = right
         return True
@@ -193,16 +225,19 @@ class FactorExpressionEvaluator(ast.NodeVisitor):
         kwargs = {keyword.arg: self.visit(keyword.value) for keyword in node.keywords if keyword.arg}
         if len(kwargs) != len(node.keywords):
             raise ValueError("Unsupported keyword in factor expression.")
-        return self.functions[name](*args, **kwargs)
+        try:
+            return self.functions[name](*args, **kwargs)
+        except TypeError as exc:
+            raise ValueError(f"Invalid arguments for factor expression function {name}: {exc}") from exc
 
     def generic_visit(self, node: ast.AST) -> Any:
         raise ValueError(f"Unsupported expression element: {type(node).__name__}")
 
-    def _compare(self, left: Any, operator: ast.cmpop, right: Any) -> bool:
+    def _compare(self, left: Any, operator: ast.cmpop, right: Any) -> bool | None:
         left_number = to_number(left)
         right_number = to_number(right)
         if left_number is None or right_number is None:
-            return False
+            return None
         if isinstance(operator, ast.Lt):
             return left_number < right_number
         if isinstance(operator, ast.LtE):

@@ -48,6 +48,10 @@ where
 
 The factor stage also exposes `ts_return(lookback, skip=0)`, which uses the
 same trading-calendar-aware return code as the built-in momentum factors.
+Use `skip=0` only when the rebalance timing makes the rebalance-date close
+available before signal formation. With `execution_price: rebalance_close`, a
+same-day close-based factor can be a look-ahead unless the private workflow has
+a separate, defensible timing convention.
 
 Allowed variables are the public factor-stage fields, such as:
 
@@ -69,6 +73,11 @@ return_6_1
 
 Configured factor names must be simple identifiers and cannot overwrite
 reserved output fields.
+
+Missing inputs propagate through expressions. Arithmetic functions, comparison
+operators, boolean operators, and `where()` return `None` when the result cannot
+be determined from available point-in-time data. This keeps configured factors
+aligned with the built-in missing flag behavior.
 
 ## Scoring Modes
 
@@ -143,13 +152,23 @@ strategy:
       rule: exclude_below
       value: 0
 
+    - field: earnings_yield_z
+      rule: exclude_below
+      value: 0
+
     - field: value_score
       rule: require_not_missing
 ```
 
 `group` maps to `quality_score`, `value_score`, or `momentum_score`. `field`
-may reference a score output field or a raw factor name; raw factor names are
-resolved to their z-score columns when needed.
+may reference a score output field. Percentile filters may also reference a raw
+factor name, which is resolved to that factor's z-score column because
+percentile ordering is unitless. Threshold filters such as `exclude_below` and
+`exclude_above` do not auto-resolve raw factor names; use an explicit z-score
+field such as `earnings_yield_z` when the threshold is in z-score units.
+
+Unknown weighted factor fields and unknown filter fields fail fast with
+`ValueError` instead of producing an empty ranked output.
 
 ## Boundary
 

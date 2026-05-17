@@ -303,6 +303,93 @@ class TableIODuckDBTest(unittest.TestCase):
                 fundamental_rows=[],
             )
 
+    def test_where_preserves_missing_condition_as_missing_factor(self) -> None:
+        config = {
+            "factors": {
+                "definitions": [
+                    {
+                        "name": "conditional_value",
+                        "group": "value",
+                        "expr": "where(operating_profit_to_total_assets > 0.1, earnings_yield, book_to_market)",
+                    }
+                ]
+            }
+        }
+
+        rows = build_factors(
+            config=config,
+            rebalance_date=date(2026, 1, 1),
+            universe_rows=[
+                {
+                    "code": "1001",
+                    "name": "Synthetic 1001",
+                    "market": "Prime",
+                    "sector": "Industrials",
+                    "latest_unadjusted_close": "100",
+                }
+            ],
+            price_rows=[
+                {"date": "2026-01-01", "code": "1001", "adjusted_close": "100", "unadjusted_close": "100"},
+            ],
+            fundamental_rows=[
+                {
+                    "code": "1001",
+                    "available_date": "2025-12-31",
+                    "operating_profit": "",
+                    "net_profit": "50",
+                    "equity": "500",
+                    "total_assets": "",
+                    "shares_outstanding": "10",
+                }
+            ],
+        )
+
+        self.assertIsNone(rows[0]["operating_profit_to_total_assets"])
+        self.assertIsNotNone(rows[0]["book_to_market"])
+        self.assertIsNone(rows[0]["conditional_value"])
+        self.assertIn("conditional_value", rows[0]["missing_flags"])
+
+    def test_factor_expression_pow_edges_return_missing_instead_of_crashing(self) -> None:
+        config = {
+            "factors": {
+                "definitions": [
+                    {"name": "inverse_zero", "group": "quality", "expr": "0 ** -1"},
+                    {"name": "overflow_power", "group": "quality", "expr": "10 ** 1000000"},
+                ]
+            }
+        }
+
+        rows = build_factors(
+            config=config,
+            rebalance_date=date(2026, 1, 1),
+            universe_rows=[{"code": "1001", "latest_unadjusted_close": "100"}],
+            price_rows=[{"date": "2026-01-01", "code": "1001", "adjusted_close": "100", "unadjusted_close": "100"}],
+            fundamental_rows=[],
+        )
+
+        self.assertIsNone(rows[0]["inverse_zero"])
+        self.assertIsNone(rows[0]["overflow_power"])
+        self.assertIn("inverse_zero", rows[0]["missing_flags"])
+        self.assertIn("overflow_power", rows[0]["missing_flags"])
+
+    def test_factor_expression_reports_wrong_function_arity_cleanly(self) -> None:
+        config = {
+            "factors": {
+                "definitions": [
+                    {"name": "bad_ratio", "group": "quality", "expr": "ratio(net_profit)"},
+                ]
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, "Invalid arguments for factor expression function ratio"):
+            build_factors(
+                config=config,
+                rebalance_date=date(2026, 1, 1),
+                universe_rows=[{"code": "1001", "latest_unadjusted_close": "100"}],
+                price_rows=[{"date": "2026-01-01", "code": "1001", "adjusted_close": "100", "unadjusted_close": "100"}],
+                fundamental_rows=[],
+            )
+
     def test_configured_factor_definitions_extend_group_scoring(self) -> None:
         config = weighted_config(
             weights={"quality": 1.0, "value": 0.0, "momentum": 0.0},
@@ -363,6 +450,86 @@ class TableIODuckDBTest(unittest.TestCase):
         self.assertEqual("custom_value_bottom_20pct", by_code["1001"]["filter_reasons"])
         ranked = sorted([row for row in scores if row["rank"]], key=lambda row: int(row["rank"]))
         self.assertEqual(["1003", "1002"], [row["code"] for row in ranked])
+
+    def test_configurable_weighted_factors_reject_unknown_weight_field(self) -> None:
+        config = {
+            "strategy": {
+                "scoring": {"mode": "weighted_factors", "weights": {"custom_typo": 1.0}},
+                "filters": [],
+            },
+            "factors": {"winsorize": {"lower_pct": 0, "upper_pct": 100}},
+        }
+
+        with self.assertRaisesRegex(ValueError, "Unknown weighted_factors field"):
+            build_scores(
+                config=config,
+                factor_rows=[
+                    {"rebalance_date": "2026-03-31", "code": "1001", "custom_value": "1"},
+                    {"rebalance_date": "2026-03-31", "code": "1002", "custom_value": "2"},
+                ],
+                strategy_version="configurable",
+            )
+
+    def test_filter_rejects_unknown_field_instead_of_empty_ranking(self) -> None:
+        config = {
+            "strategy": {
+                "scoring": {"mode": "weighted_factors", "weights": {"custom_value": 1.0}},
+                "filters": [{"field": "custom_typo", "rule": "exclude_bottom_pct", "pct": 20}],
+            },
+            "factors": {"winsorize": {"lower_pct": 0, "upper_pct": 100}},
+        }
+
+        with self.assertRaisesRegex(ValueError, "Unknown filter field: custom_typo"):
+            build_scores(
+                config=config,
+                factor_rows=[
+                    {"rebalance_date": "2026-03-31", "code": "1001", "custom_value": "1"},
+                    {"rebalance_date": "2026-03-31", "code": "1002", "custom_value": "2"},
+                ],
+                strategy_version="configurable",
+            )
+
+    def test_threshold_filter_requires_explicit_z_score_field_for_factor_units(self) -> None:
+        config = {
+            "strategy": {
+                "scoring": {"mode": "weighted_factors", "weights": {"custom_value": 1.0}},
+                "filters": [{"field": "custom_value", "rule": "exclude_below", "value": 0}],
+            },
+            "factors": {"winsorize": {"lower_pct": 0, "upper_pct": 100}},
+        }
+        factors = [
+            {"rebalance_date": "2026-03-31", "code": "1001", "custom_value": "1"},
+            {"rebalance_date": "2026-03-31", "code": "1002", "custom_value": "2"},
+            {"rebalance_date": "2026-03-31", "code": "1003", "custom_value": "3"},
+        ]
+
+        with self.assertRaisesRegex(ValueError, "Unknown filter field: custom_value"):
+            build_scores(config=config, factor_rows=factors, strategy_version="configurable")
+
+        config["strategy"]["filters"] = [{"field": "custom_value_z", "rule": "exclude_below", "value": 0}]
+        scores, _raw_factors = build_scores(config=config, factor_rows=factors, strategy_version="configurable")
+
+        by_code = {row["code"]: row for row in scores}
+        self.assertEqual("filtered", by_code["1001"]["filter_status"])
+        self.assertEqual("custom_value_z_below_0", by_code["1001"]["filter_reasons"])
+        ranked = sorted([row for row in scores if row["rank"]], key=lambda row: int(row["rank"]))
+        self.assertEqual(["1003", "1002"], [row["code"] for row in ranked])
+
+    def test_percentile_filter_pct_must_be_positive(self) -> None:
+        config = {
+            "strategy": {
+                "scoring": {"mode": "weighted_factors", "weights": {"custom_value": 1.0}},
+                "filters": [{"field": "custom_value", "rule": "exclude_bottom_pct", "pct": 0}],
+            },
+            "factors": {"winsorize": {"lower_pct": 0, "upper_pct": 100}},
+        }
+
+        with self.assertRaisesRegex(ValueError, "pct must be greater than 0"):
+            build_scores(
+                config=config,
+                factor_rows=[{"rebalance_date": "2026-03-31", "code": "1001", "custom_value": "1"}],
+                strategy_version="configurable",
+            )
 
 
 def factor_row(code: str, value: float) -> dict[str, str]:
