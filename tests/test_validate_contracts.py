@@ -226,6 +226,121 @@ class ValidateContractsTest(unittest.TestCase):
 
         self.assertEqual([], [row for row in issues if row["severity"] == "error"])
 
+    def test_source_dated_listing_panel_allows_same_code_across_snapshots(self) -> None:
+        config = {"universe": {"min_ipo_age_trading_days": 0, "liquidity_lookback_days": 0}}
+        base_listing = {
+            "code": "1001",
+            "name": "Sample",
+            "market": "Prime",
+            "sector": "Tech",
+            "listed_date": "2020-01-01",
+            "delisted_date": "",
+            "security_type": "common_stock",
+            "is_common_stock": "true",
+            "is_etf_reit_infra": "false",
+            "tradable_flag": "true",
+            "lot_size": "100",
+        }
+        listings = [
+            {**base_listing, "source_date": "2025-01-31"},
+            {**base_listing, "source_date": "2025-02-28"},
+        ]
+        prices = [
+            {
+                "date": "2025-01-01",
+                "code": "1001",
+                "unadjusted_close": "1000",
+                "adjusted_close": "1000",
+                "trading_value": "1000000",
+                "tradable_flag": "true",
+                "price_limit_flag": "false",
+            }
+        ]
+        fundamentals = [
+            {
+                "code": "1001",
+                "available_date": "2025-01-02",
+                "available_time": "15:00",
+                "document_type": "annual",
+                "operating_profit": "100",
+                "net_profit": "80",
+                "equity": "1000",
+                "total_assets": "2000",
+                "shares_outstanding": "100",
+            }
+        ]
+
+        issues, _summary = validate_contracts(
+            config=config,
+            listing_rows=listings,
+            price_rows=prices,
+            fundamental_rows=fundamentals,
+        )
+
+        self.assertNotIn(
+            "duplicate_key",
+            {row["check"] for row in issues if row["severity"] == "error"},
+        )
+
+    def test_non_tradable_missing_price_is_warning_not_error(self) -> None:
+        config = {"universe": {"min_ipo_age_trading_days": 0, "liquidity_lookback_days": 0}}
+        listings = [
+            {
+                "code": "1001",
+                "name": "Sample",
+                "market": "Prime",
+                "sector": "Tech",
+                "listed_date": "2020-01-01",
+                "delisted_date": "",
+                "security_type": "common_stock",
+                "is_common_stock": "true",
+                "is_etf_reit_infra": "false",
+                "tradable_flag": "true",
+                "lot_size": "100",
+            }
+        ]
+        prices = [
+            {
+                "date": "2025-01-01",
+                "code": "1001",
+                "unadjusted_close": "",
+                "adjusted_close": "",
+                "adjustment_factor": "",
+                "trading_value": "",
+                "tradable_flag": "false",
+                "price_limit_flag": "false",
+            }
+        ]
+        fundamentals = [
+            {
+                "code": "1001",
+                "available_date": "2025-01-02",
+                "available_time": "15:00",
+                "document_type": "annual",
+                "operating_profit": "100",
+                "net_profit": "80",
+                "equity": "1000",
+                "total_assets": "2000",
+                "shares_outstanding": "100",
+            }
+        ]
+
+        issues, _summary = validate_contracts(
+            config=config,
+            listing_rows=listings,
+            price_rows=prices,
+            fundamental_rows=fundamentals,
+        )
+
+        self.assertNotIn(
+            "missing_price",
+            {row["check"] for row in issues if row["severity"] == "error"},
+        )
+        self.assertIn(
+            "missing_price",
+            {row["check"] for row in issues if row["severity"] == "warning"},
+        )
+
     def test_all_empty_delisted_dates_are_warned(self) -> None:
         config = {"universe": {"min_ipo_age_trading_days": 0, "liquidity_lookback_days": 0}}
         listings = [

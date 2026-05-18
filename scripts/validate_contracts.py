@@ -234,6 +234,12 @@ def check_duplicate_keys(
         )
 
 
+def listing_key_columns(rows: list[dict[str, str]]) -> list[str]:
+    if any((row.get("source_date") or row.get("snapshot_date") or "").strip() for row in rows):
+        return ["source_date", "code"]
+    return ["code"]
+
+
 def max_required_price_rows(config: dict[str, Any]) -> int:
     universe = config.get("universe", {})
     min_ipo_age = int(universe.get("min_ipo_age_trading_days") or 0)
@@ -443,11 +449,13 @@ def check_listing_lifecycle(issues: list[dict[str, str]], *, listing_rows: list[
 def check_price_values(issues: list[dict[str, str]], *, price_rows: list[dict[str, str]]) -> None:
     for row_index, row in enumerate(price_rows, start=2):
         code = row.get("code", "")
+        tradable = parse_bool(row.get("tradable_flag"), default=True)
+        is_tradable = tradable is not False
         unadjusted = parse_float(row.get("unadjusted_close"))
         if row.get("unadjusted_close") in (None, ""):
             issue(
                 issues,
-                severity="error",
+                severity="error" if is_tradable else "warning",
                 dataset="prices",
                 check="missing_price",
                 code=code,
@@ -469,7 +477,7 @@ def check_price_values(issues: list[dict[str, str]], *, price_rows: list[dict[st
 
         adjusted = parse_float(row.get("adjusted_close"))
         adjustment_factor = parse_float(row.get("adjustment_factor"))
-        if adjusted is None:
+        if is_tradable and adjusted is None:
             if adjustment_factor is None or adjustment_factor <= 0:
                 issue(
                     issues,
@@ -484,10 +492,10 @@ def check_price_values(issues: list[dict[str, str]], *, price_rows: list[dict[st
                         "so positive adjustment_factor is required"
                     ),
                 )
-        elif adjusted <= 0:
+        elif adjusted is not None and adjusted <= 0:
             issue(
                 issues,
-                severity="error",
+                severity="error" if is_tradable else "warning",
                 dataset="prices",
                 check="non_positive_price",
                 code=code,
@@ -628,7 +636,7 @@ def validate_contracts(
     check_price_values(issues, price_rows=price_rows)
     check_price_gaps(issues, price_rows=price_rows)
     check_fundamental_available_dates(issues, fundamental_rows=fundamental_rows)
-    check_duplicate_keys(issues, dataset="listings", rows=listing_rows, key_columns=["code"])
+    check_duplicate_keys(issues, dataset="listings", rows=listing_rows, key_columns=listing_key_columns(listing_rows))
     check_duplicate_keys(issues, dataset="prices", rows=price_rows, key_columns=["date", "code"])
     check_duplicate_keys(
         issues,
