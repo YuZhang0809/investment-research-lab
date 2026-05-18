@@ -38,6 +38,9 @@ for manual inspection. Internal computation may use libraries such as `pandas`,
 - Table IO helpers read/write CSV, single-file Parquet, and directory Parquet
   datasets through one interface.
 - Universe builders apply point-in-time eligibility rules.
+- Lifecycle and delisting-aware universe logic is defined in
+  `docs/pit_lifecycle_delisting_universe.md`; it is a generic engine capability
+  shared by factor, event, and ML research.
 - Factor builders compute raw QVM variables.
 - Factor builders compute built-in QVM variables and optional public-safe
   configured factor definitions through a whitelist expression evaluator.
