@@ -29,6 +29,19 @@ def synthetic_config() -> dict:
     }
 
 
+def minimal_config(*, require_fundamentals: bool = False) -> dict:
+    return {
+        "scope": {"instruments": {"include": ["common_stock"], "exclude": []}},
+        "universe": {
+            "min_ipo_age_trading_days": 0,
+            "liquidity_lookback_days": 1,
+            "require_tradable_on_rebalance_date": True,
+            "strict_rebalance_price_filter": False,
+            "require_fundamentals": require_fundamentals,
+        },
+    }
+
+
 def write_synthetic_fixture(temp: Path) -> tuple[Path, Path, Path, date, date]:
     listings = temp / "listings.csv"
     prices = temp / "prices.csv"
@@ -182,6 +195,137 @@ def write_synthetic_fixture(temp: Path) -> tuple[Path, Path, Path, date, date]:
 
 
 class FastPriceUniversePanelTest(unittest.TestCase):
+    def test_quarterly_frequency_filters_monthly_rebalances_after_aggregation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals, start, end = write_synthetic_fixture(temp)
+
+            frame = build_panel_frame(
+                config=synthetic_config(),
+                listings_path=listings,
+                prices_path=prices,
+                fundamentals_path=fundamentals,
+                start_date=start.isoformat(),
+                end_date=end.isoformat(),
+                frequency="quarterly",
+                input_format="csv",
+            )
+
+            dates = sorted({str(value)[:10] for value in frame["rebalance_date"]})
+            self.assertEqual(["2025-03-31", "2025-06-30", "2025-09-30"], dates)
+
+    def test_snapshot_date_alias_selects_one_pit_snapshot_per_rebalance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings = temp / "listings.csv"
+            prices = temp / "prices.csv"
+            write_csv(
+                listings,
+                [
+                    {
+                        "snapshot_date": "2026-01-31",
+                        "code": "1001",
+                        "name": "January Snapshot",
+                        "listed_date": "2020-01-01",
+                        "security_type": "common_stock",
+                        "is_common_stock": "true",
+                        "is_etf_reit_infra": "false",
+                        "tradable_flag": "true",
+                    },
+                    {
+                        "snapshot_date": "2026-02-28",
+                        "code": "1002",
+                        "name": "February Snapshot",
+                        "listed_date": "2020-01-01",
+                        "security_type": "common_stock",
+                        "is_common_stock": "true",
+                        "is_etf_reit_infra": "false",
+                        "tradable_flag": "true",
+                    },
+                ],
+                ["snapshot_date", "code", "name", "listed_date", "security_type", "is_common_stock", "is_etf_reit_infra", "tradable_flag"],
+            )
+            write_csv(
+                prices,
+                [
+                    {"date": "2026-01-31", "code": "1001", "unadjusted_close": "100", "adjusted_close": "100", "trading_value": "1000", "tradable_flag": "true"},
+                    {"date": "2026-02-28", "code": "1002", "unadjusted_close": "200", "adjusted_close": "200", "trading_value": "1000", "tradable_flag": "true"},
+                ],
+                ["date", "code", "unadjusted_close", "adjusted_close", "trading_value", "tradable_flag"],
+            )
+
+            frame = build_panel_frame(
+                config=minimal_config(),
+                listings_path=listings,
+                prices_path=prices,
+                fundamentals_path=None,
+                start_date="2026-01-31",
+                end_date="2026-02-28",
+                frequency="monthly",
+                input_format="csv",
+            )
+
+            keys = sorted((str(row.rebalance_date)[:10], row.code) for row in frame.itertuples())
+            self.assertEqual([("2026-01-31", "1001"), ("2026-02-28", "1002")], keys)
+
+    def test_price_and_fundamental_aliases_fall_back_per_row(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings = temp / "listings.csv"
+            prices = temp / "prices.csv"
+            fundamentals = temp / "fundamentals.csv"
+            write_csv(
+                listings,
+                [
+                    {
+                        "code": "1001",
+                        "name": "Alias Row",
+                        "listed_date": "2020-01-01",
+                        "security_type": "common_stock",
+                        "is_common_stock": "true",
+                        "is_etf_reit_infra": "false",
+                        "tradable_flag": "true",
+                    }
+                ],
+                ["code", "name", "listed_date", "security_type", "is_common_stock", "is_etf_reit_infra", "tradable_flag"],
+            )
+            write_csv(
+                prices,
+                [
+                    {
+                        "date": "2026-01-31",
+                        "code": "1001",
+                        "unadjusted_close": "",
+                        "close": "123",
+                        "adjusted_close": "123",
+                        "trading_value": "1000",
+                        "tradable_flag": "true",
+                    }
+                ],
+                ["date", "code", "unadjusted_close", "close", "adjusted_close", "trading_value", "tradable_flag"],
+            )
+            write_csv(
+                fundamentals,
+                [{"code": "1001", "disclosure_date": "2026-01-30"}],
+                ["code", "disclosure_date"],
+            )
+
+            frame = build_panel_frame(
+                config=minimal_config(require_fundamentals=True),
+                listings_path=listings,
+                prices_path=prices,
+                fundamentals_path=fundamentals,
+                start_date="2026-01-31",
+                end_date="2026-01-31",
+                frequency="monthly",
+                input_format="csv",
+            )
+
+            row = frame.iloc[0]
+            self.assertEqual(123, row["latest_unadjusted_close"])
+            self.assertTrue(row["has_fundamentals"])
+            self.assertTrue(row["included_flag"])
+
     def test_duckdb_price_universe_panel_matches_legacy_core_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

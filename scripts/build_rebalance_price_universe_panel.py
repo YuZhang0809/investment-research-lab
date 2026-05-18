@@ -85,7 +85,15 @@ def optional_column(columns: set[str], name: str, default: str = "''") -> str:
     return f'"{name}"' if name in columns else default
 
 
+def first_nonblank(columns: set[str], names: list[str], default: str = "''") -> str:
+    expressions = [f"nullif({optional_column(columns, name)}, '')" for name in names if name in columns]
+    if not expressions:
+        return default
+    return f"coalesce({', '.join([*expressions, default])})"
+
+
 def create_listings_table(connection: Any, columns: set[str]) -> None:
+    source_date_expr = first_nonblank(columns, ["source_date", "snapshot_date"])
     connection.execute(
         f"""
         create or replace temp table listings_norm as
@@ -102,7 +110,7 @@ def create_listings_table(connection: Any, columns: set[str]) -> None:
           coalesce({optional_column(columns, 'is_etf_reit_infra')}, '')::varchar as is_etf_reit_infra,
           coalesce({optional_column(columns, 'tradable_flag')}, '')::varchar as tradable_flag,
           coalesce({optional_column(columns, 'lot_size', "'100'")}, '100')::varchar as lot_size,
-          try_cast(nullif(coalesce({optional_column(columns, 'source_date')}, {optional_column(columns, 'snapshot_date')}), '') as date) as source_date,
+          try_cast(nullif({source_date_expr}, '') as date) as source_date,
           coalesce({optional_column(columns, 'source')}, '')::varchar as source,
           coalesce({optional_column(columns, 'listing_lifecycle_status')}, '')::varchar as listing_lifecycle_status,
           coalesce({optional_column(columns, 'delisting_reason')}, '')::varchar as delisting_reason,
@@ -114,11 +122,7 @@ def create_listings_table(connection: Any, columns: set[str]) -> None:
 
 
 def create_prices_table(connection: Any, columns: set[str]) -> None:
-    close_expr = (
-        optional_column(columns, "unadjusted_close")
-        if "unadjusted_close" in columns
-        else optional_column(columns, "close") if "close" in columns else optional_column(columns, "price")
-    )
+    close_expr = first_nonblank(columns, ["unadjusted_close", "close", "price"])
     connection.execute(
         f"""
         create or replace temp table prices_base as
@@ -163,12 +167,13 @@ def create_fundamentals_table(connection: Any, columns: set[str] | None) -> None
     if not columns:
         connection.execute("create or replace temp table fundamentals_norm(code varchar, available_date date)")
         return
+    available_date_expr = first_nonblank(columns, ["available_date", "disclosure_date"])
     connection.execute(
         f"""
         create or replace temp table fundamentals_norm as
         select
           coalesce({optional_column(columns, 'code')}, '')::varchar as code,
-          try_cast(nullif(coalesce({optional_column(columns, 'available_date')}, {optional_column(columns, 'disclosure_date')}), '') as date) as available_date
+          try_cast(nullif({available_date_expr}, '') as date) as available_date
         from raw_fundamentals
         where coalesce({optional_column(columns, 'code')}, '') <> ''
         """
@@ -233,15 +238,18 @@ def build_panel_frame(
             order by price_date
             """
         )
-        quarter_filter = "and month(price_date) in (3, 6, 9, 12)" if frequency == "quarterly" else ""
+        quarter_filter = "where month(rebalance_date) in (3, 6, 9, 12)" if frequency == "quarterly" else ""
         connection.execute(
             f"""
             create or replace temp table rebalances as
-            select max(price_date) as rebalance_date
-            from calendar
-            where price_date between ?::date and ?::date
-            group by strftime(price_date, '%Y-%m')
-            having max(price_date) is not null {quarter_filter}
+            select rebalance_date
+            from (
+              select max(price_date) as rebalance_date
+              from calendar
+              where price_date between ?::date and ?::date
+              group by strftime(price_date, '%Y-%m')
+            )
+            {quarter_filter}
             order by rebalance_date
             """,
             [start_date, end_date],
