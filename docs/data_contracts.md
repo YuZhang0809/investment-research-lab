@@ -111,6 +111,23 @@ and a reason-count table:
 rebalance_date,reason,count
 ```
 
+## Rebalance Price/Universe Panel
+
+`build_rebalance_price_universe_panel.py` writes a local DuckDB fast-path panel
+that can be compared against the legacy `build_universe.py` and
+`build_factors.py` path before it is used by any walk-forward runner.
+
+Minimum output contract:
+
+```text
+rebalance_date,code,name,market,sector,source_date,source,listing_lifecycle_status,listed_date,delisted_date,last_trading_date,lifecycle_exit_date,security_type,lot_size,included_flag,exclusion_reason,latest_price_date,latest_unadjusted_close,adjusted_close,rebalance_price_available,latest_price_stale,price_staleness_trading_days,ipo_age_trading_days,median_60d_trading_value,has_fundamentals,tradable_flag,price_limit_flag,return_12_1,return_6_1
+```
+
+This panel is a price/universe acceleration layer only. It does not select
+fundamental rows, compute quality/value ratios, score stocks, or run a
+portfolio. `compare_fast_panel_to_legacy.py` should be used to verify parity on
+synthetic and private local fixtures before any downstream integration.
+
 ## Run Ledger
 
 Public-safe template:
