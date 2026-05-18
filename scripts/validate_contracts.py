@@ -329,7 +329,10 @@ def check_listing_lifecycle(issues: list[dict[str, str]], *, listing_rows: list[
     if not listing_rows:
         return
     listed_dates = [row.get("listed_date", "").strip() for row in listing_rows]
-    delisted_dates = [row.get("delisted_date", "").strip() for row in listing_rows]
+    lifecycle_exit_dates = [
+        (row.get("last_trading_date") or row.get("delisted_date") or "").strip()
+        for row in listing_rows
+    ]
     lifecycle_statuses = {
         row.get("listing_lifecycle_status", "").strip().lower()
         for row in listing_rows
@@ -416,14 +419,14 @@ def check_listing_lifecycle(issues: list[dict[str, str]], *, listing_rows: list[
             column="listed_date",
             message="Listings have no listed_date values; this is a snapshot-only universe and is survivor-biased for historical research",
         )
-    elif not any(delisted_dates):
+    elif not any(lifecycle_exit_dates):
         issue(
             issues,
             severity="warning",
             dataset="listings",
             check="delisting_lifecycle_coverage",
-            column="delisted_date",
-            message="Listings have listed_date coverage but no delisted_date values; delisting handling will be disabled unless the source proves no delistings exist",
+            column="delisted_date,last_trading_date",
+            message="Listings have listed_date coverage but no lifecycle exit dates; delisting handling will be disabled unless the source proves no delistings exist",
         )
     if "snapshot_only_missing_lifecycle_dates" in lifecycle_statuses:
         issue(

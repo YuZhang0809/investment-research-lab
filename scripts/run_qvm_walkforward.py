@@ -340,7 +340,11 @@ def lifecycle_data_status(rows: list[dict[str, str]]) -> str:
     listed_dates = [(row.get("listed_date") or "").strip() for row in rows]
     if any(not value for value in listed_dates):
         return "partial_lifecycle"
-    if not any((row.get("delisted_date") or "").strip() for row in rows):
+    lifecycle_exit_dates = [
+        (row.get("last_trading_date") or row.get("delisted_date") or "").strip()
+        for row in rows
+    ]
+    if not any(lifecycle_exit_dates):
         return "pit_no_delistings_observed"
     return "pit_with_delistings"
 
@@ -376,7 +380,7 @@ def adjusted_return(
     if not start_point or start_point.adjusted_close <= 0:
         return None
     lifecycle_exit_date = (delisting_dates or {}).get(code)
-    if lifecycle_exit_date is not None and start < lifecycle_exit_date <= end:
+    if lifecycle_exit_date is not None and start <= lifecycle_exit_date <= end:
         return -1.0
     end_point = price_at(price_index, code, end)
     if not end_point:
@@ -558,8 +562,15 @@ UNIVERSE_CACHE_FIELDS = [
     "name",
     "market",
     "sector",
+    "source_date",
+    "source",
+    "listing_lifecycle_status",
     "listed_date",
     "delisted_date",
+    "last_trading_date",
+    "lifecycle_exit_date",
+    "delisting_reason",
+    "successor_code",
     "security_type",
     "lot_size",
     "ipo_age_trading_days",
@@ -658,7 +669,7 @@ def compute_cache_fingerprints(args: argparse.Namespace, config: dict[str, Any])
     inputs_fingerprint = cache_digest(inputs_payload)
     universe_fingerprint = cache_digest(
         {
-            "schema_version": "walkforward_universe_cache_v0_1",
+            "schema_version": "walkforward_universe_cache_v0_2",
             "inputs": inputs_fingerprint,
             "config": cache_config(config, "scope", "universe"),
             "source": {

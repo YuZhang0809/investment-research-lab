@@ -278,6 +278,59 @@ class ValidateContractsTest(unittest.TestCase):
         warning_checks = {row["check"] for row in issues if row["severity"] == "warning"}
         self.assertIn("delisting_lifecycle_coverage", warning_checks)
 
+    def test_last_trading_date_counts_as_lifecycle_exit_coverage(self) -> None:
+        config = {"universe": {"min_ipo_age_trading_days": 0, "liquidity_lookback_days": 0}}
+        listings = [
+            {
+                "code": "1001",
+                "name": "Sample",
+                "market": "Prime",
+                "sector": "Tech",
+                "listed_date": "2020-01-01",
+                "delisted_date": "",
+                "last_trading_date": "2026-01-31",
+                "security_type": "common_stock",
+                "is_common_stock": "true",
+                "is_etf_reit_infra": "false",
+                "tradable_flag": "true",
+                "lot_size": "100",
+            }
+        ]
+        prices = [
+            {
+                "date": "2025-01-01",
+                "code": "1001",
+                "unadjusted_close": "1000",
+                "adjusted_close": "1000",
+                "trading_value": "1000000",
+                "tradable_flag": "true",
+                "price_limit_flag": "false",
+            }
+        ]
+        fundamentals = [
+            {
+                "code": "1001",
+                "available_date": "2025-01-02",
+                "available_time": "15:00",
+                "document_type": "annual",
+                "operating_profit": "100",
+                "net_profit": "80",
+                "equity": "1000",
+                "total_assets": "2000",
+                "shares_outstanding": "100",
+            }
+        ]
+
+        issues, _summary = validate_contracts(
+            config=config,
+            listing_rows=listings,
+            price_rows=prices,
+            fundamental_rows=fundamentals,
+        )
+
+        warning_checks = {row["check"] for row in issues if row["severity"] == "warning"}
+        self.assertNotIn("delisting_lifecycle_coverage", warning_checks)
+
     def test_lifecycle_status_and_date_order_are_validated(self) -> None:
         config = {"universe": {"min_ipo_age_trading_days": 0, "liquidity_lookback_days": 0}}
         listings = [

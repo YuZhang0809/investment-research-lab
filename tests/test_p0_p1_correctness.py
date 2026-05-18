@@ -133,8 +133,35 @@ class P0P1CorrectnessTest(unittest.TestCase):
                 ]
             ),
         )
+        self.assertEqual(
+            "pit_with_delistings",
+            run_qvm_walkforward.lifecycle_data_status(
+                [
+                    {"code": "1001", "listed_date": "2020-01-01", "delisted_date": "", "last_trading_date": ""},
+                    {"code": "1002", "listed_date": "2020-01-01", "delisted_date": "", "last_trading_date": "2026-01-31"},
+                ]
+            ),
+        )
         self.assertFalse(run_qvm_walkforward.performance_conclusion_allowed("pit_no_delistings_observed"))
         self.assertTrue(run_qvm_walkforward.performance_conclusion_allowed("pit_with_delistings"))
+
+    def test_adjusted_return_treats_exit_on_start_as_delisting_loss(self) -> None:
+        price_index = {
+            "1001": [
+                run_qvm_walkforward.PricePoint(date(2026, 1, 31), 100.0, 100.0, 100.0, 1_000_000.0, False),
+                run_qvm_walkforward.PricePoint(date(2026, 2, 28), 100.0, 100.0, 100.0, 1_000_000.0, False),
+            ]
+        }
+
+        value = run_qvm_walkforward.adjusted_return(
+            price_index,
+            "1001",
+            date(2026, 1, 31),
+            date(2026, 2, 28),
+            {"1001": date(2026, 1, 31)},
+        )
+
+        self.assertEqual(-1.0, value)
 
     def test_build_universe_uses_latest_listing_snapshot_as_of_rebalance(self) -> None:
         config = {

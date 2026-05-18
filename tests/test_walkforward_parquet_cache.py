@@ -238,6 +238,24 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
             ]
             for path in expected_cache_files:
                 self.assertTrue(path.exists(), path)
+            universe_cache = universe_namespace / "universe_202603.parquet"
+            universe_frame = query(
+                f"""
+                select source, listing_lifecycle_status, last_trading_date,
+                       lifecycle_exit_date, delisting_reason, successor_code
+                from {parquet_scan(universe_cache)}
+                limit 1
+                """
+            )
+            for column in [
+                "source",
+                "listing_lifecycle_status",
+                "last_trading_date",
+                "lifecycle_exit_date",
+                "delisting_reason",
+                "successor_code",
+            ]:
+                self.assertIn(column, universe_frame.columns)
             candidate_files = list(run_namespace.glob("rebalance_candidates_202603_*.parquet"))
             self.assertEqual(1, len(candidate_files))
             self.assertIn("capital5000000", candidate_files[0].name)
