@@ -333,6 +333,8 @@ def lifecycle_data_status(rows: list[dict[str, str]]) -> str:
     if not rows:
         return "unknown"
     lifecycle_markers = {(row.get("listing_lifecycle_status") or "").strip() for row in rows}
+    if any(marker.startswith("pit_inferred_lifecycle") for marker in lifecycle_markers):
+        return "pit_inferred_lifecycle"
     if "pit_snapshot_panel_missing_lifecycle_dates" in lifecycle_markers:
         return "pit_snapshot_panel"
     if snapshot_only_listings(rows):

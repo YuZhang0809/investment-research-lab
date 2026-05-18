@@ -73,9 +73,12 @@ ALLOWED_LIFECYCLE_STATUSES = {
     "transferred",
     "snapshot_only_missing_lifecycle_dates",
     "pit_snapshot_panel_missing_lifecycle_dates",
+    "pit_inferred_lifecycle_active",
+    "pit_inferred_lifecycle_terminal",
+    "pit_inferred_lifecycle_unknown",
     "unknown",
 }
-TERMINAL_LIFECYCLE_STATUSES = {"delisted", "merged", "acquired", "transferred"}
+TERMINAL_LIFECYCLE_STATUSES = {"delisted", "merged", "acquired", "transferred", "pit_inferred_lifecycle_terminal"}
 
 
 def build_parser() -> argparse.ArgumentParser:

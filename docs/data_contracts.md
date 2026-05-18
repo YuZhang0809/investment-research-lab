@@ -142,7 +142,12 @@ post-hoc metric hunts.
 
 `lifecycle_data_status` is a caveat field, not an approval flag. Current
 walk-forward values include `snapshot_only`, `partial_lifecycle`,
-`pit_snapshot_panel`, `pit_no_delistings_observed`, and `pit_with_delistings`.
+`pit_snapshot_panel`, `pit_inferred_lifecycle`, `pit_no_delistings_observed`,
+and `pit_with_delistings`.
+
+`pit_inferred_lifecycle` means lifecycle dates were derived from snapshot and
+price evidence instead of an authoritative listing/delisting feed. It is useful
+for research iteration, but it is not performance-conclusive.
 
 ## Data Quality Audit
 

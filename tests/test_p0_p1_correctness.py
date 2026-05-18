@@ -142,7 +142,21 @@ class P0P1CorrectnessTest(unittest.TestCase):
                 ]
             ),
         )
+        self.assertEqual(
+            "pit_inferred_lifecycle",
+            run_qvm_walkforward.lifecycle_data_status(
+                [
+                    {
+                        "code": "1001",
+                        "listed_date": "2020-01-01",
+                        "delisted_date": "",
+                        "listing_lifecycle_status": "pit_inferred_lifecycle_active",
+                    }
+                ]
+            ),
+        )
         self.assertFalse(run_qvm_walkforward.performance_conclusion_allowed("pit_no_delistings_observed"))
+        self.assertFalse(run_qvm_walkforward.performance_conclusion_allowed("pit_inferred_lifecycle"))
         self.assertTrue(run_qvm_walkforward.performance_conclusion_allowed("pit_with_delistings"))
 
     def test_adjusted_return_treats_exit_on_start_as_delisting_loss(self) -> None:

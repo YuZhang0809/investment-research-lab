@@ -82,6 +82,9 @@ acquired
 transferred
 snapshot_only_missing_lifecycle_dates
 pit_snapshot_panel_missing_lifecycle_dates
+pit_inferred_lifecycle_active
+pit_inferred_lifecycle_terminal
+pit_inferred_lifecycle_unknown
 unknown
 ```
 
@@ -146,6 +149,7 @@ unknown
 snapshot_only
 partial_lifecycle
 pit_snapshot_panel
+pit_inferred_lifecycle
 pit_no_delistings_observed
 pit_with_delistings
 ```
@@ -156,6 +160,9 @@ Recommended interpretation:
 - `partial_lifecycle`: exploratory only; lifecycle fields are incomplete.
 - `pit_snapshot_panel`: useful for research iteration, but not enough for
   validation-grade performance conclusions.
+- `pit_inferred_lifecycle`: better than snapshot-only because it has explicit
+  inferred entry and exit dates, but still exploratory because the dates are
+  not from an authoritative lifecycle feed.
 - `pit_no_delistings_observed`: acceptable only for short or synthetic samples
   where no delisting is expected.
 - `pit_with_delistings`: validation-grade lifecycle coverage, assuming prices
@@ -241,4 +248,3 @@ The public engine is ready when:
 - summaries expose lifecycle status and exit policy
 - diagnostics distinguish blocking data errors from execution constraints
 - public tests cover lifecycle edge cases without private data
-
