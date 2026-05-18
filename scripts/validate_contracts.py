@@ -222,6 +222,7 @@ def check_duplicate_keys(
     counts: Counter[tuple[str, ...]] = Counter(
         tuple((row.get(column) or "").strip() for column in key_columns) for row in rows
     )
+    code_index = key_columns.index("code") if "code" in key_columns else None
     for key, count in counts.items():
         if count <= 1 or any(not part for part in key):
             continue
@@ -230,7 +231,7 @@ def check_duplicate_keys(
             severity="error",
             dataset=dataset,
             check="duplicate_key",
-            code=key[-1] if "code" in key_columns else "",
+            code=key[code_index] if code_index is not None else "",
             column=",".join(key_columns),
             value="|".join(key),
             message=f"Duplicate key appears {count} times",
@@ -241,6 +242,14 @@ def listing_key_columns(rows: list[dict[str, str]]) -> list[str]:
     if any((row.get("source_date") or row.get("snapshot_date") or "").strip() for row in rows):
         return ["source_date", "code"]
     return ["code"]
+
+
+def fundamental_key_columns(rows: list[dict[str, str]]) -> list[str]:
+    key_columns = ["code", "available_date", "available_time", "document_type"]
+    for column in ["period_end", "disclosure_number"]:
+        if any((row.get(column) or "").strip() for row in rows):
+            key_columns.append(column)
+    return key_columns
 
 
 def max_required_price_rows(config: dict[str, Any]) -> int:
@@ -645,7 +654,7 @@ def validate_contracts(
         issues,
         dataset="fundamentals",
         rows=fundamental_rows,
-        key_columns=["code", "available_date", "available_time", "document_type"],
+        key_columns=fundamental_key_columns(fundamental_rows),
     )
     check_code_coverage(
         issues,

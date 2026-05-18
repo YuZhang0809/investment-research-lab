@@ -533,6 +533,109 @@ class ValidateContractsTest(unittest.TestCase):
         self.assertIn("lifecycle_date_order", error_checks)
         self.assertIn("terminal_lifecycle_missing_exit_date", warning_checks)
 
+    def test_fundamental_duplicate_key_uses_period_end_and_disclosure_number_when_available(self) -> None:
+        config = {"universe": {"min_ipo_age_trading_days": 0, "liquidity_lookback_days": 0}}
+        listings = [
+            {
+                "code": "1001",
+                "name": "Sample",
+                "market": "Prime",
+                "sector": "Tech",
+                "listed_date": "2020-01-01",
+                "delisted_date": "",
+                "security_type": "common_stock",
+                "is_common_stock": "true",
+                "is_etf_reit_infra": "false",
+                "tradable_flag": "true",
+                "lot_size": "100",
+            }
+        ]
+        prices = [
+            {
+                "date": "2025-01-01",
+                "code": "1001",
+                "unadjusted_close": "1000",
+                "adjusted_close": "1000",
+                "trading_value": "1000000",
+                "tradable_flag": "true",
+                "price_limit_flag": "false",
+            }
+        ]
+        base = {
+            "code": "1001",
+            "available_date": "2025-02-01",
+            "available_time": "15:00",
+            "document_type": "annual",
+            "operating_profit": "100",
+            "net_profit": "80",
+            "equity": "1000",
+            "total_assets": "2000",
+            "shares_outstanding": "100",
+        }
+        fundamentals = [
+            {**base, "period_end": "2024-03-31", "disclosure_number": "A"},
+            {**base, "period_end": "2025-03-31", "disclosure_number": "B"},
+        ]
+
+        issues, _summary = validate_contracts(
+            config=config,
+            listing_rows=listings,
+            price_rows=prices,
+            fundamental_rows=fundamentals,
+        )
+
+        self.assertNotIn("duplicate_key", {row["check"] for row in issues if row["severity"] == "error"})
+
+    def test_duplicate_key_reports_actual_code_column(self) -> None:
+        config = {"universe": {"min_ipo_age_trading_days": 0, "liquidity_lookback_days": 0}}
+        listings = [
+            {
+                "code": "1001",
+                "name": "Sample",
+                "market": "Prime",
+                "sector": "Tech",
+                "listed_date": "2020-01-01",
+                "delisted_date": "",
+                "security_type": "common_stock",
+                "is_common_stock": "true",
+                "is_etf_reit_infra": "false",
+                "tradable_flag": "true",
+                "lot_size": "100",
+            }
+        ]
+        price_row = {
+            "date": "2025-01-01",
+            "code": "1001",
+            "unadjusted_close": "1000",
+            "adjusted_close": "1000",
+            "trading_value": "1000000",
+            "tradable_flag": "true",
+            "price_limit_flag": "false",
+        }
+        fundamentals = [
+            {
+                "code": "1001",
+                "available_date": "2025-02-01",
+                "available_time": "15:00",
+                "document_type": "annual",
+                "operating_profit": "100",
+                "net_profit": "80",
+                "equity": "1000",
+                "total_assets": "2000",
+                "shares_outstanding": "100",
+            }
+        ]
+
+        issues, _summary = validate_contracts(
+            config=config,
+            listing_rows=listings,
+            price_rows=[dict(price_row), dict(price_row)],
+            fundamental_rows=fundamentals,
+        )
+
+        duplicate = next(row for row in issues if row["check"] == "duplicate_key" and row["dataset"] == "prices")
+        self.assertEqual("1001", duplicate["code"])
+
 
 if __name__ == "__main__":
     unittest.main()

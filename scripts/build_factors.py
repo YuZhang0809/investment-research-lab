@@ -161,7 +161,32 @@ def latest_fundamental(rows: list[dict[str, str]], rebalance_date: date) -> dict
             candidates.append(row)
     if not candidates:
         return None
-    return sorted(candidates, key=lambda row: (row.get("available_date", ""), row.get("available_time", "")))[-1]
+    useful = [row for row in candidates if row_has_factor_values(row)]
+    selected = useful or candidates
+    return sorted(selected, key=fundamental_sort_key)[-1]
+
+
+def row_has_factor_values(row: dict[str, str]) -> bool:
+    return any(
+        parse_float(row.get(column)) is not None
+        for column in [
+            "operating_profit",
+            "net_profit",
+            "equity",
+            "total_assets",
+            "shares_outstanding",
+            "avg_shares",
+        ]
+    )
+
+
+def fundamental_sort_key(row: dict[str, str]) -> tuple[str, str, str, str]:
+    return (
+        row.get("available_date", ""),
+        row.get("available_time", ""),
+        row.get("period_end", ""),
+        row.get("disclosure_number", ""),
+    )
 
 
 def first_number(*values: Any) -> float | None:

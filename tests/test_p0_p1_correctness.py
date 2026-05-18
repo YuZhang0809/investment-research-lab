@@ -19,7 +19,7 @@ from analyze_factor_forward_returns import future_return as factor_future_return
 from build_ml_ranker_dataset import PricePoint as MlPricePoint  # noqa: E402
 from build_ml_ranker_dataset import future_return as ml_future_return  # noqa: E402
 from build_universe import build_universe_from_rows  # noqa: E402
-from build_factors import return_with_skip  # noqa: E402
+from build_factors import latest_fundamental, return_with_skip  # noqa: E402
 from download_jquants import convert_master, has_trade  # noqa: E402
 from validate_contracts import validate_contracts  # noqa: E402
 
@@ -176,6 +176,52 @@ class P0P1CorrectnessTest(unittest.TestCase):
         )
 
         self.assertEqual(-1.0, value)
+
+    def test_latest_fundamental_prefers_usable_latest_period_over_blank_revision(self) -> None:
+        rows = [
+            {
+                "available_date": "2026-02-01",
+                "available_time": "15:00",
+                "document_type": "FYFinancialStatements",
+                "period_end": "2025-03-31",
+                "disclosure_number": "100",
+                "operating_profit": "100",
+                "net_profit": "80",
+                "equity": "1000",
+                "total_assets": "2000",
+                "shares_outstanding": "100",
+            },
+            {
+                "available_date": "2026-02-01",
+                "available_time": "15:00",
+                "document_type": "FYFinancialStatements",
+                "period_end": "2026-03-31",
+                "disclosure_number": "101",
+                "operating_profit": "120",
+                "net_profit": "90",
+                "equity": "1100",
+                "total_assets": "2100",
+                "shares_outstanding": "100",
+            },
+            {
+                "available_date": "2026-03-01",
+                "available_time": "15:00",
+                "document_type": "EarnForecastRevision",
+                "period_end": "2026-03-31",
+                "disclosure_number": "102",
+                "operating_profit": "",
+                "net_profit": "",
+                "equity": "",
+                "total_assets": "",
+                "shares_outstanding": "",
+            },
+        ]
+
+        selected = latest_fundamental(rows, date(2026, 3, 31))
+
+        self.assertIsNotNone(selected)
+        self.assertEqual("101", selected["disclosure_number"])
+        self.assertEqual("120", selected["operating_profit"])
 
     def test_build_universe_uses_latest_listing_snapshot_as_of_rebalance(self) -> None:
         config = {

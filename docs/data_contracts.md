@@ -74,7 +74,12 @@ code,available_date,available_time,document_type,operating_profit,net_profit,equ
 ```
 
 `available_date` is the point-in-time gate. Use the disclosure date, not the
-accounting period end.
+accounting period end. Sources may emit multiple rows for the same
+`code + available_date + available_time + document_type`, for example current
+and comparison periods in one disclosure. When present, `period_end` and
+`disclosure_number` are part of the uniqueness key. Factor builders select the
+latest usable accounting row by disclosure timestamp, period end, and disclosure
+number, ignoring rows that do not contain factor inputs when a usable row exists.
 
 ## Manifest
 
