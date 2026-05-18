@@ -6,13 +6,13 @@ fields should be converted into these contracts before research steps run.
 ## Listings
 
 ```text
-code,name,market,sector,listed_date,delisted_date,security_type,is_common_stock,is_etf_reit_infra,tradable_flag,lot_size
+code,name,market,sector,listed_date,delisted_date,last_trading_date,security_type,is_common_stock,is_etf_reit_infra,tradable_flag,lot_size
 ```
 
-J-Quants master snapshots may also include:
+Lifecycle-enriched listings or source-dated master snapshots may also include:
 
 ```text
-source_date,listing_lifecycle_status
+source_date,source,listing_lifecycle_status,delisting_reason,successor_code
 ```
 
 When multiple `source_date` snapshots are present in the listings file,
@@ -20,6 +20,9 @@ When multiple `source_date` snapshots are present in the listings file,
 rebalance date. This is cleaner than using a current master snapshot for all
 historical dates, but if exact `listed_date` and `delisted_date` are still
 missing the run is marked `pit_snapshot_panel`, not performance-conclusive.
+`last_trading_date` is preferred over `delisted_date` for execution cutoffs
+when both are available. The engine does not infer missing lifecycle dates from
+future price gaps.
 
 `download_jquants_listings_panel.py` writes a repeated snapshot panel, and
 `select_research_codes.py` can derive a generic research code list from that

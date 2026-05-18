@@ -216,6 +216,92 @@ class P0P1CorrectnessTest(unittest.TestCase):
         self.assertEqual("pit_snapshot_panel_missing_lifecycle_dates", included[0]["listing_lifecycle_status"])
         self.assertNotIn("1002", [row["code"] for row in included])
 
+    def test_build_universe_uses_last_trading_date_for_lifecycle_exit(self) -> None:
+        config = {
+            "scope": {"instruments": {"include": ["common_stock"], "exclude": []}},
+            "universe": {
+                "min_ipo_age_trading_days": 0,
+                "liquidity_lookback_days": 1,
+                "require_tradable_on_rebalance_date": True,
+                "strict_rebalance_price_filter": False,
+                "require_fundamentals": False,
+            },
+        }
+        listing_rows = [
+            {
+                "code": "1001",
+                "name": "Last Trade Passed",
+                "listed_date": "2020-01-01",
+                "delisted_date": "2026-04-10",
+                "last_trading_date": "2026-03-30",
+                "security_type": "common_stock",
+                "is_common_stock": "true",
+                "is_etf_reit_infra": "false",
+                "tradable_flag": "true",
+                "lot_size": "100",
+                "listing_lifecycle_status": "delisted",
+                "delisting_reason": "synthetic",
+                "successor_code": "",
+            },
+            {
+                "code": "1002",
+                "name": "Delists Today",
+                "listed_date": "2020-01-01",
+                "delisted_date": "2026-03-31",
+                "last_trading_date": "",
+                "security_type": "common_stock",
+                "is_common_stock": "true",
+                "is_etf_reit_infra": "false",
+                "tradable_flag": "true",
+                "lot_size": "100",
+                "listing_lifecycle_status": "delisted",
+                "delisting_reason": "synthetic",
+                "successor_code": "2002",
+            },
+        ]
+        price_rows = [
+            {
+                "date": "2026-03-30",
+                "code": "1001",
+                "unadjusted_close": "100",
+                "trading_value": "1000000",
+                "tradable_flag": "true",
+                "price_limit_flag": "false",
+            },
+            {
+                "date": "2026-03-31",
+                "code": "1002",
+                "unadjusted_close": "100",
+                "trading_value": "1000000",
+                "tradable_flag": "true",
+                "price_limit_flag": "false",
+            },
+        ]
+
+        included, excluded = build_universe_from_rows(
+            config=config,
+            rebalance_date=date(2026, 3, 31),
+            listing_rows=listing_rows,
+            price_rows=price_rows,
+            fundamental_rows=[],
+        )
+
+        self.assertEqual(["1002"], [row["code"] for row in included])
+        self.assertEqual("2026-03-31", included[0]["lifecycle_exit_date"])
+        self.assertEqual("2002", included[0]["successor_code"])
+        self.assertIn("last_trading_before_rebalance:2026-03-30", excluded[0]["reason"])
+
+    def test_walkforward_exit_index_prefers_last_trading_date(self) -> None:
+        index = run_qvm_walkforward.build_delisting_index(
+            [
+                {"code": "1001", "delisted_date": "2026-04-10", "last_trading_date": "2026-03-30"},
+                {"code": "1002", "delisted_date": "2026-04-10", "last_trading_date": ""},
+            ]
+        )
+
+        self.assertEqual(date(2026, 3, 30), index["1001"])
+        self.assertEqual(date(2026, 4, 10), index["1002"])
+
     def test_factor_forward_return_excludes_price_tail_gap_without_lifecycle_data(self) -> None:
         calendar = [date(2026, 1, 1) + timedelta(days=index) for index in range(5)]
         points = [

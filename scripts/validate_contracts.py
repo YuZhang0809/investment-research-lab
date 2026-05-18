@@ -43,7 +43,7 @@ FUNDAMENTAL_REQUIRED = [
 ]
 
 DATE_COLUMNS = {
-    "listings": ["listed_date", "delisted_date"],
+    "listings": ["listed_date", "delisted_date", "last_trading_date", "source_date"],
     "prices": ["date"],
     "fundamentals": ["available_date"],
 }
@@ -64,6 +64,18 @@ BOOL_COLUMNS = {
     "fundamentals": [],
 }
 ISSUE_FIELDS = ["severity", "dataset", "check", "code", "column", "value", "message"]
+ALLOWED_LIFECYCLE_STATUSES = {
+    "active",
+    "suspended",
+    "delisted",
+    "merged",
+    "acquired",
+    "transferred",
+    "snapshot_only_missing_lifecycle_dates",
+    "pit_snapshot_panel_missing_lifecycle_dates",
+    "unknown",
+}
+TERMINAL_LIFECYCLE_STATUSES = {"delisted", "merged", "acquired", "transferred"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -304,6 +316,15 @@ def check_price_coverage(
             )
 
 
+def optional_date(row: dict[str, str], column: str) -> Any | None:
+    if not row.get(column):
+        return None
+    try:
+        return parse_date(row.get(column), field_name=f"listings.{column}")
+    except ValueError:
+        return None
+
+
 def check_listing_lifecycle(issues: list[dict[str, str]], *, listing_rows: list[dict[str, str]]) -> None:
     if not listing_rows:
         return
@@ -314,6 +335,78 @@ def check_listing_lifecycle(issues: list[dict[str, str]], *, listing_rows: list[
         for row in listing_rows
         if row.get("listing_lifecycle_status")
     }
+    for row in listing_rows:
+        code = row.get("code", "")
+        status = row.get("listing_lifecycle_status", "").strip().lower()
+        if status and status not in ALLOWED_LIFECYCLE_STATUSES:
+            issue(
+                issues,
+                severity="error",
+                dataset="listings",
+                check="listing_lifecycle_status_value",
+                code=code,
+                column="listing_lifecycle_status",
+                value=row.get("listing_lifecycle_status", ""),
+                message=f"Unsupported listing_lifecycle_status: {row.get('listing_lifecycle_status', '')}",
+            )
+        listed_date = optional_date(row, "listed_date")
+        delisted_date = optional_date(row, "delisted_date")
+        last_trading_date = optional_date(row, "last_trading_date")
+        if listed_date and delisted_date and delisted_date < listed_date:
+            issue(
+                issues,
+                severity="error",
+                dataset="listings",
+                check="lifecycle_date_order",
+                code=code,
+                column="delisted_date",
+                value=row.get("delisted_date", ""),
+                message="delisted_date is before listed_date",
+            )
+        if listed_date and last_trading_date and last_trading_date < listed_date:
+            issue(
+                issues,
+                severity="error",
+                dataset="listings",
+                check="lifecycle_date_order",
+                code=code,
+                column="last_trading_date",
+                value=row.get("last_trading_date", ""),
+                message="last_trading_date is before listed_date",
+            )
+        if delisted_date and last_trading_date and last_trading_date > delisted_date:
+            issue(
+                issues,
+                severity="error",
+                dataset="listings",
+                check="lifecycle_date_order",
+                code=code,
+                column="last_trading_date",
+                value=row.get("last_trading_date", ""),
+                message="last_trading_date is after delisted_date",
+            )
+        if status in TERMINAL_LIFECYCLE_STATUSES and not (delisted_date or last_trading_date):
+            issue(
+                issues,
+                severity="warning",
+                dataset="listings",
+                check="terminal_lifecycle_missing_exit_date",
+                code=code,
+                column="listing_lifecycle_status",
+                value=row.get("listing_lifecycle_status", ""),
+                message="Terminal lifecycle status requires delisted_date or last_trading_date for PIT validation",
+            )
+        if status == "active" and (delisted_date or last_trading_date):
+            issue(
+                issues,
+                severity="warning",
+                dataset="listings",
+                check="active_lifecycle_has_exit_date",
+                code=code,
+                column="listing_lifecycle_status",
+                value=row.get("listing_lifecycle_status", ""),
+                message="Active lifecycle status has an exit date; check source mapping",
+            )
     if not any(listed_dates):
         issue(
             issues,

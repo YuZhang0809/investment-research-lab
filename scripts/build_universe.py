@@ -130,11 +130,18 @@ def listings_as_of_snapshot(rows: list[dict[str, str]], rebalance_date: Any) -> 
 def active_as_of(row: dict[str, str], rebalance_date: Any) -> tuple[bool, str]:
     listed_date = parse_date(row.get("listed_date"), field_name="listings.listed_date")
     delisted_date = parse_date(row.get("delisted_date"), field_name="listings.delisted_date")
+    last_trading_date = parse_date(row.get("last_trading_date"), field_name="listings.last_trading_date")
     if listed_date and listed_date > rebalance_date:
         return False, f"listed_after_rebalance:{listed_date}"
-    if delisted_date and delisted_date <= rebalance_date:
-        return False, f"delisted_before_or_on_rebalance:{delisted_date}"
+    if last_trading_date and last_trading_date < rebalance_date:
+        return False, f"last_trading_before_rebalance:{last_trading_date}"
+    if delisted_date and delisted_date < rebalance_date:
+        return False, f"delisted_before_rebalance:{delisted_date}"
     return True, ""
+
+
+def lifecycle_exit_date(row: dict[str, str]) -> str:
+    return row.get("last_trading_date") or row.get("delisted_date") or ""
 
 
 def security_allowed(row: dict[str, str], config: dict[str, Any]) -> tuple[bool, str]:
@@ -227,9 +234,14 @@ def evaluate_row(
         "market": row.get("market", ""),
         "sector": row.get("sector", ""),
         "source_date": row.get("source_date", ""),
+        "source": row.get("source", ""),
         "listing_lifecycle_status": row.get("listing_lifecycle_status", ""),
         "listed_date": row.get("listed_date", ""),
         "delisted_date": row.get("delisted_date", ""),
+        "last_trading_date": row.get("last_trading_date", ""),
+        "lifecycle_exit_date": lifecycle_exit_date(row),
+        "delisting_reason": row.get("delisting_reason", ""),
+        "successor_code": row.get("successor_code", ""),
         "security_type": row.get("security_type", ""),
         "lot_size": parse_int(row.get("lot_size"), default=100),
         "ipo_age_trading_days": len(all_price_points),
@@ -327,9 +339,14 @@ def main() -> int:
         "market",
         "sector",
         "source_date",
+        "source",
         "listing_lifecycle_status",
         "listed_date",
         "delisted_date",
+        "last_trading_date",
+        "lifecycle_exit_date",
+        "delisting_reason",
+        "successor_code",
         "security_type",
         "lot_size",
         "ipo_age_trading_days",

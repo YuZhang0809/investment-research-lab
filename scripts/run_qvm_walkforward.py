@@ -266,9 +266,11 @@ def build_delisting_index(listing_rows: list[dict[str, str]]) -> dict[str, date]
         code = (row.get("code") or "").strip()
         if not code:
             continue
+        last_trading_date = parse_date(row.get("last_trading_date"), field_name="listings.last_trading_date")
         delisted_date = parse_date(row.get("delisted_date"), field_name="listings.delisted_date")
-        if delisted_date is not None:
-            values[code] = delisted_date
+        exit_date = last_trading_date or delisted_date
+        if exit_date is not None:
+            values[code] = exit_date
     return values
 
 
@@ -373,8 +375,8 @@ def adjusted_return(
     start_point = price_at(price_index, code, start)
     if not start_point or start_point.adjusted_close <= 0:
         return None
-    delisted_date = (delisting_dates or {}).get(code)
-    if delisted_date is not None and start < delisted_date <= end:
+    lifecycle_exit_date = (delisting_dates or {}).get(code)
+    if lifecycle_exit_date is not None and start < lifecycle_exit_date <= end:
         return -1.0
     end_point = price_at(price_index, code, end)
     if not end_point:
@@ -1195,9 +1197,9 @@ def main() -> int:
             market_period_return = 0.0 if market_benchmark_points else None
 
         for code, adjusted_shares in list(holdings.items()):
-            delisted_date = delisting_dates.get(code)
-            terminal_point = price_at(price_index, code, delisted_date or rebalance_date)
-            if delisted_date is None or delisted_date > rebalance_date:
+            lifecycle_exit_date = delisting_dates.get(code)
+            terminal_point = price_at(price_index, code, lifecycle_exit_date or rebalance_date)
+            if lifecycle_exit_date is None or lifecycle_exit_date > rebalance_date:
                 tail_point = terminal_before(price_index, code, rebalance_date)
                 if tail_point is not None:
                     stale_days = trading_staleness_days(price_calendar, tail_point.date, rebalance_date)
@@ -1210,7 +1212,7 @@ def main() -> int:
                                 "failure_type": "price_tail_gap",
                                 "detail": (
                                     f"last_price_date={tail_point.date};stale_trading_days={stale_days};"
-                                    f"policy={tail_gap_mode}; no delisted_date in listings"
+                                    f"policy={tail_gap_mode}; no lifecycle_exit_date in listings"
                                 ),
                                 "value": position_value(adjusted_shares, tail_point),
                             }
@@ -1263,7 +1265,7 @@ def main() -> int:
                     "date": rebalance_date,
                     "code": code,
                     "failure_type": "assumed_delisting_loss",
-                    "detail": f"delisted_date={delisted_date}; recovery_price=0",
+                    "detail": f"lifecycle_exit_date={lifecycle_exit_date}; recovery_price=0",
                     "value": 0,
                 }
             )
