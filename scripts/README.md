@@ -146,8 +146,10 @@ rebalance date.
 fill orders on the next trading date at the configured execution price. Trade
 rows carry both `signal_date` and `execution_date`; summary/equity rows expose
 `last_execution_date` and execution diagnostics. New holdings are not marked as
-if they existed before the fill date. If a code has no execution price on the
-next trading date, the order is skipped with `missing_execution_price`.
+if they existed before the fill date. Order deltas use adjusted-share retargeting
+when signal and fill dates differ, so splits between signal and fill do not leave
+residual positions. If a code has no execution price on the next trading date,
+the order is skipped with `missing_execution_price`.
 
 ### Sector Cap
 

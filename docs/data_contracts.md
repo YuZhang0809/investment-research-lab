@@ -164,7 +164,9 @@ orders on the next trading date where the selected execution price exists.
 Cash, holdings, tax lots, realized gains, costs, trade rows, holdings rows, and
 the equity observation row are updated at the fill-date valuation point. This
 prevents a strategy from receiving return between the signal close and the
-next-day fill.
+next-day fill. Order deltas are computed in adjusted-share terms when the fill
+date differs from the signal date, so splits between signal and fill do not
+leave residual holdings or under-size target buys.
 
 Summary rows include execution diagnostics:
 

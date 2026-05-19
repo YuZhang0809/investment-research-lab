@@ -401,6 +401,11 @@ def actual_shares_from_adjusted(adjusted_shares: float, point: PricePoint) -> fl
     return adjusted_shares / ratio
 
 
+def retarget_actual_shares_for_fill(target_shares: int, signal_point: PricePoint, fill_point: PricePoint) -> int:
+    target_adjusted_shares = adjusted_shares_for_trade(target_shares, signal_point)
+    return int(round(actual_shares_from_adjusted(target_adjusted_shares, fill_point)))
+
+
 def position_value(adjusted_shares: float, point: PricePoint) -> float:
     return adjusted_shares * point.adjusted_close
 
@@ -1897,17 +1902,17 @@ def main() -> int:
 
         for code in all_codes:
             current_adjusted_shares = holdings.get(code, 0.0)
-            target_shares = targets.get(code, 0)
+            signal_target_shares = targets.get(code, 0)
             position_point = price_at(price_index, code, rebalance_date)
             signal_point = price_on_date(price_index, code, rebalance_date)
             fill_point = execution_point(price_index, price_calendar, code, rebalance_date, args.execution_price)
-            current_shares = (
+            signal_current_shares = (
                 int(round(actual_shares_from_adjusted(current_adjusted_shares, position_point)))
                 if position_point
                 else 0
             )
-            desired_delta = target_shares - current_shares
-            if desired_delta == 0:
+            signal_desired_delta = signal_target_shares - signal_current_shares
+            if signal_desired_delta == 0:
                 continue
             if args.execution_price != "rebalance_close":
                 pending_order_count += 1
@@ -1939,7 +1944,7 @@ def main() -> int:
                         "execution_date": "",
                         "code": code,
                         "side": "SKIP",
-                        "requested_shares": desired_delta,
+                        "requested_shares": signal_desired_delta,
                         "filled_shares": 0,
                         "price": "",
                         "value": 0,
@@ -1958,6 +1963,11 @@ def main() -> int:
             lot = parse_int(universe.get("lot_size"), default=100) or 100
             median_adv = parse_float(universe.get("median_60d_trading_value"))
             fill_price = execution_price(fill_point, args.execution_price)
+            current_shares = int(round(actual_shares_from_adjusted(current_adjusted_shares, fill_point)))
+            target_shares = retarget_actual_shares_for_fill(signal_target_shares, signal_point, fill_point)
+            desired_delta = target_shares - current_shares
+            if desired_delta == 0:
+                continue
             requested_value = abs(desired_delta * fill_price)
             filled_delta = desired_delta
             reason = ""
