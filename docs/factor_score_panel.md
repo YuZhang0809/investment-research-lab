@@ -1,9 +1,14 @@
 # Factor/Score Panel
 
-This is a public-safe fast path for precomputing rebalance-level factors and
-scores after the DuckDB price/universe panel has passed parity checks. It is
-not a strategy rewrite and it does not change portfolio construction,
-execution, benchmark accounting, or reporting.
+This is the preferred public-safe research path for precomputing
+rebalance-level factors and scores when the strategy fits the documented
+DuckDB support scope. It is not a strategy rewrite and it does not change
+portfolio construction, execution, benchmark accounting, or reporting.
+
+The legacy engine remains the reference implementation for validation, audit,
+and fallback. It is not deprecated for correctness, but it is no longer the
+recommended daily research path for supported base factor/score panels. See
+`docs/engine_path_policy.md` for the path policy and retirement approach.
 
 ## Scope
 
@@ -24,17 +29,19 @@ non-universe names from leaking into ranked candidates.
 Two engines are available:
 
 ```text
-legacy: default/reference path; reuses build_factors.py and build_scores.py
-duckdb: optimized base Q/V/M path; computes PIT fundamentals, ratios, z-scores,
-        group scores, filters, and ranks in one DuckDB batch
+duckdb: recommended research path for supported base Q/V/M panels; computes
+        PIT fundamentals, ratios, z-scores, group scores, filters, and ranks in
+        one DuckDB batch
+legacy: reference, validation, and fallback path; reuses build_factors.py and
+        build_scores.py
 ```
 
 The DuckDB engine is intentionally narrower than the legacy engine. It supports
 the base Q/V/M raw factors and `qvm`, `qv`, `value_only`, and `weighted_groups`
 strategy versions with group-level filters. It rejects `factors.definitions`,
 `configurable` / `weighted_factors`, and field-level filters with a clear error.
-There is no automatic fallback because a silent semantic change would make
-parity harder to trust.
+Use `--engine legacy` explicitly for those mechanics. There is no automatic
+fallback because a silent semantic change would make parity harder to trust.
 
 ## Usage
 
@@ -53,7 +60,9 @@ python scripts\build_rebalance_factor_score_panel.py `
   --output-format parquet
 ```
 
-Omit `--engine duckdb` to use the legacy reference builder.
+The CLI default remains `--engine legacy` for backward compatibility. Daily
+research-scale runs should pass `--engine duckdb` when the strategy is in the
+supported scope.
 CSV remains supported, but Parquet is preferred for repeated local research.
 
 ## Walk-Forward Consumption
@@ -124,7 +133,8 @@ mechanics used by the original path.
 
 ## Required Parity
 
-Before research use, compare three paths on the same inputs and parameters:
+Before adopting the fast path for a new strategy primitive, and after major
+engine changes, compare three paths on the same inputs and parameters:
 
 ```text
 A. legacy walk-forward
@@ -144,4 +154,8 @@ benchmark and market benchmark columns: identical when supplied
 ```
 
 Any unexplained portfolio, order, equity, or benchmark difference blocks use of
-the fast path for research. Public examples and tests must stay synthetic.
+the fast path for research. A sampled external real-data audit has passed
+panel-level and walk-forward parity for the supported DuckDB factor-score path;
+the public repository records only that abstract result, not private paths,
+tickers, reports, candidate lists, returns, or timing commitments. Public
+examples and tests must stay synthetic.

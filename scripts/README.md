@@ -60,29 +60,33 @@ fingerprinted namespaces instead of silently reusing stale tables.
 `--force-rebuild` refreshes files inside the current namespaces. Summary, trades,
 holdings, equity, and failure-case outputs remain CSV.
 
-After a DuckDB price/universe panel has passed parity checks, it can replace
-only the universe stage of the walk-forward run:
+## Recommended Research Workflow
+
+For supported base Q/V/M-style strategies, the recommended research-scale path
+is:
+
+```text
+Step A: build_rebalance_price_universe_panel.py
+Step B: build_rebalance_factor_score_panel.py --engine duckdb
+Step C: run_qvm_walkforward.py --factor-score-panel
+```
+
+Step A builds the upstream price/universe panel:
 
 ```powershell
-python scripts\run_qvm_walkforward.py `
+python scripts\build_rebalance_price_universe_panel.py `
   --config configs\qvm_v0_1.example.yml `
   --listings <listings.csv> `
   --prices <prices.csv> `
   --fundamentals <fundamentals.csv> `
   --start-date 2026-01-01 `
   --end-date 2026-12-31 `
-  --rebalance monthly `
-  --price-universe-panel <rebalance_price_universe_panel.parquet> `
-  --cache-format parquet `
-  --no-manifest
+  --frequency monthly `
+  --out <rebalance_price_universe_panel.parquet> `
+  --output-format parquet
 ```
 
-This does not change factor, score, portfolio, benchmark, or report logic.
-Compare the summary, trades, holdings, equity, and failure-case CSVs against a
-same-parameter legacy run before treating the fast path as research-ready.
-
-The next fast-path layer precomputes factors and scores from the validated
-price/universe panel:
+Step B builds the factor/score panel with the optimized DuckDB engine:
 
 ```powershell
 python scripts\build_rebalance_factor_score_panel.py `
@@ -99,13 +103,14 @@ python scripts\build_rebalance_factor_score_panel.py `
   --output-format parquet
 ```
 
-`--engine legacy` is the default/reference implementation and reuses
-`build_factors.py` plus `build_scores.py`. `--engine duckdb` is the optimized
-base Q/V/M implementation; it supports `qvm`, `qv`, `value_only`, and
-`weighted_groups` with group filters, and it rejects custom factor expressions,
+`--engine duckdb` is the recommended research path for supported base
+factor/score panels. `--engine legacy` is the reference, validation, and
+fallback implementation; the CLI default remains legacy for backward
+compatibility. DuckDB supports `qvm`, `qv`, `value_only`, and `weighted_groups`
+with group filters, and it rejects custom factor expressions,
 `weighted_factors`, and field filters instead of falling back silently.
 
-`run_qvm_walkforward.py` can then consume that panel directly:
+Step C consumes the factor/score panel directly:
 
 ```powershell
 python scripts\run_qvm_walkforward.py `
@@ -123,8 +128,26 @@ python scripts\run_qvm_walkforward.py `
 
 This skips per-rebalance universe/factor/score stage builds, but keeps the
 existing portfolio, execution, benchmark, holdings, equity, and failure-case
-logic. It also requires same-parameter parity against the legacy run before
-research use.
+logic.
+
+## Validation Workflow
+
+Legacy remains the reference path for audit and fallback. Use sampled windows
+after major engine changes or when adding new strategy primitives:
+
+```text
+legacy walk-forward
+DuckDB price/universe panel
+DuckDB factor/score panel
+walk-forward with --factor-score-panel
+artifact parity comparison
+```
+
+Expected parity is summary except `cache_fingerprint`, trades, holdings,
+equity, failure cases, and benchmark columns when supplied. Unexplained
+differences block research use for the changed path. Public examples and tests
+must remain synthetic; real-data parity artifacts and timing records belong in
+private workspaces.
 
 `--strategy-version weighted_groups` uses `strategy.scoring.weights` and
 `strategy.filters` from the config. It writes `composite_score`,

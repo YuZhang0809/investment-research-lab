@@ -58,7 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--engine",
         choices=["legacy", "duckdb"],
         default="legacy",
-        help="legacy reuses build_factors/build_scores; duckdb uses the optimized base QVM path.",
+        help=(
+            "duckdb is the optimized/recommended engine for supported base factor/score panels; "
+            "legacy is the reference/fallback engine."
+        ),
     )
     parser.add_argument("--input-format", choices=["auto", "csv", "parquet"], default="auto")
     parser.add_argument("--output-format", choices=["auto", "csv", "parquet"], default="auto")

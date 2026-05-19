@@ -1,9 +1,11 @@
 # DuckDB Price/Universe Panel
 
-This is a public-safe fast path for the slowest cold-run data construction
-steps. It is not a rewrite of the research engine and it is not a database
-service. The legacy CSV/list-of-dicts path remains the reference
-implementation.
+This is the upstream acceleration layer for the public research engine. It is
+not a rewrite of the research engine and it is not a database service. The
+DuckDB price/universe panel feeds the DuckDB factor/score panel, which is the
+recommended downstream builder for supported daily research workflows. The
+legacy CSV/list-of-dicts path remains the reference implementation for
+validation, audit, and fallback.
 
 ## Scope
 
@@ -23,8 +25,9 @@ included flag and exclusion reason
 ```
 
 It intentionally does not compute fundamentals latest-as-of rows, quality/value
-ratios, scores, portfolios, or reports. Those remain in later phases after the
-price/universe panel proves parity with the legacy path.
+ratios, scores, portfolios, or reports. The next layer is
+`scripts/build_rebalance_factor_score_panel.py --engine duckdb`, documented in
+`docs/factor_score_panel.md`.
 
 ## Usage
 
@@ -84,32 +87,37 @@ persistent database dependency. Private workspaces can use real local data to
 measure speedups, but public docs and tests should stay synthetic and should
 not promise private runtime numbers.
 
-## Private Validation Handoff
+## Validation Handoff
 
-This public upgrade covers Phase 1 and Phase 2 only:
+The public fast path is organized as:
 
 ```text
-Phase 1: DuckDB price/universe fast panel
-Phase 2: synthetic parity against the legacy universe and momentum/liquidity path
+P3: price/universe panel
+P4: DuckDB factor/score panel for supported strategy mechanics
+P5: walk-forward direct consumption of the factor/score panel
 ```
 
-The fast path currently accelerates the rebalance-date price/universe panel. It
-does not replace the legacy engine and does not compute fundamentals
-latest-as-of, quality/value ratios, scores, portfolios, or walk-forward
-backtests. The legacy path remains the reference for research semantics.
+P3 is the upstream acceleration layer. P4 is the default downstream panel
+builder where the strategy fits the documented DuckDB support scope. P5 should
+consume the factor/score panel for research-scale runs so the walk-forward
+engine skips per-rebalance universe/factor/score stage builds.
 
-Private workspaces should validate the fast path with local real data before
-any Phase 3 work begins. Keep private paths, vendor files, run outputs,
-selected tickers, parameters, and conclusions outside this repository.
+Private workspaces should keep validating fast-path changes with local real
+data, especially after major engine changes. Keep private paths, vendor files,
+run outputs, selected tickers, parameters, returns, and conclusions outside
+this repository.
 
-Recommended private experiment:
+Recommended validation experiment:
 
 1. Build the fast panel with the same config, listings, prices, fundamentals,
    start date, end date, and rebalance frequency used by the legacy run.
 2. Compare it against the legacy helpers with `compare_fast_panel_to_legacy.py`.
 3. Review every diff row before trusting runtime improvements.
-4. Record runtime separately for the fast panel build and the comparison step.
-5. Treat unexplained field differences as blockers for Phase 3.
+4. Build the DuckDB factor/score panel with `--engine duckdb`.
+5. Run walk-forward with `--factor-score-panel`.
+6. Compare legacy and fast walk-forward artifacts on sampled windows.
+7. Treat unexplained field, portfolio, order, equity, or benchmark differences
+   as blockers.
 
 Fields that should match or have a documented explanation:
 
@@ -157,11 +165,22 @@ python scripts\compare_fast_panel_to_legacy.py `
   --out path\to\fast_panel_diff.csv
 ```
 
-After the private Phase 1/2 parity run has no unexplained differences, the
-next engineering step is to run the full walk-forward with the fast panel as
-the universe-stage input:
+For research-scale runs, build the factor/score panel and consume it directly:
 
 ```powershell
+python scripts\build_rebalance_factor_score_panel.py `
+  --config path\to\config.yml `
+  --price-universe-panel path\to\fast_panel.parquet `
+  --prices path\to\prices.csv `
+  --fundamentals path\to\fundamentals.csv `
+  --start-date YYYY-MM-DD `
+  --end-date YYYY-MM-DD `
+  --frequency monthly `
+  --strategy-version qvm `
+  --engine duckdb `
+  --out path\to\factor_score_panel.parquet `
+  --output-format parquet
+
 python scripts\run_qvm_walkforward.py `
   --config path\to\config.yml `
   --listings path\to\listings.csv `
@@ -170,15 +189,16 @@ python scripts\run_qvm_walkforward.py `
   --start-date YYYY-MM-DD `
   --end-date YYYY-MM-DD `
   --frequency monthly `
-  --price-universe-panel path\to\fast_panel.parquet `
+  --factor-score-panel path\to\factor_score_panel.parquet `
   --out-dir path\to\fast_walkforward_outputs `
   --report-dir path\to\fast_walkforward_reports
 ```
 
-This only replaces the universe stage. Fundamentals, raw factors, scoring,
-portfolio construction, benchmark accounting, and reports still use the
-existing walk-forward logic. Compare the fast run against a legacy run with the
-same config and runtime parameters before using the fast path for research.
+This keeps portfolio construction, benchmark accounting, holdings, equity, and
+failure-case logic in the existing walk-forward engine while replacing the slow
+per-rebalance universe/factor/score stage builds. Compare the fast run against
+a legacy run with the same config and runtime parameters before relying on a
+new strategy primitive.
 
 Walk-forward parity should cover:
 
@@ -191,19 +211,17 @@ failure cases
 benchmark and market benchmark columns when supplied
 ```
 
-`cache_fingerprint` may differ because the universe input source changed. Other
+`cache_fingerprint` may differ because the input source changed. Other
 differences need a documented explanation.
 
-Later planned phases remain:
-
-```text
-broader DuckDB-native fundamentals latest-as-of optimization
-broader DuckDB-native raw Q/V/M factor optimization
-```
+A sampled external real-data audit has passed panel-level and walk-forward
+parity for the supported DuckDB factor-score path. Public docs intentionally
+avoid private file paths, tickers, reports, candidate lists, returns, selected
+parameters, and private timing commitments.
 
 ## Fast Path Layers
 
-The public engine now has two explicit fast-path layers:
+The public engine now has three explicit fast-path layers:
 
 ```text
 P3: price/universe panel
@@ -212,14 +230,14 @@ P5: walk-forward direct panel consumption
 ```
 
 P3 is the `rebalance_date x code` price/universe acceleration layer documented
-above. P4 is documented in `docs/factor_score_panel.md`; it can either use the
-legacy reference builder or the optimized DuckDB base Q/V/M builder. P5 is the
-explicit `run_qvm_walkforward.py` consumption path:
+above. P4 is documented in `docs/factor_score_panel.md`; the DuckDB engine is
+the recommended downstream builder for supported base Q/V/M-style factor/score
+panels. P5 is the explicit `run_qvm_walkforward.py` consumption path:
 
 ```text
 --price-universe-panel
 --factor-score-panel
 ```
 
-All fast paths must pass legacy parity on synthetic fixtures and private local
-data before they are used for research.
+All fast paths must keep passing legacy parity on synthetic fixtures and
+sampled private local windows after material engine changes.
