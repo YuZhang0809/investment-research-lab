@@ -336,6 +336,130 @@ class FastPriceUniversePanelTest(unittest.TestCase):
             self.assertTrue(row["has_fundamentals"])
             self.assertTrue(row["included_flag"])
 
+    def test_rejects_duplicate_price_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings = temp / "listings.csv"
+            prices = temp / "prices.csv"
+            write_csv(
+                listings,
+                [
+                    {
+                        "code": "1001",
+                        "listed_date": "2020-01-01",
+                        "security_type": "common_stock",
+                        "is_common_stock": "true",
+                        "is_etf_reit_infra": "false",
+                        "tradable_flag": "true",
+                    }
+                ],
+                ["code", "listed_date", "security_type", "is_common_stock", "is_etf_reit_infra", "tradable_flag"],
+            )
+            write_csv(
+                prices,
+                [
+                    {"date": "2026-01-31", "code": "1001", "unadjusted_close": "100", "adjusted_close": "100", "trading_value": "1000"},
+                    {"date": "2026-01-31", "code": "1001", "unadjusted_close": "101", "adjusted_close": "101", "trading_value": "1000"},
+                ],
+                ["date", "code", "unadjusted_close", "adjusted_close", "trading_value"],
+            )
+
+            with self.assertRaisesRegex(ValueError, "Duplicate price rows"):
+                build_panel_frame(
+                    config=minimal_config(),
+                    listings_path=listings,
+                    prices_path=prices,
+                    fundamentals_path=None,
+                    start_date="2026-01-31",
+                    end_date="2026-01-31",
+                    frequency="monthly",
+                    input_format="csv",
+                )
+
+    def test_rejects_duplicate_listing_snapshot_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings = temp / "listings.csv"
+            prices = temp / "prices.csv"
+            write_csv(
+                listings,
+                [
+                    {
+                        "source_date": "2026-01-31",
+                        "code": "1001",
+                        "listed_date": "2020-01-01",
+                        "security_type": "common_stock",
+                        "is_common_stock": "true",
+                        "is_etf_reit_infra": "false",
+                        "tradable_flag": "true",
+                    },
+                    {
+                        "source_date": "2026-01-31",
+                        "code": "1001",
+                        "listed_date": "2020-01-01",
+                        "security_type": "common_stock",
+                        "is_common_stock": "true",
+                        "is_etf_reit_infra": "false",
+                        "tradable_flag": "false",
+                    },
+                ],
+                ["source_date", "code", "listed_date", "security_type", "is_common_stock", "is_etf_reit_infra", "tradable_flag"],
+            )
+            write_csv(
+                prices,
+                [{"date": "2026-01-31", "code": "1001", "unadjusted_close": "100", "adjusted_close": "100", "trading_value": "1000"}],
+                ["date", "code", "unadjusted_close", "adjusted_close", "trading_value"],
+            )
+
+            with self.assertRaisesRegex(ValueError, "Duplicate listing snapshot rows"):
+                build_panel_frame(
+                    config=minimal_config(),
+                    listings_path=listings,
+                    prices_path=prices,
+                    fundamentals_path=None,
+                    start_date="2026-01-31",
+                    end_date="2026-01-31",
+                    frequency="monthly",
+                    input_format="csv",
+                )
+
+    def test_missing_adjusted_close_requires_positive_adjustment_factor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings = temp / "listings.csv"
+            prices = temp / "prices.csv"
+            write_csv(
+                listings,
+                [
+                    {
+                        "code": "1001",
+                        "listed_date": "2020-01-01",
+                        "security_type": "common_stock",
+                        "is_common_stock": "true",
+                        "is_etf_reit_infra": "false",
+                        "tradable_flag": "true",
+                    }
+                ],
+                ["code", "listed_date", "security_type", "is_common_stock", "is_etf_reit_infra", "tradable_flag"],
+            )
+            write_csv(
+                prices,
+                [{"date": "2026-01-31", "code": "1001", "unadjusted_close": "100", "adjusted_close": "", "adjustment_factor": "0", "trading_value": "1000"}],
+                ["date", "code", "unadjusted_close", "adjusted_close", "adjustment_factor", "trading_value"],
+            )
+
+            with self.assertRaisesRegex(ValueError, "Missing adjusted_close requires positive adjustment_factor"):
+                build_panel_frame(
+                    config=minimal_config(),
+                    listings_path=listings,
+                    prices_path=prices,
+                    fundamentals_path=None,
+                    start_date="2026-01-31",
+                    end_date="2026-01-31",
+                    frequency="monthly",
+                    input_format="csv",
+                )
+
     def test_duckdb_price_universe_panel_matches_legacy_core_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

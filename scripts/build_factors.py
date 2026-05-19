@@ -95,6 +95,41 @@ def price_date(row: dict[str, str]) -> date | None:
     return parse_date(row.get("date"), field_name="prices.date")
 
 
+def validate_unique_price_rows(rows: list[dict[str, str]]) -> None:
+    seen: set[tuple[str, date]] = set()
+    for row in rows:
+        code = (row.get("code") or "").strip()
+        row_date = price_date(row)
+        if not code or row_date is None:
+            continue
+        key = (code, row_date)
+        if key in seen:
+            raise ValueError(f"Duplicate price rows for code={code};date={row_date}.")
+        seen.add(key)
+
+
+def validate_unique_fundamental_rows(rows: list[dict[str, str]]) -> None:
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for row in rows:
+        code = (row.get("code") or "").strip()
+        if not code:
+            continue
+        key = (
+            code,
+            fundamental_available_date(row),
+            row.get("available_time", ""),
+            row.get("period_end", ""),
+            row.get("disclosure_number", ""),
+        )
+        if key in seen:
+            raise ValueError(
+                "Duplicate fundamentals rows for "
+                f"code={key[0]};available_date={key[1]};available_time={key[2]};"
+                f"period_end={key[3]};disclosure_number={key[4]}."
+            )
+        seen.add(key)
+
+
 def rows_until_rebalance(rows: list[dict[str, str]], rebalance_date: date) -> list[dict[str, str]]:
     clean = [row for row in rows if price_date(row) and price_date(row) <= rebalance_date]
     return rows_with_effective_adjusted_close(sorted(clean, key=lambda row: price_date(row) or date.min))
@@ -105,11 +140,17 @@ def rows_with_effective_adjusted_close(rows: list[dict[str, str]]) -> list[dict[
     adjusted_rows: list[dict[str, str]] = []
     for row in rows:
         copied = dict(row)
-        adjustment_factor = parse_float(copied.get("adjustment_factor"), default=1.0) or 1.0
-        if adjustment_factor > 0:
-            cumulative_adjustment *= adjustment_factor
         adjusted = parse_float(copied.get("adjusted_close"))
         unadjusted = parse_float(copied.get("unadjusted_close"))
+        raw_adjustment_factor = copied.get("adjustment_factor")
+        adjustment_factor = parse_float(raw_adjustment_factor)
+        if adjusted is None and unadjusted is not None and (adjustment_factor is None or adjustment_factor <= 0):
+            raise ValueError(
+                "Missing adjusted_close requires positive adjustment_factor "
+                f"for code={copied.get('code', '')};date={copied.get('date', '')}."
+            )
+        if adjustment_factor is not None and adjustment_factor > 0:
+            cumulative_adjustment *= adjustment_factor
         if adjusted is None and unadjusted is not None:
             copied["_effective_adjusted_close"] = str(unadjusted / cumulative_adjustment)
         adjusted_rows.append(copied)
@@ -119,7 +160,7 @@ def rows_with_effective_adjusted_close(rows: list[dict[str, str]]) -> list[dict[
 def adjusted_close(row: dict[str, str] | None) -> float | None:
     if row is None:
         return None
-    return parse_float(row.get("_effective_adjusted_close") or row.get("adjusted_close") or row.get("unadjusted_close"))
+    return parse_float(row.get("_effective_adjusted_close") or row.get("adjusted_close"))
 
 
 def price_on_or_before(rows: list[dict[str, str]], target: date) -> dict[str, str] | None:
@@ -159,7 +200,7 @@ def return_with_skip(
 def latest_fundamental(rows: list[dict[str, str]], rebalance_date: date) -> dict[str, str] | None:
     candidates = []
     for row in rows:
-        available_date = parse_date(row.get("available_date"), field_name="fundamentals.available_date")
+        available_date = parse_date(fundamental_available_date(row), field_name="fundamentals.available_date")
         if available_date and available_date <= rebalance_date:
             candidates.append(row)
     if not candidates:
@@ -183,9 +224,13 @@ def row_has_factor_values(row: dict[str, str]) -> bool:
     )
 
 
+def fundamental_available_date(row: dict[str, str]) -> str:
+    return row.get("available_date") or row.get("disclosure_date") or ""
+
+
 def fundamental_sort_key(row: dict[str, str]) -> tuple[str, str, str, str]:
     return (
-        row.get("available_date", ""),
+        fundamental_available_date(row),
         row.get("available_time", ""),
         row.get("period_end", ""),
         row.get("disclosure_number", ""),
@@ -238,6 +283,8 @@ def build_factors(
     config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     validate_custom_factor_names(config)
+    validate_unique_price_rows(price_rows)
+    validate_unique_fundamental_rows(fundamental_rows)
     custom_definitions = ordered_factor_definitions(
         config,
         base_variables=FACTOR_EXPRESSION_BASE_FIELDS,
@@ -325,7 +372,7 @@ def build_factors(
                 "sector": asset.get("sector", ""),
                 "price_date": latest_price_row.get("date", "") if latest_price_row else "",
                 "latest_unadjusted_close": latest_close,
-                "fundamentals_available_date": fundamental.get("available_date", "") if fundamental else "",
+                "fundamentals_available_date": fundamental_available_date(fundamental) if fundamental else "",
                 "fundamentals_available_time": fundamental.get("available_time", "") if fundamental else "",
                 "document_type": fundamental.get("document_type", "") if fundamental else "",
                 "period_end": fundamental.get("period_end", "") if fundamental else "",

@@ -4,6 +4,7 @@ import csv
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -222,6 +223,81 @@ class P0P1CorrectnessTest(unittest.TestCase):
         self.assertIsNotNone(selected)
         self.assertEqual("101", selected["disclosure_number"])
         self.assertEqual("120", selected["operating_profit"])
+
+    def test_latest_fundamental_uses_disclosure_date_alias(self) -> None:
+        rows = [
+            {
+                "disclosure_date": "2026-02-01",
+                "available_time": "15:00",
+                "document_type": "FYFinancialStatements",
+                "period_end": "2025-12-31",
+                "disclosure_number": "100",
+                "operating_profit": "100",
+                "net_profit": "80",
+                "equity": "1000",
+                "total_assets": "2000",
+                "shares_outstanding": "100",
+            }
+        ]
+
+        selected = latest_fundamental(rows, date(2026, 2, 28))
+
+        self.assertIsNotNone(selected)
+        self.assertEqual("100", selected["disclosure_number"])
+
+    def test_walkforward_price_index_rejects_duplicate_code_date(self) -> None:
+        rows = [
+            {
+                "date": "2026-01-31",
+                "code": "1001",
+                "unadjusted_close": "100",
+                "adjusted_close": "100",
+            },
+            {
+                "date": "2026-01-31",
+                "code": "1001",
+                "unadjusted_close": "101",
+                "adjusted_close": "101",
+            },
+        ]
+
+        with self.assertRaisesRegex(ValueError, "Duplicate price rows"):
+            run_qvm_walkforward.build_price_index(rows)
+
+    def test_walkforward_price_index_requires_adjustment_factor_when_adjusted_missing(self) -> None:
+        rows = [
+            {
+                "date": "2026-01-31",
+                "code": "1001",
+                "unadjusted_close": "100",
+                "adjusted_close": "",
+                "adjustment_factor": "",
+            }
+        ]
+
+        with self.assertRaisesRegex(ValueError, "Missing adjusted_close requires positive adjustment_factor"):
+            run_qvm_walkforward.build_price_index(rows)
+
+    def test_walkforward_exit_index_rejects_conflicting_lifecycle_dates(self) -> None:
+        rows = [
+            {"code": "1001", "delisted_date": "2026-04-10", "last_trading_date": ""},
+            {"code": "1001", "delisted_date": "", "last_trading_date": "2026-03-30"},
+        ]
+
+        with self.assertRaisesRegex(ValueError, "Conflicting lifecycle exit dates"):
+            run_qvm_walkforward.build_delisting_index(rows)
+
+    def test_next_day_execution_modes_are_disabled_until_fill_date_accounting(self) -> None:
+        args = Namespace(
+            rebalance=None,
+            frequency="monthly",
+            execution_price="next_open",
+            cache_dir=None,
+            cache_format=None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "fill-date accounting"):
+            run_qvm_walkforward.normalize_args(args)
 
     def test_build_universe_uses_latest_listing_snapshot_as_of_rebalance(self) -> None:
         config = {

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from build_factors import BASE_FACTOR_FIELDS, build_factors, factor_output_fields
-from build_rebalance_price_universe_panel import optional_column, register_scan
+from build_rebalance_price_universe_panel import first_nonblank, optional_column, register_scan
 from build_scores import (
     FACTOR_GROUPS,
     GROUP_SCORE_FIELDS,
@@ -77,6 +77,32 @@ def text_date(value: Any, *, field_name: str) -> str:
 
 def unique_fields(fields: list[str]) -> list[str]:
     return list(dict.fromkeys(fields))
+
+
+def validate_unique_key_rows(rows: list[dict[str, Any]], key_fields: list[str], label: str) -> None:
+    seen: set[tuple[str, ...]] = set()
+    for row in rows:
+        key = tuple(str(row.get(field, "")) for field in key_fields)
+        if key in seen:
+            details = ";".join(f"{field}={value}" for field, value in zip(key_fields, key))
+            raise ValueError(f"Duplicate {label} rows for {details}.")
+        seen.add(key)
+
+
+def validate_unique_key_sql(connection: Any, table_name: str, key_columns: list[str], label: str) -> None:
+    keys = ", ".join(key_columns)
+    row = connection.execute(
+        f"""
+        select {keys}, count(*) as row_count
+        from {table_name}
+        group by {keys}
+        having count(*) > 1
+        limit 1
+        """
+    ).fetchone()
+    if row:
+        details = ";".join(f"{field}={row[index]}" for index, field in enumerate(key_columns))
+        raise ValueError(f"Duplicate {label} rows for {details}.")
 
 
 def pct_label(value: float) -> str:
@@ -286,6 +312,7 @@ def create_raw_panel_table(connection: Any, columns: set[str]) -> None:
     invalid = connection.execute("select count(*) from panel_norm where included_bool is null").fetchone()[0]
     if invalid:
         raise ValueError("Invalid included_flag in price/universe panel.")
+    validate_unique_key_sql(connection, "panel_norm", ["rebalance_date", "code"], "price/universe panel")
 
 
 def create_fundamental_table(connection: Any, columns: set[str]) -> None:
@@ -295,6 +322,7 @@ def create_fundamental_table(connection: Any, columns: set[str]) -> None:
     def text_col(name: str, default: str = "''") -> str:
         return f"{col(name, default)}::varchar"
 
+    available_date = f"try_cast(nullif({first_nonblank(columns, ['available_date', 'disclosure_date'])}::varchar, '') as date)"
     operating_profit = numeric_sql(text_col("operating_profit"))
     net_profit = numeric_sql(text_col("net_profit"))
     equity = numeric_sql(text_col("equity"))
@@ -306,7 +334,7 @@ def create_fundamental_table(connection: Any, columns: set[str]) -> None:
         create or replace temp table fundamentals_norm as
         select
           coalesce({text_col('code')}, '')::varchar as code,
-          try_cast(nullif({text_col('available_date')}, '') as date) as available_date,
+          {available_date} as available_date,
           coalesce({text_col('available_time')}, '')::varchar as available_time,
           coalesce({text_col('document_type')}, '')::varchar as document_type,
           coalesce({text_col('period_end')}, '')::varchar as period_end,
@@ -329,6 +357,12 @@ def create_fundamental_table(connection: Any, columns: set[str]) -> None:
         from raw_fundamentals
         where coalesce({text_col('code')}, '') <> ''
         """
+    )
+    validate_unique_key_sql(
+        connection,
+        "fundamentals_norm",
+        ["code", "available_date", "available_time", "period_end", "disclosure_number"],
+        "fundamentals",
     )
 
 
@@ -778,6 +812,7 @@ def build_factor_score_panel_rows(
         panel_rows = panel_rows_for_date(price_universe_panel_rows, rebalance_date)
         if not panel_rows:
             raise ValueError(f"No price/universe panel rows found for rebalance date {rebalance_date}.")
+        validate_unique_key_rows(panel_rows, ["rebalance_date", "code"], "price/universe panel")
         universe_rows = included_universe_rows(panel_rows)
         factor_rows = build_factors(
             rebalance_date=rebalance_date,
@@ -794,6 +829,8 @@ def build_factor_score_panel_rows(
         for raw_factor in raw_factors:
             if raw_factor not in all_raw_factors:
                 all_raw_factors.append(raw_factor)
+        validate_unique_key_rows(factor_rows, ["code"], "factor")
+        validate_unique_key_rows(score_rows, ["code"], "score")
         output_rows.extend(
             merge_panel_rows(
                 panel_rows=panel_rows,

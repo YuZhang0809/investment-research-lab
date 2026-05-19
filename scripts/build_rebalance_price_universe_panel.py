@@ -92,6 +92,22 @@ def first_nonblank(columns: set[str], names: list[str], default: str = "''") -> 
     return f"coalesce({', '.join([*expressions, default])})"
 
 
+def validate_unique_key(connection: Any, table_name: str, key_columns: list[str], label: str) -> None:
+    keys = ", ".join(key_columns)
+    row = connection.execute(
+        f"""
+        select {keys}, count(*) as row_count
+        from {table_name}
+        group by {keys}
+        having count(*) > 1
+        limit 1
+        """
+    ).fetchone()
+    if row:
+        details = ";".join(f"{field}={row[index]}" for index, field in enumerate(key_columns))
+        raise ValueError(f"Duplicate {label} rows for {details}.")
+
+
 def create_listings_table(connection: Any, columns: set[str]) -> None:
     source_date_expr = first_nonblank(columns, ["source_date", "snapshot_date"])
     connection.execute(
@@ -119,6 +135,7 @@ def create_listings_table(connection: Any, columns: set[str]) -> None:
         where coalesce({optional_column(columns, 'code')}, '') <> ''
         """
     )
+    validate_unique_key(connection, "listings_norm", ["source_date", "code"], "listing snapshot")
 
 
 def create_prices_table(connection: Any, columns: set[str]) -> None:
@@ -140,6 +157,22 @@ def create_prices_table(connection: Any, columns: set[str]) -> None:
           and try_cast(nullif({optional_column(columns, 'date')}, '') as date) is not null
         """
     )
+    validate_unique_key(connection, "prices_base", ["code", "price_date"], "price")
+    invalid_adjustment = connection.execute(
+        """
+        select code, price_date
+        from prices_base
+        where adjusted_close is null
+          and unadjusted_close is not null
+          and (adjustment_factor is null or adjustment_factor <= 0)
+        limit 1
+        """
+    ).fetchone()
+    if invalid_adjustment:
+        raise ValueError(
+            "Missing adjusted_close requires positive adjustment_factor "
+            f"for code={invalid_adjustment[0]};date={invalid_adjustment[1]}."
+        )
     connection.execute(
         """
         create or replace temp table prices_norm as
@@ -501,6 +534,7 @@ def build_panel_frame(
             order by lp.rebalance_date, lp.code
             """
         )
+        validate_unique_key(connection, "final_panel", ["rebalance_date", "code"], "price/universe panel")
         frame = connection.execute(f"select {', '.join(PANEL_FIELDS)} from final_panel").df()
         return frame.astype(object).where(frame.notna(), None)
 

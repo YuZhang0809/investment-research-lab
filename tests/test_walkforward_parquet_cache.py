@@ -779,6 +779,168 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
                     engine="duckdb",
                 )
 
+    def test_duckdb_factor_score_panel_rejects_duplicate_panel_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            price_panel = temp / "price_panel.parquet"
+            build_panel(
+                config=config,
+                listings_path=listings,
+                prices_path=prices,
+                fundamentals_path=fundamentals,
+                start_date="2026-01-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                input_format="csv",
+                out_path=price_panel,
+                output_format="parquet",
+            )
+            rows = read_csv(price_panel)
+            duplicate_panel = temp / "duplicate_price_panel.csv"
+            write_csv(duplicate_panel, [*rows, dict(rows[0])], list(rows[0].keys()))
+
+            with self.assertRaisesRegex(ValueError, "Duplicate price/universe panel rows"):
+                build_factor_score_panel(
+                    config=config,
+                    price_universe_panel_path=duplicate_panel,
+                    prices_path=prices,
+                    fundamentals_path=fundamentals,
+                    start_date="2026-01-01",
+                    end_date="2026-03-31",
+                    frequency="monthly",
+                    strategy_version="qvm",
+                    out_path=temp / "duplicate_factor_score.parquet",
+                    output_format="parquet",
+                    engine="duckdb",
+                )
+
+    def test_duckdb_factor_score_panel_rejects_duplicate_fundamental_tie(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            duplicate_fundamentals = temp / "duplicate_fundamentals.csv"
+            fundamental_rows = read_csv(fundamentals)
+            duplicate = dict(fundamental_rows[0])
+            duplicate["operating_profit"] = "999999999"
+            write_csv(duplicate_fundamentals, [*fundamental_rows, duplicate], list(fundamental_rows[0].keys()))
+
+            config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            price_panel = temp / "price_panel.parquet"
+            build_panel(
+                config=config,
+                listings_path=listings,
+                prices_path=prices,
+                fundamentals_path=duplicate_fundamentals,
+                start_date="2026-01-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                input_format="csv",
+                out_path=price_panel,
+                output_format="parquet",
+            )
+
+            with self.assertRaisesRegex(ValueError, "Duplicate fundamentals rows"):
+                build_factor_score_panel(
+                    config=config,
+                    price_universe_panel_path=price_panel,
+                    prices_path=prices,
+                    fundamentals_path=duplicate_fundamentals,
+                    start_date="2026-01-01",
+                    end_date="2026-03-31",
+                    frequency="monthly",
+                    strategy_version="qvm",
+                    out_path=temp / "duplicate_fundamental_tie.parquet",
+                    output_format="parquet",
+                    engine="duckdb",
+                )
+
+    def test_factor_score_walkforward_uses_panel_lifecycle_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            price_panel = temp / "price_panel.parquet"
+            factor_score_panel = temp / "factor_score_panel.parquet"
+            build_panel(
+                config=config,
+                listings_path=listings,
+                prices_path=prices,
+                fundamentals_path=fundamentals,
+                start_date="2026-01-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                input_format="csv",
+                out_path=price_panel,
+                output_format="parquet",
+            )
+            build_factor_score_panel(
+                config=config,
+                price_universe_panel_path=price_panel,
+                prices_path=prices,
+                fundamentals_path=fundamentals,
+                start_date="2026-01-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                strategy_version="qvm",
+                out_path=factor_score_panel,
+                output_format="parquet",
+                engine="duckdb",
+            )
+
+            listing_rows = read_csv(listings)
+            for row in listing_rows:
+                if row["code"] == "1003":
+                    row["delisted_date"] = ""
+                    row["last_trading_date"] = ""
+            listings_without_exit = temp / "listings_without_exit.csv"
+            listing_fields = list(dict.fromkeys(field for row in listing_rows for field in row))
+            write_csv(listings_without_exit, listing_rows, listing_fields)
+            out_dir = temp / "out"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "run_qvm_walkforward.py"),
+                    "--config",
+                    str(ROOT / "configs" / "qvm_v0_1.example.yml"),
+                    "--listings",
+                    str(listings_without_exit),
+                    "--prices",
+                    str(prices),
+                    "--fundamentals",
+                    str(fundamentals),
+                    "--start-date",
+                    "2026-01-01",
+                    "--end-date",
+                    "2026-03-31",
+                    "--rebalance",
+                    "monthly",
+                    "--target-holdings",
+                    "15",
+                    "--adv-cap",
+                    "0.005",
+                    "--out-dir",
+                    str(out_dir),
+                    "--report-dir",
+                    str(temp / "reports"),
+                    "--run-label",
+                    "panel_lifecycle",
+                    "--factor-score-panel",
+                    str(factor_score_panel),
+                    "--no-manifest",
+                    "--skip-stage-manifest",
+                ],
+                cwd=ROOT,
+                check=True,
+            )
+
+            failures = read_csv(out_dir / "qvm_walkforward_failure_cases_panel_lifecycle_202601_202603.csv")
+            self.assertIn(
+                ("1003", "assumed_delisting_loss"),
+                {(row["code"], row["failure_type"]) for row in failures},
+            )
+
     def test_duckdb_factor_score_panel_matches_legacy_with_comma_numeric_fundamentals(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

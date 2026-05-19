@@ -131,7 +131,27 @@ def parse_price_flag(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
 
 
+def validate_unique_key_rows(rows: list[dict[str, Any]], key_fields: list[str], label: str) -> None:
+    seen: set[tuple[str, ...]] = set()
+    for row in rows:
+        key = tuple(str(row.get(field, "")) for field in key_fields)
+        if key in seen:
+            details = ";".join(f"{field}={value}" for field, value in zip(key_fields, key))
+            raise ValueError(f"Duplicate {label} rows for {details}.")
+        seen.add(key)
+
+
 def build_price_index(price_rows: list[dict[str, str]]) -> dict[str, list[PricePoint]]:
+    seen_price_keys: set[tuple[str, date]] = set()
+    for row in price_rows:
+        code = (row.get("code") or "").strip()
+        row_date = parse_date(row.get("date"), field_name="prices.date")
+        if not code or row_date is None:
+            continue
+        key = (code, row_date)
+        if key in seen_price_keys:
+            raise ValueError(f"Duplicate price rows for code={code};date={row_date}.")
+        seen_price_keys.add(key)
     raw_grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
     for row in price_rows:
         code = row.get("code", "")
@@ -146,13 +166,18 @@ def build_price_index(price_rows: list[dict[str, str]]) -> dict[str, list[PriceP
         )
         cumulative_adjustment = 1.0
         for row in sorted_rows:
-            adjustment_factor = parse_float(row.get("adjustment_factor"), default=1.0) or 1.0
-            if adjustment_factor > 0:
-                cumulative_adjustment *= adjustment_factor
             row_date = parse_date(row.get("date"), field_name="prices.date")
             unadjusted_open = parse_float(row.get("unadjusted_open"))
             unadjusted = parse_float(row.get("unadjusted_close"))
             adjusted = parse_float(row.get("adjusted_close"))
+            adjustment_factor = parse_float(row.get("adjustment_factor"))
+            if adjusted is None and unadjusted is not None and (adjustment_factor is None or adjustment_factor <= 0):
+                raise ValueError(
+                    "Missing adjusted_close requires positive adjustment_factor "
+                    f"for code={code};date={row.get('date', '')}."
+                )
+            if adjustment_factor is not None and adjustment_factor > 0:
+                cumulative_adjustment *= adjustment_factor
             if adjusted is None and unadjusted is not None:
                 adjusted = unadjusted / cumulative_adjustment
             if not code or row_date is None or unadjusted is None or adjusted is None:
@@ -289,6 +314,12 @@ def build_delisting_index(listing_rows: list[dict[str, str]]) -> dict[str, date]
         delisted_date = parse_date(row.get("delisted_date"), field_name="listings.delisted_date")
         exit_date = last_trading_date or delisted_date
         if exit_date is not None:
+            existing = values.get(code)
+            if existing is not None and existing != exit_date:
+                raise ValueError(
+                    "Conflicting lifecycle exit dates "
+                    f"for code={code};existing={existing};new={exit_date}."
+                )
             values[code] = exit_date
     return values
 
@@ -640,6 +671,11 @@ def score_cache_fields(raw_factors: list[str]) -> list[str]:
 def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
     if args.rebalance:
         args.frequency = args.rebalance
+    if args.execution_price != "rebalance_close":
+        raise ValueError(
+            "next_open/next_close execution modes are disabled until fill-date accounting "
+            "marks holdings and equity on the execution date."
+        )
     if args.cache_dir is None and args.cache_format is not None:
         args.cache_dir = Path("data/processed/cache")
     if args.cache_dir is not None and args.cache_format is None:
@@ -864,6 +900,7 @@ def read_price_universe_panel_rows(args: argparse.Namespace) -> list[dict[str, s
     if not panel_path:
         raise ValueError("price/universe panel requested but --price-universe-panel is not set")
     rows = read_csv(panel_path)
+    validate_unique_key_rows(rows, ["rebalance_date", "code"], "price/universe panel")
     args._price_universe_panel_rows = rows
     return rows
 
@@ -916,6 +953,7 @@ def read_factor_score_panel_rows(args: argparse.Namespace) -> list[dict[str, str
     if not panel_path:
         raise ValueError("factor/score panel requested but --factor-score-panel is not set")
     rows = read_csv(panel_path)
+    validate_unique_key_rows(rows, ["rebalance_date", "code"], "factor/score panel")
     args._factor_score_panel_rows = rows
     return rows
 
@@ -961,6 +999,14 @@ def factor_score_panel_stage_rows(
         factor_rows.append({field: row.get(field, "") for field in factor_fields})
         score_rows.append({field: row.get(field, "") for field in score_fields})
     return universe_rows, factor_rows, score_rows, raw_factors
+
+
+def lifecycle_source_rows(args: argparse.Namespace, fallback_listing_rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    if getattr(args, "factor_score_panel", None):
+        return read_factor_score_panel_rows(args)
+    if getattr(args, "price_universe_panel", None):
+        return read_price_universe_panel_rows(args)
+    return fallback_listing_rows
 
 
 def run_cached_stages(args: argparse.Namespace, rebalance_date: date) -> tuple[Path, Path, Path]:
@@ -1319,7 +1365,8 @@ def main() -> int:
     args.prices = prices_path
     args.fundamentals = fundamentals_path
 
-    lifecycle_status = lifecycle_data_status(listing_rows_for_check)
+    lifecycle_rows_for_check = lifecycle_source_rows(args, listing_rows_for_check)
+    lifecycle_status = lifecycle_data_status(lifecycle_rows_for_check)
     conclusion_allowed = performance_conclusion_allowed(lifecycle_status)
     if lifecycle_status == "snapshot_only" and not args.allow_snapshot_listings:
         raise ValueError(
@@ -1328,7 +1375,7 @@ def main() -> int:
             "--allow-snapshot-listings for exploratory samples only."
         )
 
-    delisting_dates = build_delisting_index(listing_rows_for_check)
+    delisting_dates = build_delisting_index(lifecycle_rows_for_check)
     price_index = build_price_index(price_rows)
     price_calendar = all_price_dates(price_index)
     dates = rebalance_dates(price_calendar, start_date, end_date, args.frequency)
