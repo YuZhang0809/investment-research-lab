@@ -738,6 +738,130 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
                     engine="duckdb",
                 )
 
+    def test_duckdb_factor_score_panel_requires_complete_rebalance_dates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            price_panel = temp / "price_panel.parquet"
+            build_panel(
+                config=config,
+                listings_path=listings,
+                prices_path=prices,
+                fundamentals_path=fundamentals,
+                start_date="2026-01-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                input_format="csv",
+                out_path=price_panel,
+                output_format="parquet",
+            )
+            panel_rows = read_csv(price_panel)
+            pruned_panel = temp / "pruned_price_panel.csv"
+            write_csv(
+                pruned_panel,
+                [row for row in panel_rows if row["rebalance_date"] != "2026-02-27"],
+                list(panel_rows[0].keys()),
+            )
+
+            with self.assertRaisesRegex(ValueError, "No price/universe panel rows found for rebalance date 2026-02-27"):
+                build_factor_score_panel(
+                    config=config,
+                    price_universe_panel_path=pruned_panel,
+                    prices_path=prices,
+                    fundamentals_path=fundamentals,
+                    start_date="2026-01-01",
+                    end_date="2026-03-31",
+                    frequency="monthly",
+                    strategy_version="qvm",
+                    out_path=temp / "duckdb_missing_rebalance.parquet",
+                    output_format="parquet",
+                    engine="duckdb",
+                )
+
+    def test_duckdb_factor_score_panel_matches_legacy_with_comma_numeric_fundamentals(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            comma_fundamentals = temp / "comma_fundamentals.csv"
+            fundamental_rows = read_csv(fundamentals)
+            numeric_fields = [
+                "operating_profit",
+                "net_profit",
+                "equity",
+                "total_assets",
+                "shares_outstanding",
+            ]
+            for row in fundamental_rows:
+                for field in numeric_fields:
+                    row[field] = f"{int(float(row[field])):,}"
+            write_csv(comma_fundamentals, fundamental_rows, list(fundamental_rows[0].keys()))
+
+            config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            price_panel = temp / "price_panel.parquet"
+            build_panel(
+                config=config,
+                listings_path=listings,
+                prices_path=prices,
+                fundamentals_path=comma_fundamentals,
+                start_date="2026-01-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                input_format="csv",
+                out_path=price_panel,
+                output_format="parquet",
+            )
+            legacy_panel = temp / "legacy_comma.parquet"
+            duckdb_panel = temp / "duckdb_comma.parquet"
+            build_factor_score_panel(
+                config=config,
+                price_universe_panel_path=price_panel,
+                prices_path=prices,
+                fundamentals_path=comma_fundamentals,
+                start_date="2026-01-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                strategy_version="qvm",
+                out_path=legacy_panel,
+                output_format="parquet",
+            )
+            build_factor_score_panel(
+                config=config,
+                price_universe_panel_path=price_panel,
+                prices_path=prices,
+                fundamentals_path=comma_fundamentals,
+                start_date="2026-01-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                strategy_version="qvm",
+                out_path=duckdb_panel,
+                output_format="parquet",
+                engine="duckdb",
+            )
+            assert_panel_fields_match(
+                self,
+                read_csv(legacy_panel),
+                read_csv(duckdb_panel),
+                [
+                    "rebalance_date",
+                    "code",
+                    "rank",
+                    "candidate_rank",
+                    "operating_profit",
+                    "net_profit",
+                    "equity",
+                    "total_assets",
+                    "shares",
+                    "operating_profit_to_total_assets",
+                    "earnings_yield",
+                    "book_to_market",
+                    "quality_score",
+                    "value_score",
+                    "composite_score",
+                    "qvm_score",
+                ],
+            )
+
     def test_cache_namespace_changes_when_config_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

@@ -80,6 +80,10 @@ def pct_label(value: float) -> str:
     return f"{value:g}"
 
 
+def numeric_sql(expression: str) -> str:
+    return f"try_cast(nullif(replace({expression}::varchar, ',', ''), '') as double)"
+
+
 def read_rows(path: Path, input_format: str) -> list[dict[str, str]]:
     if input_format == "auto":
         return read_csv(path)
@@ -288,6 +292,12 @@ def create_fundamental_table(connection: Any, columns: set[str]) -> None:
     def text_col(name: str, default: str = "''") -> str:
         return f"{col(name, default)}::varchar"
 
+    operating_profit = numeric_sql(text_col("operating_profit"))
+    net_profit = numeric_sql(text_col("net_profit"))
+    equity = numeric_sql(text_col("equity"))
+    total_assets = numeric_sql(text_col("total_assets"))
+    shares_outstanding = numeric_sql(text_col("shares_outstanding"))
+    avg_shares = numeric_sql(text_col("avg_shares"))
     connection.execute(
         f"""
         create or replace temp table fundamentals_norm as
@@ -298,18 +308,18 @@ def create_fundamental_table(connection: Any, columns: set[str]) -> None:
           coalesce({text_col('document_type')}, '')::varchar as document_type,
           coalesce({text_col('period_end')}, '')::varchar as period_end,
           coalesce({text_col('disclosure_number')}, '')::varchar as disclosure_number,
-          try_cast(nullif({text_col('operating_profit')}, '') as double) as operating_profit,
-          try_cast(nullif({text_col('net_profit')}, '') as double) as net_profit,
-          try_cast(nullif({text_col('equity')}, '') as double) as equity,
-          try_cast(nullif({text_col('total_assets')}, '') as double) as total_assets,
-          try_cast(nullif(coalesce(nullif({text_col('shares_outstanding')}, ''), nullif({text_col('avg_shares')}, '')), '') as double) as shares,
+          {operating_profit} as operating_profit,
+          {net_profit} as net_profit,
+          {equity} as equity,
+          {total_assets} as total_assets,
+          coalesce({shares_outstanding}, {avg_shares}) as shares,
           case
-            when try_cast(nullif({text_col('operating_profit')}, '') as double) is not null
-              or try_cast(nullif({text_col('net_profit')}, '') as double) is not null
-              or try_cast(nullif({text_col('equity')}, '') as double) is not null
-              or try_cast(nullif({text_col('total_assets')}, '') as double) is not null
-              or try_cast(nullif({text_col('shares_outstanding')}, '') as double) is not null
-              or try_cast(nullif({text_col('avg_shares')}, '') as double) is not null
+            when {operating_profit} is not null
+              or {net_profit} is not null
+              or {equity} is not null
+              or {total_assets} is not null
+              or {shares_outstanding} is not null
+              or {avg_shares} is not null
             then true
             else false
           end as useful
@@ -389,10 +399,70 @@ def apply_duckdb_filters(connection: Any, filters: list[dict[str, Any]]) -> None
         raise ValueError(f"Unsupported filter rule: {rule}")
 
 
+def create_expected_rebalance_dates_table(
+    connection: Any,
+    columns: set[str],
+    start_date: date,
+    end_date: date,
+    frequency: str,
+) -> None:
+    def col(name: str, default: str = "''") -> str:
+        return optional_column(columns, name, default)
+
+    price_date = f"try_cast(nullif({col('date')}::varchar, '') as date)"
+    month_filter = "where month(rebalance_date) in (3, 6, 9, 12)" if frequency == "quarterly" else ""
+    connection.execute(
+        f"""
+        create or replace temp table expected_rebalance_dates as
+        with trading_days as (
+          select distinct {price_date} as price_date
+          from raw_prices
+          where {price_date} between ?::date and ?::date
+        ),
+        monthly_dates as (
+          select max(price_date) as rebalance_date
+          from trading_days
+          group by strftime(price_date, '%Y-%m')
+        )
+        select rebalance_date
+        from monthly_dates
+        {month_filter}
+        order by rebalance_date
+        """,
+        [start_date.isoformat(), end_date.isoformat()],
+    )
+
+
+def validate_panel_rebalance_dates(connection: Any) -> None:
+    expected_dates = [
+        str(row[0])
+        for row in connection.execute(
+            "select rebalance_date::varchar from expected_rebalance_dates order by rebalance_date"
+        ).fetchall()
+    ]
+    if not expected_dates:
+        raise ValueError("No rebalance dates found in price file for the requested window.")
+    panel_dates = [
+        str(row[0])
+        for row in connection.execute(
+            "select distinct rebalance_date::varchar from panel_scope order by rebalance_date"
+        ).fetchall()
+    ]
+    expected_set = set(expected_dates)
+    panel_set = set(panel_dates)
+    missing = sorted(expected_set - panel_set)
+    if missing:
+        raise ValueError(f"No price/universe panel rows found for rebalance date {missing[0]}.")
+    unexpected = sorted(panel_set - expected_set)
+    if unexpected:
+        raise ValueError(f"Unexpected price/universe panel rebalance date {unexpected[0]}.")
+
+
 def build_duckdb_factor_score_frame(
     *,
     config: dict[str, Any],
     price_universe_panel_path: Path,
+    prices_path: Path,
     fundamentals_path: Path,
     start_date: date,
     end_date: date,
@@ -414,8 +484,10 @@ def build_duckdb_factor_score_frame(
     duckdb = require_duckdb()
     with duckdb.connect(database=":memory:") as connection:
         panel_columns = register_scan(connection, "raw_price_universe_panel", price_universe_panel_path, input_format)
+        price_columns = register_scan(connection, "raw_prices", prices_path, input_format)
         fundamental_columns = register_scan(connection, "raw_fundamentals", fundamentals_path, input_format)
         create_raw_panel_table(connection, panel_columns)
+        create_expected_rebalance_dates_table(connection, price_columns, start_date, end_date, frequency)
         create_fundamental_table(connection, fundamental_columns)
 
         month_filter = "and month(rebalance_date) in (3, 6, 9, 12)" if frequency == "quarterly" else ""
@@ -429,11 +501,14 @@ def build_duckdb_factor_score_frame(
             """,
             [start_date.isoformat(), end_date.isoformat()],
         )
-        if connection.execute("select count(*) from panel_scope").fetchone()[0] == 0:
-            raise ValueError("No price/universe panel rows found for the requested window.")
+        validate_panel_rebalance_dates(connection)
 
+        latest_unadjusted_close = numeric_sql("p.latest_unadjusted_close")
+        adjusted_close = numeric_sql("p.adjusted_close")
+        return_12_1 = numeric_sql("p.return_12_1")
+        return_6_1 = numeric_sql("p.return_6_1")
         connection.execute(
-            """
+            f"""
             create or replace temp table selected_fundamentals as
             select *
             from (
@@ -456,7 +531,7 @@ def build_duckdb_factor_score_frame(
             """
         )
         connection.execute(
-            """
+            f"""
             create or replace temp table factor_base as
             select
               p.rebalance_date,
@@ -465,7 +540,7 @@ def build_duckdb_factor_score_frame(
               p.market,
               p.sector,
               p.latest_price_date as price_date,
-              try_cast(nullif(p.latest_unadjusted_close, '') as double) as latest_unadjusted_close,
+              {latest_unadjusted_close} as latest_unadjusted_close,
               sf.available_date as fundamentals_available_date,
               sf.available_time as fundamentals_available_time,
               sf.document_type,
@@ -477,11 +552,9 @@ def build_duckdb_factor_score_frame(
               sf.total_assets,
               sf.shares,
               case
-                when coalesce(nullif(try_cast(nullif(p.latest_unadjusted_close, '') as double), 0),
-                              try_cast(nullif(p.adjusted_close, '') as double)) is not null
+                when coalesce(nullif({latest_unadjusted_close}, 0), {adjusted_close}) is not null
                   and sf.shares is not null
-                then coalesce(nullif(try_cast(nullif(p.latest_unadjusted_close, '') as double), 0),
-                              try_cast(nullif(p.adjusted_close, '') as double)) * sf.shares
+                then coalesce(nullif({latest_unadjusted_close}, 0), {adjusted_close}) * sf.shares
                 else null
               end as market_cap,
               case when sf.operating_profit is null or sf.total_assets is null or sf.total_assets = 0
@@ -496,8 +569,8 @@ def build_duckdb_factor_score_frame(
                 when sf.equity is null or market_cap is null or market_cap = 0
                 then null else sf.equity / market_cap
               end as book_to_market,
-              try_cast(nullif(p.return_12_1, '') as double) as return_12_1,
-              try_cast(nullif(p.return_6_1, '') as double) as return_6_1
+              {return_12_1} as return_12_1,
+              {return_6_1} as return_6_1
             from panel_scope p
             left join selected_fundamentals sf
               on sf.rebalance_date = p.rebalance_date and sf.panel_code = p.code
@@ -769,6 +842,7 @@ def build_factor_score_panel(
         frame, raw_factors = build_duckdb_factor_score_frame(
             config=config,
             price_universe_panel_path=price_universe_panel_path,
+            prices_path=prices_path,
             fundamentals_path=fundamentals_path,
             start_date=parsed_start,
             end_date=parsed_end,
