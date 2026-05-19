@@ -88,6 +88,11 @@ portfolio:
   hold_rule:
     rank_top_pct: 20
     rank_top_n: 100
+  sector_cap:
+    enabled: false
+    group_field: sector
+    mode: name_count
+    max_names_per_group: 9
   max_single_name_weight: 0.1
   report_sector_exposure: true
 

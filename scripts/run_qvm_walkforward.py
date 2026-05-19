@@ -52,6 +52,34 @@ class MarketBenchmarkPoint:
     value: float
 
 
+@dataclass
+class SectorCapConfig:
+    enabled: bool = False
+    mode: str = "disabled"
+    group_field: str = "sector"
+    max_names_per_group: int | None = None
+    max_sector_weight: float | None = None
+
+
+@dataclass
+class SectorCapBlockedCandidate:
+    code: str
+    group: str
+    rank: int
+    phase: str
+
+
+@dataclass
+class SelectionResult:
+    selected_codes: list[str]
+    research_codes: list[str]
+    target_count: int
+    sector_cap: SectorCapConfig
+    blocked_candidates: list[SectorCapBlockedCandidate]
+    unfilled_slots: int
+    selected_group_counts: dict[str, int]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run QVM walk-forward rebalance loop.")
     parser.add_argument("--config", type=Path, default=Path("configs/qvm_v0_1.example.yml"))
@@ -65,6 +93,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--strategy-version", choices=STRATEGY_VERSION_CHOICES, default="qvm")
     parser.add_argument("--target-holdings", type=int, help="Override executable target holdings min/max.")
     parser.add_argument("--adv-cap", type=float, help="Override max order value as a fraction of median ADV.")
+    parser.add_argument("--sector-cap-mode", choices=["name_count", "target_weight"], help="Override portfolio sector cap mode.")
+    parser.add_argument("--sector-cap-group-field", help="Override portfolio sector cap grouping field, default sector.")
+    parser.add_argument("--max-names-per-sector", type=int, help="Override name-count sector cap limit.")
+    parser.add_argument("--max-sector-weight", type=float, help="Override target-weight sector cap limit.")
     parser.add_argument(
         "--execution-price",
         choices=["rebalance_close", "next_open", "next_close"],
@@ -506,19 +538,76 @@ def money(value: float | None) -> str:
     return f"JPY {value:,.0f}"
 
 
-def select_codes(
+def sector_cap_config(config: dict[str, Any]) -> SectorCapConfig:
+    raw = (config.get("portfolio", {}) or {}).get("sector_cap", {}) or {}
+    enabled = bool(parse_bool(raw.get("enabled"), default=False))
+    if not enabled:
+        return SectorCapConfig()
+    mode = str(raw.get("mode") or "name_count").strip()
+    group_field = str(raw.get("group_field") or "sector").strip() or "sector"
+    if mode == "name_count":
+        max_names = parse_int(raw.get("max_names_per_group"))
+        if max_names is None or max_names < 1:
+            raise ValueError("portfolio.sector_cap.max_names_per_group must be a positive integer.")
+        return SectorCapConfig(
+            enabled=True,
+            mode=mode,
+            group_field=group_field,
+            max_names_per_group=max_names,
+        )
+    if mode == "target_weight":
+        max_weight = parse_float(raw.get("max_sector_weight"))
+        if max_weight is None or max_weight <= 0 or max_weight > 1:
+            raise ValueError("portfolio.sector_cap.max_sector_weight must be in (0, 1].")
+        raise ValueError("portfolio.sector_cap mode target_weight is not implemented yet. Use mode: name_count.")
+    raise ValueError(f"Unsupported portfolio.sector_cap.mode: {mode}")
+
+
+def sector_cap_limit_value(cap: SectorCapConfig) -> str:
+    if not cap.enabled:
+        return ""
+    if cap.mode == "name_count":
+        return str(cap.max_names_per_group or "")
+    if cap.mode == "target_weight":
+        return str(cap.max_sector_weight or "")
+    return ""
+
+
+def security_group(row: dict[str, Any] | None, group_field: str) -> str:
+    value = (row or {}).get(group_field, "")
+    text = str(value or "").strip()
+    return text or "UNKNOWN"
+
+
+def security_group_for_code(
+    code: str,
+    *,
+    cap: SectorCapConfig,
+    row_by_code: dict[str, dict[str, Any]],
+    universe_by_code: dict[str, dict[str, Any]],
+) -> str:
+    universe_row = universe_by_code.get(code, {})
+    if cap.group_field in universe_row:
+        return security_group(universe_row, cap.group_field)
+    return security_group(row_by_code.get(code), cap.group_field)
+
+
+def select_codes_detailed(
     scores: list[dict[str, str]],
     holdings: dict[str, float],
     config: dict[str, Any],
-) -> tuple[list[str], list[str]]:
+    universe_by_code: dict[str, dict[str, Any]] | None = None,
+) -> SelectionResult:
     ranked = sorted(
         [row for row in scores if parse_int(row.get("rank")) is not None],
         key=lambda row: parse_int(row.get("rank"), default=999999) or 999999,
     )
     rank_by_code = {row["code"]: parse_int(row.get("rank"), default=999999) or 999999 for row in ranked}
+    row_by_code = {row["code"]: row for row in ranked}
     universe_count = len(ranked)
+    cap = sector_cap_config(config)
     if not ranked:
-        return [], []
+        return SelectionResult([], [], 0, cap, [], 0, {})
 
     executable_config = config["portfolio"].get("executable_portfolio", {})
     target_count = min(int(executable_config.get("target_holdings_max", 30)), universe_count)
@@ -529,22 +618,99 @@ def select_codes(
     buy_limit = rank_rule_limit(universe_count, buy_rule, default_pct=10.0, default_n=50)
     hold_limit = rank_rule_limit(universe_count, hold_rule, default_pct=20.0, default_n=100)
 
+    research_codes = [row["code"] for row in ranked[:target_count]]
     kept = [code for code, shares in holdings.items() if shares > 0 and rank_by_code.get(code, 999999) <= hold_limit]
     kept.sort(key=lambda code: rank_by_code.get(code, 999999))
-    selected = list(kept[:target_count])
-    selected_set = set(selected)
+    if not cap.enabled:
+        selected = list(kept[:target_count])
+        selected_set = set(selected)
+        for row in ranked[:buy_limit]:
+            code = row["code"]
+            if code in selected_set:
+                continue
+            selected.append(code)
+            selected_set.add(code)
+            if len(selected) >= target_count:
+                break
+        return SelectionResult(
+            selected_codes=selected,
+            research_codes=research_codes,
+            target_count=target_count,
+            sector_cap=cap,
+            blocked_candidates=[],
+            unfilled_slots=0,
+            selected_group_counts={},
+        )
+
+    selected: list[str] = []
+    selected_set: set[str] = set()
+    group_counts: dict[str, int] = defaultdict(int)
+    blocked: list[SectorCapBlockedCandidate] = []
+    dropped_held_codes: set[str] = set()
+    universe_by_code = universe_by_code or {}
+
+    def can_add(code: str) -> tuple[bool, str]:
+        group = security_group_for_code(
+            code,
+            cap=cap,
+            row_by_code=row_by_code,
+            universe_by_code=universe_by_code,
+        )
+        if cap.mode == "name_count" and group_counts[group] >= int(cap.max_names_per_group or 0):
+            return False, group
+        return True, group
+
+    def add_code(code: str, group: str) -> None:
+        selected.append(code)
+        selected_set.add(code)
+        group_counts[group] += 1
+
+    for code in kept:
+        if len(selected) >= target_count:
+            break
+        allowed, group = can_add(code)
+        if allowed:
+            add_code(code, group)
+        else:
+            blocked.append(SectorCapBlockedCandidate(code, group, rank_by_code.get(code, 999999), "hold"))
+            dropped_held_codes.add(code)
 
     for row in ranked[:buy_limit]:
         code = row["code"]
+        if code in dropped_held_codes:
+            continue
         if code in selected_set:
             continue
-        selected.append(code)
-        selected_set.add(code)
+        if len(selected) >= target_count:
+            break
+        allowed, group = can_add(code)
+        if not allowed:
+            blocked.append(SectorCapBlockedCandidate(code, group, rank_by_code.get(code, 999999), "buy"))
+            continue
+        add_code(code, group)
         if len(selected) >= target_count:
             break
 
-    research_codes = [row["code"] for row in ranked[:target_count]]
-    return selected, research_codes
+    unfilled_slots = max(target_count - len(selected), 0) if blocked else 0
+    return SelectionResult(
+        selected_codes=selected,
+        research_codes=research_codes,
+        target_count=target_count,
+        sector_cap=cap,
+        blocked_candidates=blocked,
+        unfilled_slots=unfilled_slots,
+        selected_group_counts=dict(group_counts),
+    )
+
+
+def select_codes(
+    scores: list[dict[str, str]],
+    holdings: dict[str, float],
+    config: dict[str, Any],
+    universe_by_code: dict[str, dict[str, Any]] | None = None,
+) -> tuple[list[str], list[str]]:
+    result = select_codes_detailed(scores, holdings, config, universe_by_code)
+    return result.selected_codes, result.research_codes
 
 
 def rank_rule_limit(
@@ -579,6 +745,127 @@ def build_targets(
         lot = parse_int(universe.get("lot_size"), default=100) or 100
         targets[code] = floor_lot(target_value, point.unadjusted_close, lot)
     return targets
+
+
+def sector_cap_failure_rows(rebalance_date: date, result: SelectionResult) -> list[dict[str, Any]]:
+    if not result.sector_cap.enabled:
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in result.blocked_candidates:
+        rows.append(
+            {
+                "date": rebalance_date,
+                "code": item.code,
+                "failure_type": "sector_cap_blocked_candidate",
+                "detail": (
+                    f"mode={result.sector_cap.mode};group_field={result.sector_cap.group_field};"
+                    f"group={item.group};rank={item.rank};phase={item.phase};"
+                    f"limit={sector_cap_limit_value(result.sector_cap)}"
+                ),
+                "value": item.rank,
+            }
+        )
+    if result.unfilled_slots:
+        rows.append(
+            {
+                "date": rebalance_date,
+                "code": "",
+                "failure_type": "sector_cap_unfilled_target",
+                "detail": (
+                    f"target_count={result.target_count};selected_count={len(result.selected_codes)};"
+                    f"unfilled_slots={result.unfilled_slots};limit={sector_cap_limit_value(result.sector_cap)}"
+                ),
+                "value": result.unfilled_slots,
+            }
+        )
+    return rows
+
+
+def sector_exposure_rows(
+    *,
+    rebalance_date: date,
+    result: SelectionResult,
+    targets: dict[str, int],
+    holdings: dict[str, float],
+    universe_by_code: dict[str, dict[str, str]],
+    price_index: dict[str, list[PricePoint]],
+    pre_equity: float,
+    after_equity: float,
+) -> tuple[list[dict[str, Any]], float, float, int, list[dict[str, Any]]]:
+    cap = result.sector_cap
+    if not cap.enabled:
+        return [], 0.0, 0.0, 0, []
+
+    groups = sorted(
+        {
+            security_group(universe_by_code.get(code), cap.group_field)
+            for code in set(result.selected_codes) | set(targets) | set(holdings)
+        }
+    )
+    selected_count_by_group: dict[str, int] = defaultdict(int)
+    target_value_by_group: dict[str, float] = defaultdict(float)
+    actual_value_by_group: dict[str, float] = defaultdict(float)
+    actual_count_by_group: dict[str, int] = defaultdict(int)
+
+    for code in result.selected_codes:
+        selected_count_by_group[security_group(universe_by_code.get(code), cap.group_field)] += 1
+    for code, shares in targets.items():
+        point = price_on_date(price_index, code, rebalance_date)
+        if not point:
+            continue
+        target_value_by_group[security_group(universe_by_code.get(code), cap.group_field)] += shares * point.unadjusted_close
+    for code, adjusted_shares in holdings.items():
+        point = price_at(price_index, code, rebalance_date)
+        if not point:
+            continue
+        group = security_group(universe_by_code.get(code), cap.group_field)
+        actual_value_by_group[group] += position_value(adjusted_shares, point)
+        actual_count_by_group[group] += 1
+
+    max_selected_weight = (
+        max((count / len(result.selected_codes) for count in selected_count_by_group.values()), default=0.0)
+        if result.selected_codes
+        else 0.0
+    )
+    max_actual_weight = (
+        max((value / after_equity for value in actual_value_by_group.values()), default=0.0)
+        if after_equity
+        else 0.0
+    )
+    cap_limit = parse_int(cap.max_names_per_group) if cap.mode == "name_count" else None
+    violation_rows: list[dict[str, Any]] = []
+    exposure_rows: list[dict[str, Any]] = []
+    violation_count = 0
+    for group in groups:
+        selected_count = selected_count_by_group.get(group, 0)
+        actual_count = actual_count_by_group.get(group, 0)
+        violation = max(actual_count - int(cap_limit or 0), 0) if cap_limit else 0
+        if violation:
+            violation_count += 1
+            violation_rows.append(
+                {
+                    "date": rebalance_date,
+                    "code": "",
+                    "failure_type": "sector_cap_actual_violation",
+                    "detail": (
+                        f"mode={cap.mode};group_field={cap.group_field};group={group};"
+                        f"actual_count={actual_count};limit={cap_limit};violation={violation}"
+                    ),
+                    "value": violation,
+                }
+            )
+        exposure_rows.append(
+            {
+                "date": rebalance_date,
+                "group": group,
+                "selected_count": selected_count,
+                "target_weight": target_value_by_group.get(group, 0.0) / pre_equity if pre_equity else 0,
+                "actual_weight": actual_value_by_group.get(group, 0.0) / after_equity if after_equity else 0,
+                "cap_limit": sector_cap_limit_value(cap),
+                "violation": violation,
+            }
+        )
+    return exposure_rows, max_selected_weight, max_actual_weight, violation_count, violation_rows
 
 
 def consume_lots(lots: list[dict[str, float]], adjusted_shares_to_sell: float) -> float:
@@ -691,6 +978,26 @@ def apply_config_overrides(config: dict[str, Any], args: argparse.Namespace) -> 
         executable["target_holdings_max"] = args.target_holdings
     if args.adv_cap is not None:
         updated.setdefault("execution", {})["max_order_to_median_trading_value"] = args.adv_cap
+    if (
+        args.sector_cap_mode is not None
+        or args.sector_cap_group_field is not None
+        or args.max_names_per_sector is not None
+        or args.max_sector_weight is not None
+    ):
+        sector_cap = updated.setdefault("portfolio", {}).setdefault("sector_cap", {})
+        sector_cap["enabled"] = True
+        if args.sector_cap_mode is not None:
+            sector_cap["mode"] = args.sector_cap_mode
+        if args.sector_cap_group_field is not None:
+            sector_cap["group_field"] = args.sector_cap_group_field
+        if args.max_names_per_sector is not None:
+            if args.sector_cap_mode is None:
+                sector_cap["mode"] = "name_count"
+            sector_cap["max_names_per_group"] = args.max_names_per_sector
+        if args.max_sector_weight is not None:
+            if args.sector_cap_mode is None:
+                sector_cap["mode"] = "target_weight"
+            sector_cap["max_sector_weight"] = args.max_sector_weight
     return updated
 
 
@@ -1282,6 +1589,10 @@ def write_report(path: Path, summary_rows: list[dict[str, Any]], initial_capital
             f"| strict rebalance price filter | {first.get('strict_rebalance_price_filter', '')} |",
             f"| missing price tail policy | {first.get('missing_price_tail_policy', '')} |",
             f"| missing price tail max stale days | {first.get('missing_price_tail_max_stale_days', '')} |",
+            f"| sector cap enabled | {first.get('sector_cap_enabled', '')} |",
+            f"| sector cap mode | {first.get('sector_cap_mode', '')} |",
+            f"| sector cap group field | {first.get('sector_cap_group_field', '')} |",
+            f"| sector cap limit | {first.get('sector_cap_limit', '')} |",
             f"| market benchmark | {first.get('market_benchmark_id', '')} |",
             "",
         ]
@@ -1326,6 +1637,11 @@ def write_report(path: Path, summary_rows: list[dict[str, Any]], initial_capital
         f"| date | {final['rebalance_date']} |",
         f"| universe count | {final['universe_count']} |",
         f"| selected count | {final['selected_count']} |",
+        f"| sector cap blocked candidates | {final.get('sector_cap_blocked_candidates', '')} |",
+        f"| sector cap unfilled slots | {final.get('sector_cap_unfilled_slots', '')} |",
+        f"| max selected sector weight | {pct(parse_float(final.get('max_sector_weight_selected'), default=0) or 0)} |",
+        f"| max actual sector weight | {pct(parse_float(final.get('max_sector_weight_actual'), default=0) or 0)} |",
+        f"| sector cap violations | {final.get('sector_cap_violation_count', '')} |",
         f"| zero-lot targets | {final['zero_lot_targets']} |",
         f"| holdings count | {final['holdings_count']} |",
         f"| cash | {money(float(final['cash']))} |",
@@ -1413,6 +1729,7 @@ def main() -> int:
     holdings_rows: list[dict[str, Any]] = []
     summary_rows: list[dict[str, Any]] = []
     equity_rows: list[dict[str, Any]] = []
+    sector_exposure_output_rows: list[dict[str, Any]] = []
     warned_price_tail_gaps: set[tuple[str, date]] = set()
 
     for rebalance_date in dates:
@@ -1552,7 +1869,10 @@ def main() -> int:
             holdings_value += position_value(adjusted_shares, point)
         pre_equity = cash + holdings_value
 
-        selected_codes, research_codes = select_codes(scores, holdings, config)
+        selection = select_codes_detailed(scores, holdings, config, universe_by_code)
+        selected_codes = selection.selected_codes
+        research_codes = selection.research_codes
+        failure_rows.extend(sector_cap_failure_rows(rebalance_date, selection))
         targets = build_targets(selected_codes, universe_by_code, price_index, rebalance_date, pre_equity)
         write_rebalance_candidates_cache(
             args,
@@ -1777,6 +2097,24 @@ def main() -> int:
             for scenario in ["optimistic", "base", "pessimistic"]
         }
         after_tax_taxable_equity = after_equity - cumulative_tax
+        (
+            current_sector_exposure_rows,
+            max_sector_weight_selected,
+            max_sector_weight_actual,
+            sector_cap_violation_count,
+            sector_cap_violation_rows,
+        ) = sector_exposure_rows(
+            rebalance_date=rebalance_date,
+            result=selection,
+            targets=targets,
+            holdings=holdings,
+            universe_by_code=universe_by_code,
+            price_index=price_index,
+            pre_equity=pre_equity,
+            after_equity=after_equity,
+        )
+        sector_exposure_output_rows.extend(current_sector_exposure_rows)
+        failure_rows.extend(sector_cap_violation_rows)
         for code, adjusted_shares in sorted(holdings.items()):
             point = price_at(price_index, code, rebalance_date)
             if not point:
@@ -1822,6 +2160,15 @@ def main() -> int:
             "strict_rebalance_price_filter": config["universe"].get("strict_rebalance_price_filter", False),
             "missing_price_tail_policy": tail_gap_mode,
             "missing_price_tail_max_stale_days": tail_gap_max_stale_days,
+            "sector_cap_enabled": selection.sector_cap.enabled,
+            "sector_cap_mode": selection.sector_cap.mode if selection.sector_cap.enabled else "",
+            "sector_cap_group_field": selection.sector_cap.group_field if selection.sector_cap.enabled else "",
+            "sector_cap_limit": sector_cap_limit_value(selection.sector_cap),
+            "sector_cap_blocked_candidates": len(selection.blocked_candidates),
+            "sector_cap_unfilled_slots": selection.unfilled_slots,
+            "max_sector_weight_selected": max_sector_weight_selected,
+            "max_sector_weight_actual": max_sector_weight_actual,
+            "sector_cap_violation_count": sector_cap_violation_count,
             "universe_count": len(universe_rows),
             "selected_count": len(selected_codes),
             "zero_lot_targets": zero_lot_targets,
@@ -1882,6 +2229,11 @@ def main() -> int:
         parameter_label.append(f"target{args.target_holdings}")
     if args.adv_cap is not None:
         parameter_label.append(f"adv{str(args.adv_cap).replace('.', 'p')}")
+    label_sector_cap = sector_cap_config(config)
+    if label_sector_cap.enabled and label_sector_cap.mode == "name_count":
+        parameter_label.append(
+            f"sectorcap{label_sector_cap.group_field}{label_sector_cap.max_names_per_group}"
+        )
     default_label_parts = [
         args.strategy_version,
         args.frequency,
@@ -1897,6 +2249,7 @@ def main() -> int:
     holdings_path = args.out_dir / f"qvm_walkforward_holdings_{token}.csv"
     equity_path = args.out_dir / f"qvm_walkforward_equity_{token}.csv"
     failures_path = args.out_dir / f"qvm_walkforward_failure_cases_{token}.csv"
+    sector_exposure_path = args.out_dir / f"qvm_walkforward_sector_exposure_{token}.csv"
     report_path = args.report_dir / f"qvm_walkforward_{token}.md"
 
     write_csv(
@@ -1918,6 +2271,15 @@ def main() -> int:
             "strict_rebalance_price_filter",
             "missing_price_tail_policy",
             "missing_price_tail_max_stale_days",
+            "sector_cap_enabled",
+            "sector_cap_mode",
+            "sector_cap_group_field",
+            "sector_cap_limit",
+            "sector_cap_blocked_candidates",
+            "sector_cap_unfilled_slots",
+            "max_sector_weight_selected",
+            "max_sector_weight_actual",
+            "sector_cap_violation_count",
             "universe_count",
             "selected_count",
             "zero_lot_targets",
@@ -1991,18 +2353,34 @@ def main() -> int:
         ],
     )
     write_csv(failures_path, failure_rows, ["date", "code", "failure_type", "detail", "value"])
+    if sector_exposure_output_rows:
+        write_csv(
+            sector_exposure_path,
+            sector_exposure_output_rows,
+            ["date", "group", "selected_count", "target_weight", "actual_weight", "cap_limit", "violation"],
+        )
     write_report(report_path, summary_rows, args.capital_jpy)
 
     if not args.no_manifest:
         date_range = f"{dates[0].isoformat()}..{dates[-1].isoformat()}"
-        for source, path, schema, row_count in [
+        artifacts = [
             ("derived_walkforward_summary", summary_path, "walkforward_summary_v0_1", len(summary_rows)),
             ("derived_walkforward_trades", trades_path, "walkforward_trades_v0_1", len(trade_rows)),
             ("derived_walkforward_holdings", holdings_path, "walkforward_holdings_v0_1", len(holdings_rows)),
             ("derived_walkforward_equity", equity_path, "walkforward_equity_v0_1", len(equity_rows)),
             ("derived_walkforward_failure_cases", failures_path, "walkforward_failure_cases_v0_1", len(failure_rows)),
             ("derived_walkforward_report", report_path, "walkforward_report_v0_1", 1),
-        ]:
+        ]
+        if sector_exposure_output_rows:
+            artifacts.append(
+                (
+                    "derived_walkforward_sector_exposure",
+                    sector_exposure_path,
+                    "walkforward_sector_exposure_v0_1",
+                    len(sector_exposure_output_rows),
+                )
+            )
+        for source, path, schema, row_count in artifacts:
             append_manifest(
                 args.manifest,
                 source=source,
@@ -2015,6 +2393,8 @@ def main() -> int:
 
     print(f"Wrote walk-forward summary to {summary_path}")
     print(f"Wrote walk-forward failure cases to {failures_path}")
+    if sector_exposure_output_rows:
+        print(f"Wrote walk-forward sector exposure to {sector_exposure_path}")
     print(f"Wrote walk-forward report to {report_path}")
     return 0
 

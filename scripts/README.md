@@ -130,6 +130,46 @@ This skips per-rebalance universe/factor/score stage builds, but keeps the
 existing portfolio, execution, benchmark, holdings, equity, and failure-case
 logic.
 
+### Sector Cap
+
+Sector caps are generic portfolio construction controls. They run after
+scores/ranks are loaded and before targets/orders are built, so they do not
+mutate factor-score panels or ranks.
+
+Config example:
+
+```yaml
+portfolio:
+  sector_cap:
+    enabled: true
+    group_field: sector
+    mode: name_count
+    max_names_per_group: 9
+```
+
+CLI override example:
+
+```powershell
+python scripts\run_qvm_walkforward.py `
+  --config configs\qvm_v0_1.example.yml `
+  --listings <listings.csv> `
+  --prices <prices.csv> `
+  --fundamentals <fundamentals.csv> `
+  --start-date 2026-01-01 `
+  --end-date 2026-12-31 `
+  --factor-score-panel <rebalance_factor_score_panel.parquet> `
+  --sector-cap-mode name_count `
+  --sector-cap-group-field sector `
+  --max-names-per-sector 9 `
+  --no-manifest
+```
+
+`name_count` caps executable `selected_codes` only. It preserves the existing
+hold buffer where the cap allows it, blocks new names in full groups, allows a
+below-target portfolio when the cap is too strict, and writes sector-cap fields
+to summary/failure-case outputs. `target_weight` is reserved for a later
+implementation and currently fails clearly instead of applying partial logic.
+
 ## Validation Workflow
 
 Legacy remains the reference path for audit and fallback. Use sampled windows

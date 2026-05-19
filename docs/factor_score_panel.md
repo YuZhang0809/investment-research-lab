@@ -88,6 +88,14 @@ panel's included rows and score fields. Portfolio construction, orders,
 holdings, equity, failure cases, and benchmark columns still come from the
 existing walk-forward engine.
 
+Sector caps are portfolio-construction rules, not factor/score-panel rules.
+Use `portfolio.sector_cap` or the matching `run_qvm_walkforward.py` CLI
+overrides to cap the executable portfolio after ranks are read. Do not pre-edit
+panel ranks or candidate lists to simulate a cap; that bypasses the buy/hold
+buffer and changes turnover, cost, and tax behavior. The research basket remains
+the uncapped top-ranked basket unless a future explicit research-basket cap is
+added.
+
 ## Minimum Fields
 
 The output keeps existing factor and score field names where possible:

@@ -148,6 +148,37 @@ rows are consumed by `run_qvm_walkforward.py --factor-score-panel`.
 Portfolio construction and accounting outputs still need legacy parity before
 the fast path is used for research.
 
+## Walk-Forward Sector Cap Outputs
+
+`run_qvm_walkforward.py` can apply a generic portfolio construction sector cap
+after ranking and before target construction. This does not rewrite
+factor/score panels, ranks, or research basket rows.
+
+The public engine currently supports `portfolio.sector_cap.mode: name_count`.
+The cap is disabled by default. When enabled, summary rows include:
+
+```text
+sector_cap_enabled,sector_cap_mode,sector_cap_group_field,sector_cap_limit,sector_cap_blocked_candidates,sector_cap_unfilled_slots,max_sector_weight_selected,max_sector_weight_actual,sector_cap_violation_count
+```
+
+Failure-case rows may include:
+
+```text
+sector_cap_blocked_candidate
+sector_cap_unfilled_target
+sector_cap_actual_violation
+```
+
+When sector-cap diagnostics are produced, the exposure output uses:
+
+```text
+date,group,selected_count,target_weight,actual_weight,cap_limit,violation
+```
+
+These fields are generic portfolio-construction diagnostics. Public examples
+must remain synthetic and must not encode private sector-cap parameter
+conclusions.
+
 ## Run Ledger
 
 Public-safe template:

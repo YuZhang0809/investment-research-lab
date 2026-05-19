@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
 
@@ -12,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import run_qvm_walkforward  # noqa: E402
-from run_qvm_walkforward import select_codes  # noqa: E402
+from run_qvm_walkforward import select_codes, select_codes_detailed, sector_cap_failure_rows  # noqa: E402
 
 
 def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) -> None:
@@ -38,6 +39,284 @@ class P2CorrectnessTest(unittest.TestCase):
 
         self.assertEqual(["1001"], selected)
         self.assertEqual(["1001", "1002", "1003"], research)
+
+    def test_sector_cap_disabled_keeps_existing_selection_behavior(self) -> None:
+        scores = [
+            {"code": "1001", "rank": "1", "sector": "Tech"},
+            {"code": "1002", "rank": "2", "sector": "Tech"},
+            {"code": "1003", "rank": "3", "sector": "Tech"},
+        ]
+        config = {
+            "portfolio": {
+                "executable_portfolio": {"target_holdings_min": 3, "target_holdings_max": 3},
+                "buy_rule": {"rank_top_pct": 100, "rank_top_n": 100},
+                "hold_rule": {"rank_top_pct": 100, "rank_top_n": 100},
+                "sector_cap": {"enabled": False, "mode": "name_count", "max_names_per_group": 1},
+            }
+        }
+
+        selected, research = select_codes(scores, holdings={}, config=config)
+
+        self.assertEqual(["1001", "1002", "1003"], selected)
+        self.assertEqual(["1001", "1002", "1003"], research)
+
+    def test_name_count_sector_cap_preserves_hold_buffer_and_blocks_new_names(self) -> None:
+        scores = [
+            {"code": "1001", "rank": "1", "sector": "Tech"},
+            {"code": "1002", "rank": "2", "sector": "Tech"},
+            {"code": "1003", "rank": "3", "sector": "Tech"},
+            {"code": "2001", "rank": "4", "sector": "Health"},
+            {"code": "2002", "rank": "5", "sector": "Health"},
+        ]
+        holdings = {"1001": 100.0, "1003": 100.0}
+        config = {
+            "portfolio": {
+                "executable_portfolio": {"target_holdings_min": 4, "target_holdings_max": 4},
+                "buy_rule": {"rank_top_pct": 100, "rank_top_n": 100},
+                "hold_rule": {"rank_top_pct": 100, "rank_top_n": 100},
+                "sector_cap": {
+                    "enabled": True,
+                    "mode": "name_count",
+                    "group_field": "sector",
+                    "max_names_per_group": 2,
+                },
+            }
+        }
+
+        result = select_codes_detailed(scores, holdings=holdings, config=config)
+
+        self.assertEqual(["1001", "1003", "2001", "2002"], result.selected_codes)
+        self.assertEqual(["1002"], [item.code for item in result.blocked_candidates])
+        self.assertEqual(0, result.unfilled_slots)
+        self.assertEqual(["1001", "1002", "1003", "2001"], result.research_codes)
+
+    def test_name_count_sector_cap_removes_lower_ranked_held_names_first(self) -> None:
+        scores = [
+            {"code": "1001", "rank": "1", "sector": "Tech"},
+            {"code": "1002", "rank": "2", "sector": "Tech"},
+            {"code": "1003", "rank": "3", "sector": "Tech"},
+            {"code": "2001", "rank": "4", "sector": "Health"},
+        ]
+        holdings = {"1001": 100.0, "1002": 100.0, "1003": 100.0}
+        config = {
+            "portfolio": {
+                "executable_portfolio": {"target_holdings_min": 3, "target_holdings_max": 3},
+                "buy_rule": {"rank_top_pct": 100, "rank_top_n": 100},
+                "hold_rule": {"rank_top_pct": 100, "rank_top_n": 100},
+                "sector_cap": {"enabled": True, "mode": "name_count", "max_names_per_group": 2},
+            }
+        }
+
+        result = select_codes_detailed(scores, holdings=holdings, config=config)
+
+        self.assertEqual(["1001", "1002", "2001"], result.selected_codes)
+        self.assertEqual([("1003", "hold")], [(item.code, item.phase) for item in result.blocked_candidates])
+
+    def test_name_count_sector_cap_can_leave_target_unfilled_and_reports_failure(self) -> None:
+        scores = [
+            {"code": "1001", "rank": "1", "sector": "Tech"},
+            {"code": "1002", "rank": "2", "sector": "Tech"},
+            {"code": "1003", "rank": "3", "sector": "Tech"},
+        ]
+        config = {
+            "portfolio": {
+                "executable_portfolio": {"target_holdings_min": 3, "target_holdings_max": 3},
+                "buy_rule": {"rank_top_pct": 100, "rank_top_n": 100},
+                "hold_rule": {"rank_top_pct": 100, "rank_top_n": 100},
+                "sector_cap": {"enabled": True, "mode": "name_count", "max_names_per_group": 1},
+            }
+        }
+
+        result = select_codes_detailed(scores, holdings={}, config=config)
+        failure_types = {row["failure_type"] for row in sector_cap_failure_rows(date(2026, 1, 31), result)}
+
+        self.assertEqual(["1001"], result.selected_codes)
+        self.assertEqual(2, result.unfilled_slots)
+        self.assertEqual(["1001", "1002", "1003"], result.research_codes)
+        self.assertIn("sector_cap_blocked_candidate", failure_types)
+        self.assertIn("sector_cap_unfilled_target", failure_types)
+
+    def test_name_count_sector_cap_groups_missing_sector_as_unknown(self) -> None:
+        scores = [
+            {"code": "1001", "rank": "1", "sector": ""},
+            {"code": "1002", "rank": "2", "sector": ""},
+            {"code": "2001", "rank": "3", "sector": "Health"},
+        ]
+        config = {
+            "portfolio": {
+                "executable_portfolio": {"target_holdings_min": 3, "target_holdings_max": 3},
+                "buy_rule": {"rank_top_pct": 100, "rank_top_n": 100},
+                "hold_rule": {"rank_top_pct": 100, "rank_top_n": 100},
+                "sector_cap": {"enabled": True, "mode": "name_count", "max_names_per_group": 1},
+            }
+        }
+
+        result = select_codes_detailed(scores, holdings={}, config=config)
+
+        self.assertEqual(["1001", "2001"], result.selected_codes)
+        self.assertEqual("UNKNOWN", result.blocked_candidates[0].group)
+
+    def test_name_count_sector_cap_resolves_group_field_from_universe_rows(self) -> None:
+        scores = [
+            {"code": "1001", "rank": "1", "sector": "Same"},
+            {"code": "1002", "rank": "2", "sector": "Same"},
+        ]
+        universe_by_code = {
+            "1001": {"code": "1001", "market": "Prime"},
+            "1002": {"code": "1002", "market": "Standard"},
+        }
+        config = {
+            "portfolio": {
+                "executable_portfolio": {"target_holdings_min": 2, "target_holdings_max": 2},
+                "buy_rule": {"rank_top_pct": 100, "rank_top_n": 100},
+                "hold_rule": {"rank_top_pct": 100, "rank_top_n": 100},
+                "sector_cap": {
+                    "enabled": True,
+                    "mode": "name_count",
+                    "group_field": "market",
+                    "max_names_per_group": 1,
+                },
+            }
+        }
+
+        result = select_codes_detailed(
+            scores,
+            holdings={},
+            config=config,
+            universe_by_code=universe_by_code,
+        )
+
+        self.assertEqual(["1001", "1002"], result.selected_codes)
+        self.assertEqual({}, {item.code: item.group for item in result.blocked_candidates})
+        self.assertEqual({"Prime": 1, "Standard": 1}, result.selected_group_counts)
+
+    def test_walkforward_writes_sector_cap_failures_and_exposure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            prices = temp / "prices.csv"
+            listings = temp / "listings.csv"
+            fundamentals = temp / "fundamentals.csv"
+            config_path = temp / "sector_cap.yml"
+            out_dir = temp / "out"
+            report_dir = temp / "reports"
+
+            config_text = (ROOT / "configs" / "qvm_v0_1.example.yml").read_text(encoding="utf-8")
+            config_text = config_text.replace("  sector_cap:\n    enabled: false", "  sector_cap:\n    enabled: true", 1)
+            config_text = config_text.replace("max_names_per_group: 9", "max_names_per_group: 1", 1)
+            config_path.write_text(config_text, encoding="utf-8")
+            write_csv(
+                prices,
+                [
+                    {
+                        "date": "2026-01-31",
+                        "code": code,
+                        "unadjusted_open": 100,
+                        "unadjusted_close": 100,
+                        "adjusted_close": 100,
+                        "trading_value": 10_000_000,
+                        "price_limit_flag": "false",
+                    }
+                    for code in ["1001", "1002", "1003"]
+                ],
+                ["date", "code", "unadjusted_open", "unadjusted_close", "adjusted_close", "trading_value", "price_limit_flag"],
+            )
+            write_csv(
+                listings,
+                [
+                    {
+                        "code": code,
+                        "listed_date": "2020-01-01",
+                        "delisted_date": "",
+                    }
+                    for code in ["1001", "1002", "1003"]
+                ],
+                ["code", "listed_date", "delisted_date"],
+            )
+            write_csv(fundamentals, [], ["code"])
+
+            original_argv = sys.argv[:]
+            original_run_stages = run_qvm_walkforward.run_stages
+
+            def fake_run_stages(args, rebalance_date):
+                suffix = rebalance_date.strftime("%Y%m%d")
+                stage = temp / "stage"
+                universe = stage / f"universe_{suffix}.csv"
+                factors = stage / f"factors_{suffix}.csv"
+                scores = stage / f"scores_{suffix}.csv"
+                write_csv(
+                    universe,
+                    [
+                        {"code": "1001", "sector": "Tech", "lot_size": "100", "median_60d_trading_value": "10000000"},
+                        {"code": "1002", "sector": "Tech", "lot_size": "100", "median_60d_trading_value": "10000000"},
+                        {"code": "1003", "sector": "Tech", "lot_size": "100", "median_60d_trading_value": "10000000"},
+                    ],
+                    ["code", "sector", "lot_size", "median_60d_trading_value"],
+                )
+                write_csv(factors, [{"code": "1001"}, {"code": "1002"}, {"code": "1003"}], ["code"])
+                write_csv(
+                    scores,
+                    [
+                        {"code": "1001", "rank": "1", "sector": "Tech", "latest_unadjusted_close": "100"},
+                        {"code": "1002", "rank": "2", "sector": "Tech", "latest_unadjusted_close": "100"},
+                        {"code": "1003", "rank": "3", "sector": "Tech", "latest_unadjusted_close": "100"},
+                    ],
+                    ["code", "rank", "sector", "latest_unadjusted_close"],
+                )
+                return universe, factors, scores
+
+            try:
+                run_qvm_walkforward.run_stages = fake_run_stages
+                sys.argv = [
+                    "run_qvm_walkforward.py",
+                    "--config",
+                    str(config_path),
+                    "--listings",
+                    str(listings),
+                    "--prices",
+                    str(prices),
+                    "--fundamentals",
+                    str(fundamentals),
+                    "--start-date",
+                    "2026-01-31",
+                    "--end-date",
+                    "2026-01-31",
+                    "--frequency",
+                    "monthly",
+                    "--capital-jpy",
+                    "100000",
+                    "--out-dir",
+                    str(out_dir),
+                    "--report-dir",
+                    str(report_dir),
+                    "--no-manifest",
+                    "--skip-stage-manifest",
+                    "--run-label",
+                    "sectorcap_test",
+                ]
+
+                self.assertEqual(0, run_qvm_walkforward.main())
+            finally:
+                run_qvm_walkforward.run_stages = original_run_stages
+                sys.argv = original_argv
+
+            with (out_dir / "qvm_walkforward_summary_sectorcap_test_202601_202601.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as file:
+                summary = list(csv.DictReader(file))
+            with (out_dir / "qvm_walkforward_failure_cases_sectorcap_test_202601_202601.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as file:
+                failures = list(csv.DictReader(file))
+            with (out_dir / "qvm_walkforward_sector_exposure_sectorcap_test_202601_202601.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as file:
+                exposures = list(csv.DictReader(file))
+
+            self.assertEqual("True", summary[-1]["sector_cap_enabled"])
+            self.assertEqual("2", summary[-1]["sector_cap_unfilled_slots"])
+            self.assertIn("sector_cap_unfilled_target", {row["failure_type"] for row in failures})
+            self.assertEqual("Tech", exposures[0]["group"])
+            self.assertEqual("1", exposures[0]["selected_count"])
 
     def test_score_ties_rank_by_code_not_input_order(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
