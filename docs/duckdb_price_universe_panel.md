@@ -83,3 +83,85 @@ The goal is local columnar computation, not GPU acceleration and not a
 persistent database dependency. Private workspaces can use real local data to
 measure speedups, but public docs and tests should stay synthetic and should
 not promise private runtime numbers.
+
+## Private Validation Handoff
+
+This public upgrade covers Phase 1 and Phase 2 only:
+
+```text
+Phase 1: DuckDB price/universe fast panel
+Phase 2: synthetic parity against the legacy universe and momentum/liquidity path
+```
+
+The fast path currently accelerates the rebalance-date price/universe panel. It
+does not replace the legacy engine and does not compute fundamentals
+latest-as-of, quality/value ratios, scores, portfolios, or walk-forward
+backtests. The legacy path remains the reference for research semantics.
+
+Private workspaces should validate the fast path with local real data before
+any Phase 3 work begins. Keep private paths, vendor files, run outputs,
+selected tickers, parameters, and conclusions outside this repository.
+
+Recommended private experiment:
+
+1. Build the fast panel with the same config, listings, prices, fundamentals,
+   start date, end date, and rebalance frequency used by the legacy run.
+2. Compare it against the legacy helpers with `compare_fast_panel_to_legacy.py`.
+3. Review every diff row before trusting runtime improvements.
+4. Record runtime separately for the fast panel build and the comparison step.
+5. Treat unexplained field differences as blockers for Phase 3.
+
+Fields that should match or have a documented explanation:
+
+```text
+rebalance_date
+code
+latest_price_date
+latest_unadjusted_close
+adjusted_close
+rebalance_price_available
+price_staleness_trading_days
+ipo_age_trading_days
+median_60d_trading_value
+return_12_1
+return_6_1
+included_flag
+exclusion_reason
+has_fundamentals
+```
+
+Suggested private commands use placeholder paths only:
+
+```powershell
+python scripts\build_rebalance_price_universe_panel.py `
+  --config path\to\config.yml `
+  --listings path\to\listings.csv `
+  --prices path\to\prices.csv `
+  --fundamentals path\to\fundamentals.csv `
+  --start-date YYYY-MM-DD `
+  --end-date YYYY-MM-DD `
+  --frequency monthly `
+  --out path\to\fast_panel.parquet `
+  --input-format auto `
+  --output-format parquet
+
+python scripts\compare_fast_panel_to_legacy.py `
+  --config path\to\config.yml `
+  --listings path\to\listings.csv `
+  --prices path\to\prices.csv `
+  --fundamentals path\to\fundamentals.csv `
+  --fast-panel path\to\fast_panel.parquet `
+  --start-date YYYY-MM-DD `
+  --end-date YYYY-MM-DD `
+  --frequency monthly `
+  --out path\to\fast_panel_diff.csv
+```
+
+Phase 3 should start only after the private parity run has no unexplained
+differences. The next planned experiments are:
+
+```text
+Phase 3: fundamentals latest-as-of selection
+Phase 4: raw Q/V/M factor computation
+Phase 5: optional run_qvm_walkforward.py integration through an explicit fast-panel input
+```
