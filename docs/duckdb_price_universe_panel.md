@@ -212,10 +212,9 @@ P5: walk-forward direct panel consumption
 ```
 
 P3 is the `rebalance_date x code` price/universe acceleration layer documented
-above. P4 is documented in `docs/factor_score_panel.md`; it precomputes factor
-and score rows by reusing the existing `build_factors.py` and
-`build_scores.py` semantics. P5 is the explicit `run_qvm_walkforward.py`
-consumption path:
+above. P4 is documented in `docs/factor_score_panel.md`; it can either use the
+legacy reference builder or the optimized DuckDB base Q/V/M builder. P5 is the
+explicit `run_qvm_walkforward.py` consumption path:
 
 ```text
 --price-universe-panel

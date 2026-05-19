@@ -131,9 +131,11 @@ synthetic and private local fixtures before any downstream integration.
 ## Rebalance Factor/Score Panel
 
 `build_rebalance_factor_score_panel.py` writes a reusable factor/score panel
-from a validated rebalance price/universe panel. It reuses the existing
-`build_factors.py` and `build_scores.py` semantics instead of introducing a
-separate scoring engine.
+from a validated rebalance price/universe panel. The default `legacy` engine
+reuses the existing `build_factors.py` and `build_scores.py` semantics. The
+optional `duckdb` engine is a narrower optimized path for base Q/V/M factors and
+group-filter scoring; unsupported custom expressions and field-level filters
+must use the legacy engine.
 
 Minimum output contract:
 

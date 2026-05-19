@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from duckdb_query import parquet_scan, query  # noqa: E402
 from build_rebalance_factor_score_panel import build_factor_score_panel  # noqa: E402
 from build_rebalance_price_universe_panel import build_panel  # noqa: E402
-from research_common import load_yaml, read_csv  # noqa: E402
+from research_common import load_yaml, parse_float, read_csv  # noqa: E402
 import run_qvm_walkforward  # noqa: E402
 
 
@@ -187,6 +187,33 @@ def without_fields(rows: list[dict[str, str]], excluded: set[str]) -> list[dict[
     return [{key: value for key, value in row.items() if key not in excluded} for row in rows]
 
 
+def assert_panel_fields_match(
+    testcase: unittest.TestCase,
+    left: list[dict[str, str]],
+    right: list[dict[str, str]],
+    fields: list[str],
+) -> None:
+    left = sorted(left, key=lambda row: (row.get("rebalance_date", ""), row.get("code", "")))
+    right = sorted(right, key=lambda row: (row.get("rebalance_date", ""), row.get("code", "")))
+    testcase.assertEqual(len(left), len(right))
+    for left_row, right_row in zip(left, right):
+        for field in fields:
+            left_value = left_row.get(field, "")
+            right_value = right_row.get(field, "")
+            left_number = parse_float(left_value)
+            right_number = parse_float(right_value)
+            if left_number is not None or right_number is not None:
+                testcase.assertIsNotNone(left_number, (left_row.get("rebalance_date"), left_row.get("code"), field, left_value, right_value))
+                testcase.assertIsNotNone(right_number, (left_row.get("rebalance_date"), left_row.get("code"), field, left_value, right_value))
+                testcase.assertAlmostEqual(left_number or 0.0, right_number or 0.0, places=8)
+            else:
+                testcase.assertEqual(
+                    left_value,
+                    right_value,
+                    (left_row.get("rebalance_date"), left_row.get("code"), field),
+                )
+
+
 class WalkForwardParquetCacheTest(unittest.TestCase):
     def test_walkforward_uses_reuses_and_rebuilds_parquet_cache_while_writing_csv_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -347,6 +374,19 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
                 out_path=fast_panel,
                 output_format="parquet",
             )
+            legacy_factor_score_panel = temp / "legacy_factor_score_panel.parquet"
+            build_factor_score_panel(
+                config=load_yaml(config_path),
+                price_universe_panel_path=fast_panel,
+                prices_path=prices,
+                fundamentals_path=fundamentals,
+                start_date="2026-01-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                strategy_version="qvm",
+                out_path=legacy_factor_score_panel,
+                output_format="parquet",
+            )
             factor_score_panel = temp / "factor_score_panel.parquet"
             build_factor_score_panel(
                 config=load_yaml(config_path),
@@ -359,6 +399,33 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
                 strategy_version="qvm",
                 out_path=factor_score_panel,
                 output_format="parquet",
+                engine="duckdb",
+            )
+            assert_panel_fields_match(
+                self,
+                read_csv(legacy_factor_score_panel),
+                read_csv(factor_score_panel),
+                [
+                    "rebalance_date",
+                    "code",
+                    "included_flag",
+                    "rank",
+                    "candidate_rank",
+                    "quality_score",
+                    "value_score",
+                    "momentum_score",
+                    "composite_score",
+                    "qvm_score",
+                    "filter_status",
+                    "filter_reasons",
+                    "missing_score_components",
+                    "operating_profit_to_total_assets",
+                    "book_to_market",
+                    "return_12_1",
+                    "operating_profit_to_total_assets_z",
+                    "book_to_market_z",
+                    "return_12_1_z",
+                ],
             )
 
             base_command = [
@@ -527,6 +594,7 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
                 strategy_version="qvm",
                 out_path=factor_score_panel,
                 output_format="parquet",
+                engine="duckdb",
             )
 
             rows = read_csv(factor_score_panel)
@@ -542,6 +610,133 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
             self.assertIn("delisted_before_rebalance", excluded_row["exclusion_reason"])
             self.assertEqual("", excluded_row["rank"])
             self.assertEqual("", excluded_row["candidate_rank"])
+
+    def test_duckdb_factor_score_panel_matches_legacy_for_supported_strategy_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            config_path = ROOT / "configs" / "qvm_v0_1.example.yml"
+            config = load_yaml(config_path)
+            price_panel = temp / "price_panel.parquet"
+            build_panel(
+                config=config,
+                listings_path=listings,
+                prices_path=prices,
+                fundamentals_path=fundamentals,
+                start_date="2026-01-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                input_format="csv",
+                out_path=price_panel,
+                output_format="parquet",
+            )
+            fields = [
+                "rebalance_date",
+                "code",
+                "included_flag",
+                "rank",
+                "candidate_rank",
+                "quality_score",
+                "value_score",
+                "momentum_score",
+                "composite_score",
+                "qvm_score",
+                "filter_status",
+                "filter_reasons",
+                "missing_score_components",
+                "operating_profit_to_total_assets",
+                "equity_to_assets",
+                "earnings_yield",
+                "book_to_market",
+                "return_12_1",
+                "return_6_1",
+            ]
+            for strategy_version in ["qvm", "qv", "value_only", "weighted_groups"]:
+                legacy_panel = temp / f"legacy_{strategy_version}.parquet"
+                duckdb_panel = temp / f"duckdb_{strategy_version}.parquet"
+                build_factor_score_panel(
+                    config=config,
+                    price_universe_panel_path=price_panel,
+                    prices_path=prices,
+                    fundamentals_path=fundamentals,
+                    start_date="2026-01-01",
+                    end_date="2026-03-31",
+                    frequency="monthly",
+                    strategy_version=strategy_version,
+                    out_path=legacy_panel,
+                    output_format="parquet",
+                )
+                build_factor_score_panel(
+                    config=config,
+                    price_universe_panel_path=price_panel,
+                    prices_path=prices,
+                    fundamentals_path=fundamentals,
+                    start_date="2026-01-01",
+                    end_date="2026-03-31",
+                    frequency="monthly",
+                    strategy_version=strategy_version,
+                    out_path=duckdb_panel,
+                    output_format="parquet",
+                    engine="duckdb",
+                )
+                assert_panel_fields_match(self, read_csv(legacy_panel), read_csv(duckdb_panel), fields)
+
+    def test_duckdb_factor_score_panel_rejects_unsupported_strategy_mechanics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            base_config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            price_panel = temp / "price_panel.parquet"
+            build_panel(
+                config=base_config,
+                listings_path=listings,
+                prices_path=prices,
+                fundamentals_path=fundamentals,
+                start_date="2026-01-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                input_format="csv",
+                out_path=price_panel,
+                output_format="parquet",
+            )
+
+            expression_config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            expression_config.setdefault("factors", {})["definitions"] = [
+                {"name": "quality_blend", "group": "quality", "expr": "operating_profit_to_total_assets"}
+            ]
+            with self.assertRaisesRegex(ValueError, "does not support factors.definitions"):
+                build_factor_score_panel(
+                    config=expression_config,
+                    price_universe_panel_path=price_panel,
+                    prices_path=prices,
+                    fundamentals_path=fundamentals,
+                    start_date="2026-01-01",
+                    end_date="2026-03-31",
+                    frequency="monthly",
+                    strategy_version="qvm",
+                    out_path=temp / "unsupported_expression.parquet",
+                    output_format="parquet",
+                    engine="duckdb",
+                )
+
+            field_filter_config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            field_filter_config["strategy"]["filters"] = [
+                {"field": "book_to_market", "rule": "exclude_bottom_pct", "pct": 20}
+            ]
+            with self.assertRaisesRegex(ValueError, "supports group filters only"):
+                build_factor_score_panel(
+                    config=field_filter_config,
+                    price_universe_panel_path=price_panel,
+                    prices_path=prices,
+                    fundamentals_path=fundamentals,
+                    start_date="2026-01-01",
+                    end_date="2026-03-31",
+                    frequency="monthly",
+                    strategy_version="weighted_groups",
+                    out_path=temp / "unsupported_field_filter.parquet",
+                    output_format="parquet",
+                    engine="duckdb",
+                )
 
     def test_cache_namespace_changes_when_config_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

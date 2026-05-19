@@ -94,9 +94,16 @@ python scripts\build_rebalance_factor_score_panel.py `
   --end-date 2026-12-31 `
   --frequency monthly `
   --strategy-version qvm `
+  --engine duckdb `
   --out <rebalance_factor_score_panel.parquet> `
   --output-format parquet
 ```
+
+`--engine legacy` is the default/reference implementation and reuses
+`build_factors.py` plus `build_scores.py`. `--engine duckdb` is the optimized
+base Q/V/M implementation; it supports `qvm`, `qv`, `value_only`, and
+`weighted_groups` with group filters, and it rejects custom factor expressions,
+`weighted_factors`, and field filters instead of falling back silently.
 
 `run_qvm_walkforward.py` can then consume that panel directly:
 

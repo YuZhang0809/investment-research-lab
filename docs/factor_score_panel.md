@@ -13,14 +13,28 @@ price/universe panel and builds a reusable factor/score panel:
 ```text
 price/universe panel rows
 included universe rows
-existing build_factors.py semantics
-existing build_scores.py semantics
+factor/score computation
 merged rebalance-level factor/score panel
 ```
 
 Excluded rows can remain in the panel for auditability, but only
 `included_flag=true` rows are passed to factor and score computation. This keeps
 non-universe names from leaking into ranked candidates.
+
+Two engines are available:
+
+```text
+legacy: default/reference path; reuses build_factors.py and build_scores.py
+duckdb: optimized base Q/V/M path; computes PIT fundamentals, ratios, z-scores,
+        group scores, filters, and ranks in one DuckDB batch
+```
+
+The DuckDB engine is intentionally narrower than the legacy engine. It supports
+the base Q/V/M raw factors and `qvm`, `qv`, `value_only`, and `weighted_groups`
+strategy versions with group-level filters. It rejects `factors.definitions`,
+`configurable` / `weighted_factors`, and field-level filters with a clear error.
+There is no automatic fallback because a silent semantic change would make
+parity harder to trust.
 
 ## Usage
 
@@ -34,10 +48,12 @@ python scripts\build_rebalance_factor_score_panel.py `
   --end-date 2026-03-31 `
   --frequency monthly `
   --strategy-version qvm `
+  --engine duckdb `
   --out data\processed\factors\rebalance_factor_score_panel.parquet `
   --output-format parquet
 ```
 
+Omit `--engine duckdb` to use the legacy reference builder.
 CSV remains supported, but Parquet is preferred for repeated local research.
 
 ## Walk-Forward Consumption
@@ -102,9 +118,9 @@ missing_score_components
 <raw_factor>_z
 ```
 
-Configured factor definitions and configurable scoring modes are included
-through the same `build_factors.py` and `build_scores.py` mechanics used by the
-legacy path.
+Configured factor definitions and configurable scoring modes are available in
+the legacy engine through the same `build_factors.py` and `build_scores.py`
+mechanics used by the original path.
 
 ## Required Parity
 
