@@ -356,17 +356,26 @@ def build_delisting_index(listing_rows: list[dict[str, str]]) -> dict[str, date]
     return values
 
 
-def next_price(points: list[PricePoint], after_date: date) -> PricePoint | None:
-    for point in points:
-        if point.date > after_date:
-            return point
+def next_trading_date(calendar: list[date], after_date: date) -> date | None:
+    for value in calendar:
+        if value > after_date:
+            return value
     return None
 
 
-def execution_point(price_index: dict[str, list[PricePoint]], code: str, signal_date: date, mode: str) -> PricePoint | None:
+def execution_point(
+    price_index: dict[str, list[PricePoint]],
+    price_calendar: list[date],
+    code: str,
+    signal_date: date,
+    mode: str,
+) -> PricePoint | None:
     if mode == "rebalance_close":
         return price_on_date(price_index, code, signal_date)
-    return next_price(price_index.get(code, []), signal_date)
+    execution_date = next_trading_date(price_calendar, signal_date)
+    if execution_date is None:
+        return None
+    return price_on_date(price_index, code, execution_date)
 
 
 def execution_price(point: PricePoint, mode: str) -> float:
@@ -783,7 +792,8 @@ def sector_cap_failure_rows(rebalance_date: date, result: SelectionResult) -> li
 
 def sector_exposure_rows(
     *,
-    rebalance_date: date,
+    signal_date: date,
+    valuation_date: date,
     result: SelectionResult,
     targets: dict[str, int],
     holdings: dict[str, float],
@@ -810,12 +820,12 @@ def sector_exposure_rows(
     for code in result.selected_codes:
         selected_count_by_group[security_group(universe_by_code.get(code), cap.group_field)] += 1
     for code, shares in targets.items():
-        point = price_on_date(price_index, code, rebalance_date)
+        point = price_on_date(price_index, code, signal_date)
         if not point:
             continue
         target_value_by_group[security_group(universe_by_code.get(code), cap.group_field)] += shares * point.unadjusted_close
     for code, adjusted_shares in holdings.items():
-        point = price_at(price_index, code, rebalance_date)
+        point = price_at(price_index, code, valuation_date)
         if not point:
             continue
         group = security_group(universe_by_code.get(code), cap.group_field)
@@ -856,7 +866,7 @@ def sector_exposure_rows(
             )
         exposure_rows.append(
             {
-                "date": rebalance_date,
+                "date": valuation_date,
                 "group": group,
                 "selected_count": selected_count,
                 "target_weight": target_value_by_group.get(group, 0.0) / pre_equity if pre_equity else 0,
@@ -958,11 +968,6 @@ def score_cache_fields(raw_factors: list[str]) -> list[str]:
 def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
     if args.rebalance:
         args.frequency = args.rebalance
-    if args.execution_price != "rebalance_close":
-        raise ValueError(
-            "next_open/next_close execution modes are disabled until fill-date accounting "
-            "marks holdings and equity on the execution date."
-        )
     if args.cache_dir is None and args.cache_format is not None:
         args.cache_dir = Path("data/processed/cache")
     if args.cache_dir is not None and args.cache_format is None:
@@ -1578,6 +1583,8 @@ def write_report(path: Path, summary_rows: list[dict[str, Any]], initial_capital
             f"| strategy version | {first.get('strategy_version', '')} |",
             f"| frequency | {first.get('frequency', '')} |",
             f"| execution price | {first.get('execution_price', '')} |",
+            f"| last execution date | {first.get('last_execution_date', '')} |",
+            f"| execution lag days | {first.get('execution_lag_days', '')} |",
             f"| cost scenario | {first.get('cost_scenario', '')} |",
             f"| capital JPY | {money(float(first.get('capital_jpy', initial_capital)))} |",
             f"| target holdings | {first.get('target_holdings', '')} |",
@@ -1637,6 +1644,11 @@ def write_report(path: Path, summary_rows: list[dict[str, Any]], initial_capital
         f"| date | {final['rebalance_date']} |",
         f"| universe count | {final['universe_count']} |",
         f"| selected count | {final['selected_count']} |",
+        f"| last execution date | {final.get('last_execution_date', '')} |",
+        f"| pending orders | {final.get('pending_order_count', '')} |",
+        f"| filled orders | {final.get('filled_order_count', '')} |",
+        f"| unexecuted orders | {final.get('unexecuted_order_count', '')} |",
+        f"| missing execution price | {final.get('missing_execution_price_count', '')} |",
         f"| sector cap blocked candidates | {final.get('sector_cap_blocked_candidates', '')} |",
         f"| sector cap unfilled slots | {final.get('sector_cap_unfilled_slots', '')} |",
         f"| max selected sector weight | {pct(parse_float(final.get('max_sector_weight_selected'), default=0) or 0)} |",
@@ -1717,7 +1729,7 @@ def main() -> int:
     cumulative_tax = 0.0
     cumulative_cost_by_scenario = {"optimistic": 0.0, "base": 0.0, "pessimistic": 0.0}
     previous_after_equity: float | None = None
-    previous_date: date | None = None
+    previous_valuation_date: date | None = None
     previous_benchmark_codes: list[str] = []
     previous_research_codes: list[str] = []
     benchmark_equity = args.capital_jpy
@@ -1738,35 +1750,6 @@ def main() -> int:
         universe_rows = stage_rows.get("universe") or read_csv(universe_path)
         scores = stage_rows.get("scores") or read_csv(scores_path)
         universe_by_code = {row["code"]: row for row in universe_rows}
-
-        if previous_date is not None:
-            benchmark_return = mean_return(
-                price_index,
-                previous_benchmark_codes,
-                previous_date,
-                rebalance_date,
-                delisting_dates,
-            )
-            research_return = mean_return(
-                price_index,
-                previous_research_codes,
-                previous_date,
-                rebalance_date,
-                delisting_dates,
-            )
-            if benchmark_return is not None:
-                benchmark_equity *= 1 + benchmark_return
-            if research_return is not None:
-                research_equity *= 1 + research_return
-            market_period_return = (
-                market_benchmark_return(market_benchmark_points, previous_date, rebalance_date)
-                if market_benchmark_points
-                else None
-            )
-            if market_period_return is not None:
-                market_benchmark_equity *= 1 + market_period_return
-        else:
-            market_period_return = 0.0 if market_benchmark_points else None
 
         for code, adjusted_shares in list(holdings.items()):
             lifecycle_exit_date = delisting_dates.get(code)
@@ -1900,15 +1883,24 @@ def main() -> int:
         buy_trades = 0
         sell_trades = 0
         skipped_orders = 0
+        pending_order_count = 0
+        filled_order_count = 0
+        missing_execution_price_count = 0
         turnover_value = 0.0
         estimated_cost_base = 0.0
+        last_execution_date: date | None = None
+        intended_execution_date = (
+            rebalance_date
+            if args.execution_price == "rebalance_close"
+            else next_trading_date(price_calendar, rebalance_date)
+        )
 
         for code in all_codes:
             current_adjusted_shares = holdings.get(code, 0.0)
             target_shares = targets.get(code, 0)
             position_point = price_at(price_index, code, rebalance_date)
             signal_point = price_on_date(price_index, code, rebalance_date)
-            fill_point = execution_point(price_index, code, rebalance_date, args.execution_price)
+            fill_point = execution_point(price_index, price_calendar, code, rebalance_date, args.execution_price)
             current_shares = (
                 int(round(actual_shares_from_adjusted(current_adjusted_shares, position_point)))
                 if position_point
@@ -1917,15 +1909,27 @@ def main() -> int:
             desired_delta = target_shares - current_shares
             if desired_delta == 0:
                 continue
+            if args.execution_price != "rebalance_close":
+                pending_order_count += 1
             if not signal_point or not fill_point:
                 skipped_orders += 1
                 failure_reason = "missing_signal_price" if not signal_point else "missing_execution_price"
+                if failure_reason == "missing_execution_price":
+                    missing_execution_price_count += 1
+                failure_date = (
+                    intended_execution_date
+                    if failure_reason == "missing_execution_price" and intended_execution_date is not None
+                    else rebalance_date
+                )
                 failure_rows.append(
                     {
-                        "date": rebalance_date,
+                        "date": failure_date,
                         "code": code,
                         "failure_type": failure_reason,
-                        "detail": f"execution_price={args.execution_price}",
+                        "detail": (
+                            f"execution_price={args.execution_price};"
+                            f"intended_execution_date={intended_execution_date or ''}"
+                        ),
                         "value": 0,
                     }
                 )
@@ -1964,7 +1968,7 @@ def main() -> int:
                 reason = "reduced_by_adv_cap"
                 failure_rows.append(
                     {
-                        "date": rebalance_date,
+                        "date": fill_point.date,
                         "code": code,
                         "failure_type": "adv_cap_reduction",
                         "detail": f"requested_shares={desired_delta};filled_shares={filled_delta}",
@@ -1975,7 +1979,7 @@ def main() -> int:
                 reason = reason or "below_lot_size"
                 failure_rows.append(
                     {
-                        "date": rebalance_date,
+                        "date": fill_point.date,
                         "code": code,
                         "failure_type": reason,
                         "detail": f"requested_shares={desired_delta}",
@@ -2009,7 +2013,7 @@ def main() -> int:
                 reason = add_reason(reason, "reduced_by_cash" if filled_delta else "insufficient_cash")
                 failure_rows.append(
                     {
-                        "date": rebalance_date,
+                        "date": fill_point.date,
                         "code": code,
                         "failure_type": reason,
                         "detail": f"cash={cash:.2f}",
@@ -2021,7 +2025,7 @@ def main() -> int:
                 reason = add_reason(reason, "price_limit_uncertain_fill")
                 failure_rows.append(
                     {
-                        "date": rebalance_date,
+                        "date": fill_point.date,
                         "code": code,
                         "failure_type": "price_limit_uncertain_fill",
                         "detail": f"execution_date={fill_point.date};execution_price={args.execution_price}",
@@ -2058,6 +2062,9 @@ def main() -> int:
             holdings[code] = current_adjusted_shares + adjusted_shares_for_trade(filled_delta, fill_point)
             if abs(holdings.get(code, 0.0)) <= 1e-9:
                 holdings.pop(code, None)
+            if filled_delta != 0:
+                filled_order_count += 1
+                last_execution_date = max(last_execution_date or fill_point.date, fill_point.date)
             turnover_value += trade_value
             for scenario, scenario_cost in scenario_costs.items():
                 cumulative_cost_by_scenario[scenario] += scenario_cost
@@ -2083,8 +2090,9 @@ def main() -> int:
             )
 
         post_holdings_value = 0.0
+        valuation_date = last_execution_date or rebalance_date
         for code, adjusted_shares in sorted(holdings.items()):
-            point = price_at(price_index, code, rebalance_date)
+            point = price_at(price_index, code, valuation_date)
             if not point:
                 continue
             value = position_value(adjusted_shares, point)
@@ -2097,6 +2105,34 @@ def main() -> int:
             for scenario in ["optimistic", "base", "pessimistic"]
         }
         after_tax_taxable_equity = after_equity - cumulative_tax
+        if previous_valuation_date is not None:
+            benchmark_return = mean_return(
+                price_index,
+                previous_benchmark_codes,
+                previous_valuation_date,
+                valuation_date,
+                delisting_dates,
+            )
+            research_return = mean_return(
+                price_index,
+                previous_research_codes,
+                previous_valuation_date,
+                valuation_date,
+                delisting_dates,
+            )
+            if benchmark_return is not None:
+                benchmark_equity *= 1 + benchmark_return
+            if research_return is not None:
+                research_equity *= 1 + research_return
+            market_period_return = (
+                market_benchmark_return(market_benchmark_points, previous_valuation_date, valuation_date)
+                if market_benchmark_points
+                else None
+            )
+            if market_period_return is not None:
+                market_benchmark_equity *= 1 + market_period_return
+        else:
+            market_period_return = 0.0 if market_benchmark_points else None
         (
             current_sector_exposure_rows,
             max_sector_weight_selected,
@@ -2104,7 +2140,8 @@ def main() -> int:
             sector_cap_violation_count,
             sector_cap_violation_rows,
         ) = sector_exposure_rows(
-            rebalance_date=rebalance_date,
+            signal_date=rebalance_date,
+            valuation_date=valuation_date,
             result=selection,
             targets=targets,
             holdings=holdings,
@@ -2116,14 +2153,14 @@ def main() -> int:
         sector_exposure_output_rows.extend(current_sector_exposure_rows)
         failure_rows.extend(sector_cap_violation_rows)
         for code, adjusted_shares in sorted(holdings.items()):
-            point = price_at(price_index, code, rebalance_date)
+            point = price_at(price_index, code, valuation_date)
             if not point:
                 continue
             actual_shares = actual_shares_from_adjusted(adjusted_shares, point)
             value = position_value(adjusted_shares, point)
             holdings_rows.append(
                 {
-                    "date": rebalance_date,
+                    "date": valuation_date,
                     "code": code,
                     "shares": display_shares(actual_shares),
                     "price": point.unadjusted_close,
@@ -2137,7 +2174,7 @@ def main() -> int:
         if cash_pct > 0.2:
             failure_rows.append(
                 {
-                    "date": rebalance_date,
+                    "date": valuation_date,
                     "code": "",
                     "failure_type": "cash_drag",
                     "detail": f"cash_pct={cash_pct:.4f}",
@@ -2149,6 +2186,16 @@ def main() -> int:
             "strategy_version": args.strategy_version,
             "frequency": args.frequency,
             "execution_price": args.execution_price,
+            "last_execution_date": last_execution_date or "",
+            "execution_lag_days": (
+                trading_staleness_days(price_calendar, rebalance_date, last_execution_date)
+                if last_execution_date is not None and last_execution_date >= rebalance_date
+                else 0
+            ),
+            "pending_order_count": pending_order_count,
+            "filled_order_count": filled_order_count,
+            "unexecuted_order_count": skipped_orders,
+            "missing_execution_price_count": missing_execution_price_count,
             "cost_scenario": args.cost_scenario,
             "capital_jpy": args.capital_jpy,
             "target_holdings": args.target_holdings or config["portfolio"]["executable_portfolio"].get("target_holdings_max", ""),
@@ -2202,7 +2249,9 @@ def main() -> int:
         summary_rows.append(row)
         equity_rows.append(
             {
-                "date": rebalance_date,
+                "date": valuation_date,
+                "rebalance_date": rebalance_date,
+                "last_execution_date": last_execution_date or "",
                 "portfolio_equity_after_cost": after_equity,
                 "portfolio_equity_optimistic": scenario_equity["optimistic"],
                 "portfolio_equity_base": scenario_equity["base"],
@@ -2218,7 +2267,7 @@ def main() -> int:
             }
         )
         previous_after_equity = after_equity
-        previous_date = rebalance_date
+        previous_valuation_date = valuation_date
         previous_benchmark_codes = [row["code"] for row in universe_rows]
         previous_research_codes = research_codes
 
@@ -2260,6 +2309,12 @@ def main() -> int:
             "strategy_version",
             "frequency",
             "execution_price",
+            "last_execution_date",
+            "execution_lag_days",
+            "pending_order_count",
+            "filled_order_count",
+            "unexecuted_order_count",
+            "missing_execution_price_count",
             "cost_scenario",
             "capital_jpy",
             "target_holdings",
@@ -2338,6 +2393,8 @@ def main() -> int:
         equity_rows,
         [
             "date",
+            "rebalance_date",
+            "last_execution_date",
             "portfolio_equity_after_cost",
             "portfolio_equity_optimistic",
             "portfolio_equity_base",

@@ -148,6 +148,48 @@ rows are consumed by `run_qvm_walkforward.py --factor-score-panel`.
 Portfolio construction and accounting outputs still need legacy parity before
 the fast path is used for research.
 
+## Walk-Forward Execution Timing
+
+`run_qvm_walkforward.py` separates the rebalance signal date from the execution
+fill date.
+
+`rebalance_close` is same-day accounting:
+
+```text
+rebalance_date == signal_date == execution_date == equity observation date
+```
+
+`next_open` and `next_close` form the signal on `rebalance_date` and fill
+orders on the next trading date where the selected execution price exists.
+Cash, holdings, tax lots, realized gains, costs, trade rows, holdings rows, and
+the equity observation row are updated at the fill-date valuation point. This
+prevents a strategy from receiving return between the signal close and the
+next-day fill.
+
+Summary rows include execution diagnostics:
+
+```text
+last_execution_date,execution_lag_days,pending_order_count,filled_order_count,unexecuted_order_count,missing_execution_price_count
+```
+
+Equity rows include both the observation date and the rebalance signal date:
+
+```text
+date,rebalance_date,last_execution_date
+```
+
+Portfolio, research-basket, filtered-universe benchmark, and market-benchmark
+equity are all updated to the same observation date for the row.
+
+Trade rows continue to expose:
+
+```text
+signal_date,execution_date
+```
+
+If a `next_open` or `next_close` order has no price on the next trading date,
+the order is skipped and `failure_type=missing_execution_price` is recorded.
+
 ## Walk-Forward Sector Cap Outputs
 
 `run_qvm_walkforward.py` can apply a generic portfolio construction sector cap

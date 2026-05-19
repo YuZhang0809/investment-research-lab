@@ -287,7 +287,7 @@ class P0P1CorrectnessTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Conflicting lifecycle exit dates"):
             run_qvm_walkforward.build_delisting_index(rows)
 
-    def test_next_day_execution_modes_are_disabled_until_fill_date_accounting(self) -> None:
+    def test_next_day_execution_modes_are_allowed_with_fill_date_accounting(self) -> None:
         args = Namespace(
             rebalance=None,
             frequency="monthly",
@@ -296,8 +296,9 @@ class P0P1CorrectnessTest(unittest.TestCase):
             cache_format=None,
         )
 
-        with self.assertRaisesRegex(ValueError, "fill-date accounting"):
-            run_qvm_walkforward.normalize_args(args)
+        normalized = run_qvm_walkforward.normalize_args(args)
+
+        self.assertEqual("next_open", normalized.execution_price)
 
     def test_build_universe_uses_latest_listing_snapshot_as_of_rebalance(self) -> None:
         config = {

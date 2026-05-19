@@ -208,7 +208,7 @@ class P2CorrectnessTest(unittest.TestCase):
                 prices,
                 [
                     {
-                        "date": "2026-01-31",
+                        "date": day,
                         "code": code,
                         "unadjusted_open": 100,
                         "unadjusted_close": 100,
@@ -216,6 +216,7 @@ class P2CorrectnessTest(unittest.TestCase):
                         "trading_value": 10_000_000,
                         "price_limit_flag": "false",
                     }
+                    for day in ["2026-01-31", "2026-02-01"]
                     for code in ["1001", "1002", "1003"]
                 ],
                 ["date", "code", "unadjusted_open", "unadjusted_close", "adjusted_close", "trading_value", "price_limit_flag"],
@@ -282,6 +283,8 @@ class P2CorrectnessTest(unittest.TestCase):
                     "2026-01-31",
                     "--frequency",
                     "monthly",
+                    "--execution-price",
+                    "next_open",
                     "--capital-jpy",
                     "100000",
                     "--out-dir",
@@ -313,10 +316,309 @@ class P2CorrectnessTest(unittest.TestCase):
                 exposures = list(csv.DictReader(file))
 
             self.assertEqual("True", summary[-1]["sector_cap_enabled"])
+            self.assertEqual("2026-02-01", summary[-1]["last_execution_date"])
             self.assertEqual("2", summary[-1]["sector_cap_unfilled_slots"])
             self.assertIn("sector_cap_unfilled_target", {row["failure_type"] for row in failures})
             self.assertEqual("Tech", exposures[0]["group"])
             self.assertEqual("1", exposures[0]["selected_count"])
+
+    def test_next_open_marks_equity_on_fill_date_without_prefill_return(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            prices = temp / "prices.csv"
+            listings = temp / "listings.csv"
+            fundamentals = temp / "fundamentals.csv"
+            config_path = temp / "next_open.yml"
+            out_dir = temp / "out"
+            report_dir = temp / "reports"
+
+            config_text = (ROOT / "configs" / "qvm_v0_1.example.yml").read_text(encoding="utf-8")
+            config_text = config_text.replace("spread_multiplier: 0.5", "spread_multiplier: 0.0", 1)
+            config_path.write_text(config_text, encoding="utf-8")
+            write_csv(
+                prices,
+                [
+                    {
+                        "date": "2026-01-31",
+                        "code": "1001",
+                        "unadjusted_open": 100,
+                        "unadjusted_close": 100,
+                        "adjusted_close": 100,
+                        "trading_value": 10_000_000,
+                        "price_limit_flag": "false",
+                    },
+                    {
+                        "date": "2026-02-01",
+                        "code": "1001",
+                        "unadjusted_open": 200,
+                        "unadjusted_close": 200,
+                        "adjusted_close": 200,
+                        "trading_value": 10_000_000,
+                        "price_limit_flag": "false",
+                    },
+                ],
+                ["date", "code", "unadjusted_open", "unadjusted_close", "adjusted_close", "trading_value", "price_limit_flag"],
+            )
+            write_csv(listings, [{"code": "1001", "listed_date": "2020-01-01", "delisted_date": ""}], ["code", "listed_date", "delisted_date"])
+            write_csv(fundamentals, [], ["code"])
+
+            original_argv = sys.argv[:]
+            original_run_stages = run_qvm_walkforward.run_stages
+
+            def fake_run_stages(args, rebalance_date):
+                suffix = rebalance_date.strftime("%Y%m%d")
+                stage = temp / "stage"
+                universe = stage / f"universe_{suffix}.csv"
+                factors = stage / f"factors_{suffix}.csv"
+                scores = stage / f"scores_{suffix}.csv"
+                write_csv(universe, [{"code": "1001", "lot_size": "100", "median_60d_trading_value": ""}], ["code", "lot_size", "median_60d_trading_value"])
+                write_csv(factors, [{"code": "1001"}], ["code"])
+                write_csv(scores, [{"code": "1001", "rank": "1", "latest_unadjusted_close": "100"}], ["code", "rank", "latest_unadjusted_close"])
+                return universe, factors, scores
+
+            try:
+                run_qvm_walkforward.run_stages = fake_run_stages
+                sys.argv = [
+                    "run_qvm_walkforward.py",
+                    "--config",
+                    str(config_path),
+                    "--listings",
+                    str(listings),
+                    "--prices",
+                    str(prices),
+                    "--fundamentals",
+                    str(fundamentals),
+                    "--start-date",
+                    "2026-01-31",
+                    "--end-date",
+                    "2026-01-31",
+                    "--frequency",
+                    "monthly",
+                    "--execution-price",
+                    "next_open",
+                    "--cost-scenario",
+                    "optimistic",
+                    "--capital-jpy",
+                    "20000",
+                    "--target-holdings",
+                    "1",
+                    "--out-dir",
+                    str(out_dir),
+                    "--report-dir",
+                    str(report_dir),
+                    "--no-manifest",
+                    "--skip-stage-manifest",
+                    "--run-label",
+                    "next_open",
+                ]
+
+                self.assertEqual(0, run_qvm_walkforward.main())
+            finally:
+                run_qvm_walkforward.run_stages = original_run_stages
+                sys.argv = original_argv
+
+            with (out_dir / "qvm_walkforward_summary_next_open_202601_202601.csv").open("r", encoding="utf-8", newline="") as file:
+                summary = list(csv.DictReader(file))
+            with (out_dir / "qvm_walkforward_trades_next_open_202601_202601.csv").open("r", encoding="utf-8", newline="") as file:
+                trades = list(csv.DictReader(file))
+            with (out_dir / "qvm_walkforward_holdings_next_open_202601_202601.csv").open("r", encoding="utf-8", newline="") as file:
+                holdings = list(csv.DictReader(file))
+            with (out_dir / "qvm_walkforward_equity_next_open_202601_202601.csv").open("r", encoding="utf-8", newline="") as file:
+                equity = list(csv.DictReader(file))
+
+            self.assertEqual("2026-02-01", trades[0]["execution_date"])
+            self.assertEqual("200.0", trades[0]["price"])
+            self.assertAlmostEqual(20000.0, float(summary[-1]["portfolio_equity_after_cost"]))
+            self.assertEqual("2026-02-01", summary[-1]["last_execution_date"])
+            self.assertEqual("1", summary[-1]["execution_lag_days"])
+            self.assertEqual("2026-02-01", holdings[0]["date"])
+            self.assertEqual("2026-02-01", equity[0]["date"])
+
+    def test_next_close_uses_next_day_close_price(self) -> None:
+        points = {
+            "1001": [
+                run_qvm_walkforward.PricePoint(date(2026, 1, 31), 99.0, 100.0, 100.0, 1_000_000.0, False),
+                run_qvm_walkforward.PricePoint(date(2026, 2, 1), 150.0, 210.0, 210.0, 1_000_000.0, False),
+            ]
+        }
+
+        fill = run_qvm_walkforward.execution_point(points, [date(2026, 1, 31), date(2026, 2, 1)], "1001", date(2026, 1, 31), "next_close")
+
+        self.assertIsNotNone(fill)
+        self.assertEqual(date(2026, 2, 1), fill.date)
+        self.assertEqual(210.0, run_qvm_walkforward.execution_price(fill, "next_close"))
+
+    def test_next_open_missing_execution_price_skips_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            prices = temp / "prices.csv"
+            listings = temp / "listings.csv"
+            fundamentals = temp / "fundamentals.csv"
+            out_dir = temp / "out"
+            report_dir = temp / "reports"
+
+            write_csv(
+                prices,
+                [
+                    {"date": "2026-01-31", "code": "1001", "unadjusted_open": 100, "unadjusted_close": 100, "adjusted_close": 100, "trading_value": 10_000_000, "price_limit_flag": "false"},
+                    {"date": "2026-02-01", "code": "9999", "unadjusted_open": 100, "unadjusted_close": 100, "adjusted_close": 100, "trading_value": 10_000_000, "price_limit_flag": "false"},
+                ],
+                ["date", "code", "unadjusted_open", "unadjusted_close", "adjusted_close", "trading_value", "price_limit_flag"],
+            )
+            write_csv(listings, [{"code": "1001", "listed_date": "2020-01-01", "delisted_date": ""}], ["code", "listed_date", "delisted_date"])
+            write_csv(fundamentals, [], ["code"])
+
+            original_argv = sys.argv[:]
+            original_run_stages = run_qvm_walkforward.run_stages
+
+            def fake_run_stages(args, rebalance_date):
+                suffix = rebalance_date.strftime("%Y%m%d")
+                stage = temp / "stage"
+                universe = stage / f"universe_{suffix}.csv"
+                factors = stage / f"factors_{suffix}.csv"
+                scores = stage / f"scores_{suffix}.csv"
+                write_csv(universe, [{"code": "1001", "lot_size": "100", "median_60d_trading_value": ""}], ["code", "lot_size", "median_60d_trading_value"])
+                write_csv(factors, [{"code": "1001"}], ["code"])
+                write_csv(scores, [{"code": "1001", "rank": "1", "latest_unadjusted_close": "100"}], ["code", "rank", "latest_unadjusted_close"])
+                return universe, factors, scores
+
+            try:
+                run_qvm_walkforward.run_stages = fake_run_stages
+                sys.argv = [
+                    "run_qvm_walkforward.py",
+                    "--config",
+                    str(ROOT / "configs" / "qvm_v0_1.example.yml"),
+                    "--listings",
+                    str(listings),
+                    "--prices",
+                    str(prices),
+                    "--fundamentals",
+                    str(fundamentals),
+                    "--start-date",
+                    "2026-01-31",
+                    "--end-date",
+                    "2026-01-31",
+                    "--frequency",
+                    "monthly",
+                    "--execution-price",
+                    "next_open",
+                    "--capital-jpy",
+                    "20000",
+                    "--target-holdings",
+                    "1",
+                    "--out-dir",
+                    str(out_dir),
+                    "--report-dir",
+                    str(report_dir),
+                    "--no-manifest",
+                    "--skip-stage-manifest",
+                    "--run-label",
+                    "missing_exec",
+                ]
+
+                self.assertEqual(0, run_qvm_walkforward.main())
+            finally:
+                run_qvm_walkforward.run_stages = original_run_stages
+                sys.argv = original_argv
+
+            with (out_dir / "qvm_walkforward_summary_missing_exec_202601_202601.csv").open("r", encoding="utf-8", newline="") as file:
+                summary = list(csv.DictReader(file))
+            with (out_dir / "qvm_walkforward_failure_cases_missing_exec_202601_202601.csv").open("r", encoding="utf-8", newline="") as file:
+                failures = list(csv.DictReader(file))
+
+            self.assertEqual("1", summary[-1]["missing_execution_price_count"])
+            self.assertEqual("0", summary[-1]["filled_order_count"])
+            self.assertIn("missing_execution_price", {row["failure_type"] for row in failures})
+
+    def test_next_close_sell_realized_gain_uses_execution_date(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            prices = temp / "prices.csv"
+            listings = temp / "listings.csv"
+            fundamentals = temp / "fundamentals.csv"
+            config_path = temp / "next_close_tax.yml"
+            out_dir = temp / "out"
+            report_dir = temp / "reports"
+
+            config_text = (ROOT / "configs" / "qvm_v0_1.example.yml").read_text(encoding="utf-8")
+            config_text = config_text.replace("spread_multiplier: 0.5", "spread_multiplier: 0.0", 1)
+            config_path.write_text(config_text, encoding="utf-8")
+            write_csv(
+                prices,
+                [
+                    {"date": "2026-01-31", "code": "1001", "unadjusted_open": 100, "unadjusted_close": 100, "adjusted_close": 100, "trading_value": 10_000_000, "price_limit_flag": "false"},
+                    {"date": "2026-02-01", "code": "1001", "unadjusted_open": 100, "unadjusted_close": 100, "adjusted_close": 100, "trading_value": 10_000_000, "price_limit_flag": "false"},
+                    {"date": "2026-02-28", "code": "1001", "unadjusted_open": 120, "unadjusted_close": 120, "adjusted_close": 120, "trading_value": 10_000_000, "price_limit_flag": "false"},
+                    {"date": "2026-03-01", "code": "1001", "unadjusted_open": 150, "unadjusted_close": 150, "adjusted_close": 150, "trading_value": 10_000_000, "price_limit_flag": "false"},
+                ],
+                ["date", "code", "unadjusted_open", "unadjusted_close", "adjusted_close", "trading_value", "price_limit_flag"],
+            )
+            write_csv(listings, [{"code": "1001", "listed_date": "2020-01-01", "delisted_date": ""}], ["code", "listed_date", "delisted_date"])
+            write_csv(fundamentals, [], ["code"])
+
+            original_argv = sys.argv[:]
+            original_run_stages = run_qvm_walkforward.run_stages
+
+            def fake_run_stages(args, rebalance_date):
+                suffix = rebalance_date.strftime("%Y%m%d")
+                stage = temp / "stage"
+                universe = stage / f"universe_{suffix}.csv"
+                factors = stage / f"factors_{suffix}.csv"
+                scores = stage / f"scores_{suffix}.csv"
+                write_csv(universe, [{"code": "1001", "lot_size": "100", "median_60d_trading_value": ""}], ["code", "lot_size", "median_60d_trading_value"])
+                write_csv(factors, [{"code": "1001"}], ["code"])
+                rows = [{"code": "1001", "rank": "1", "latest_unadjusted_close": "100"}] if rebalance_date == date(2026, 1, 31) else []
+                write_csv(scores, rows, ["code", "rank", "latest_unadjusted_close"])
+                return universe, factors, scores
+
+            try:
+                run_qvm_walkforward.run_stages = fake_run_stages
+                sys.argv = [
+                    "run_qvm_walkforward.py",
+                    "--config",
+                    str(config_path),
+                    "--listings",
+                    str(listings),
+                    "--prices",
+                    str(prices),
+                    "--fundamentals",
+                    str(fundamentals),
+                    "--start-date",
+                    "2026-01-31",
+                    "--end-date",
+                    "2026-02-28",
+                    "--frequency",
+                    "monthly",
+                    "--execution-price",
+                    "next_close",
+                    "--cost-scenario",
+                    "optimistic",
+                    "--capital-jpy",
+                    "10000",
+                    "--target-holdings",
+                    "1",
+                    "--out-dir",
+                    str(out_dir),
+                    "--report-dir",
+                    str(report_dir),
+                    "--no-manifest",
+                    "--skip-stage-manifest",
+                    "--run-label",
+                    "next_close_tax",
+                ]
+
+                self.assertEqual(0, run_qvm_walkforward.main())
+            finally:
+                run_qvm_walkforward.run_stages = original_run_stages
+                sys.argv = original_argv
+
+            with (out_dir / "qvm_walkforward_trades_next_close_tax_202601_202602.csv").open("r", encoding="utf-8", newline="") as file:
+                trades = list(csv.DictReader(file))
+            sell = [row for row in trades if row["side"] == "SELL"][0]
+
+            self.assertEqual("2026-03-01", sell["execution_date"])
+            self.assertGreater(float(sell["realized_gain"]), 0)
+            self.assertGreater(float(sell["estimated_tax"]), 0)
 
     def test_score_ties_rank_by_code_not_input_order(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
