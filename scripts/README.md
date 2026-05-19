@@ -148,8 +148,12 @@ rows carry both `signal_date` and `execution_date`; summary/equity rows expose
 `last_execution_date` and execution diagnostics. New holdings are not marked as
 if they existed before the fill date. Order deltas use adjusted-share retargeting
 when signal and fill dates differ, so splits between signal and fill do not leave
-residual positions. If a code has no execution price on the next trading date,
-the order is skipped with `missing_execution_price`.
+residual positions. If a code has no executable price on the intended next
+trading date, the order is skipped; the engine does not forward-fill or roll the
+order by default. Failure cases distinguish `missing_execution_price_row`,
+`execution_date_not_tradable`, and
+`execution_price_unavailable_on_execution_date`, while
+`missing_execution_price_count` remains a broad summary aggregate.
 
 ### Sector Cap
 

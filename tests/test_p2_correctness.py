@@ -487,7 +487,11 @@ class P2CorrectnessTest(unittest.TestCase):
         self.assertEqual(date(2026, 2, 1), fill.date)
         self.assertEqual(210.0, run_qvm_walkforward.execution_price(fill, "next_close"))
 
-    def test_next_open_missing_execution_price_skips_order(self) -> None:
+    def run_next_open_single_order_case(
+        self,
+        price_rows: list[dict[str, object]],
+        run_label: str,
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             prices = temp / "prices.csv"
@@ -498,11 +502,18 @@ class P2CorrectnessTest(unittest.TestCase):
 
             write_csv(
                 prices,
+                price_rows,
                 [
-                    {"date": "2026-01-31", "code": "1001", "unadjusted_open": 100, "unadjusted_close": 100, "adjusted_close": 100, "trading_value": 10_000_000, "price_limit_flag": "false"},
-                    {"date": "2026-02-01", "code": "9999", "unadjusted_open": 100, "unadjusted_close": 100, "adjusted_close": 100, "trading_value": 10_000_000, "price_limit_flag": "false"},
+                    "date",
+                    "code",
+                    "unadjusted_open",
+                    "unadjusted_close",
+                    "adjusted_close",
+                    "volume",
+                    "trading_value",
+                    "tradable_flag",
+                    "price_limit_flag",
                 ],
-                ["date", "code", "unadjusted_open", "unadjusted_close", "adjusted_close", "trading_value", "price_limit_flag"],
             )
             write_csv(listings, [{"code": "1001", "listed_date": "2020-01-01", "delisted_date": ""}], ["code", "listed_date", "delisted_date"])
             write_csv(fundamentals, [], ["code"])
@@ -552,7 +563,7 @@ class P2CorrectnessTest(unittest.TestCase):
                     "--no-manifest",
                     "--skip-stage-manifest",
                     "--run-label",
-                    "missing_exec",
+                    run_label,
                 ]
 
                 self.assertEqual(0, run_qvm_walkforward.main())
@@ -560,14 +571,73 @@ class P2CorrectnessTest(unittest.TestCase):
                 run_qvm_walkforward.run_stages = original_run_stages
                 sys.argv = original_argv
 
-            with (out_dir / "qvm_walkforward_summary_missing_exec_202601_202601.csv").open("r", encoding="utf-8", newline="") as file:
+            with (out_dir / f"qvm_walkforward_summary_{run_label}_202601_202601.csv").open("r", encoding="utf-8", newline="") as file:
                 summary = list(csv.DictReader(file))
-            with (out_dir / "qvm_walkforward_failure_cases_missing_exec_202601_202601.csv").open("r", encoding="utf-8", newline="") as file:
+            with (out_dir / f"qvm_walkforward_failure_cases_{run_label}_202601_202601.csv").open("r", encoding="utf-8", newline="") as file:
                 failures = list(csv.DictReader(file))
+            with (out_dir / f"qvm_walkforward_trades_{run_label}_202601_202601.csv").open("r", encoding="utf-8", newline="") as file:
+                trades = list(csv.DictReader(file))
+            return summary, failures, trades
 
-            self.assertEqual("1", summary[-1]["missing_execution_price_count"])
-            self.assertEqual("0", summary[-1]["filled_order_count"])
-            self.assertIn("missing_execution_price", {row["failure_type"] for row in failures})
+    def test_next_open_missing_execution_price_row_skips_order(self) -> None:
+        summary, failures, trades = self.run_next_open_single_order_case(
+            [
+                {"date": "2026-01-31", "code": "1001", "unadjusted_open": 100, "unadjusted_close": 100, "adjusted_close": 100, "volume": 1000, "trading_value": 10_000_000, "tradable_flag": "true", "price_limit_flag": "false"},
+                {"date": "2026-02-01", "code": "9999", "unadjusted_open": 100, "unadjusted_close": 100, "adjusted_close": 100, "volume": 1000, "trading_value": 10_000_000, "tradable_flag": "true", "price_limit_flag": "false"},
+            ],
+            "missing_exec_row",
+        )
+
+        self.assertEqual("1", summary[-1]["missing_execution_price_count"])
+        self.assertEqual("1", summary[-1]["missing_execution_price_row_count"])
+        self.assertEqual("0", summary[-1]["execution_date_not_tradable_count"])
+        self.assertEqual("0", summary[-1]["execution_price_unavailable_on_execution_date_count"])
+        self.assertEqual("0", summary[-1]["filled_order_count"])
+        self.assertIn("missing_execution_price_row", {row["failure_type"] for row in failures})
+        self.assertEqual("missing_execution_price_row", trades[0]["constraint_reason"])
+        self.assertIn("has_price_row=False", failures[0]["detail"])
+
+    def test_next_open_not_tradable_execution_date_skips_order(self) -> None:
+        summary, failures, trades = self.run_next_open_single_order_case(
+            [
+                {"date": "2026-01-31", "code": "1001", "unadjusted_open": 100, "unadjusted_close": 100, "adjusted_close": 100, "volume": 1000, "trading_value": 10_000_000, "tradable_flag": "true", "price_limit_flag": "false"},
+                {"date": "2026-02-01", "code": "1001", "unadjusted_open": "", "unadjusted_close": "", "adjusted_close": "", "volume": "", "trading_value": "", "tradable_flag": "false", "price_limit_flag": "false"},
+            ],
+            "not_tradable_exec",
+        )
+
+        self.assertEqual("1", summary[-1]["missing_execution_price_count"])
+        self.assertEqual("0", summary[-1]["missing_execution_price_row_count"])
+        self.assertEqual("1", summary[-1]["execution_date_not_tradable_count"])
+        self.assertEqual("0", summary[-1]["execution_price_unavailable_on_execution_date_count"])
+        self.assertEqual("0", summary[-1]["filled_order_count"])
+        self.assertIn("execution_date_not_tradable", {row["failure_type"] for row in failures})
+        self.assertEqual("execution_date_not_tradable", trades[0]["constraint_reason"])
+        self.assertIn("has_price_row=True", failures[0]["detail"])
+        self.assertIn("tradable_flag=False", failures[0]["detail"])
+        self.assertIn("has_open=False", failures[0]["detail"])
+        self.assertIn("has_close=False", failures[0]["detail"])
+        self.assertIn("has_volume=False", failures[0]["detail"])
+        self.assertIn("has_trading_value=False", failures[0]["detail"])
+
+    def test_next_open_missing_open_skips_order_without_using_close(self) -> None:
+        summary, failures, trades = self.run_next_open_single_order_case(
+            [
+                {"date": "2026-01-31", "code": "1001", "unadjusted_open": 100, "unadjusted_close": 100, "adjusted_close": 100, "volume": 1000, "trading_value": 10_000_000, "tradable_flag": "true", "price_limit_flag": "false"},
+                {"date": "2026-02-01", "code": "1001", "unadjusted_open": "", "unadjusted_close": 100, "adjusted_close": 100, "volume": 1000, "trading_value": 10_000_000, "tradable_flag": "true", "price_limit_flag": "false"},
+            ],
+            "missing_exec_open",
+        )
+
+        self.assertEqual("1", summary[-1]["missing_execution_price_count"])
+        self.assertEqual("0", summary[-1]["missing_execution_price_row_count"])
+        self.assertEqual("0", summary[-1]["execution_date_not_tradable_count"])
+        self.assertEqual("1", summary[-1]["execution_price_unavailable_on_execution_date_count"])
+        self.assertEqual("0", summary[-1]["filled_order_count"])
+        self.assertIn("execution_price_unavailable_on_execution_date", {row["failure_type"] for row in failures})
+        self.assertEqual("execution_price_unavailable_on_execution_date", trades[0]["constraint_reason"])
+        self.assertIn("has_open=False", failures[0]["detail"])
+        self.assertIn("has_close=True", failures[0]["detail"])
 
     def test_next_close_sell_realized_gain_uses_execution_date(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

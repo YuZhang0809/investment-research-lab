@@ -46,6 +46,17 @@ class PricePoint:
     price_limit_flag: bool
 
 
+@dataclass(frozen=True)
+class RawPriceStatus:
+    date: date
+    code: str
+    tradable_flag: bool | None
+    has_open: bool
+    has_close: bool
+    has_volume: bool
+    has_trading_value: bool
+
+
 @dataclass
 class MarketBenchmarkPoint:
     date: date
@@ -67,6 +78,15 @@ class SectorCapBlockedCandidate:
     group: str
     rank: int
     phase: str
+
+
+EXECUTION_PRICE_FAILURE_TYPES = {
+    "missing_execution_price",
+    "missing_execution_price_row",
+    "execution_date_not_tradable",
+    "execution_price_unavailable_on_execution_date",
+}
+SPECIFIC_EXECUTION_PRICE_FAILURE_TYPES = EXECUTION_PRICE_FAILURE_TYPES - {"missing_execution_price"}
 
 
 @dataclass
@@ -171,6 +191,34 @@ def validate_unique_key_rows(rows: list[dict[str, Any]], key_fields: list[str], 
             details = ";".join(f"{field}={value}" for field, value in zip(key_fields, key))
             raise ValueError(f"Duplicate {label} rows for {details}.")
         seen.add(key)
+
+
+def build_raw_price_status_index(price_rows: list[dict[str, str]]) -> dict[tuple[str, date], RawPriceStatus]:
+    values: dict[tuple[str, date], RawPriceStatus] = {}
+    for row in price_rows:
+        code = (row.get("code") or "").strip()
+        row_date = parse_date(row.get("date"), field_name="prices.date")
+        if not code or row_date is None:
+            continue
+        values[(code, row_date)] = RawPriceStatus(
+            date=row_date,
+            code=code,
+            tradable_flag=parse_bool(row.get("tradable_flag"), default=None),
+            has_open=parse_float(row.get("unadjusted_open")) is not None,
+            has_close=parse_float(row.get("unadjusted_close")) is not None,
+            has_volume=parse_float(row.get("volume")) is not None,
+            has_trading_value=parse_float(row.get("trading_value")) is not None,
+        )
+    return values
+
+
+def all_raw_price_dates(price_rows: list[dict[str, str]]) -> list[date]:
+    values: set[date] = set()
+    for row in price_rows:
+        row_date = parse_date(row.get("date"), field_name="prices.date")
+        if row_date is not None:
+            values.add(row_date)
+    return sorted(values)
 
 
 def build_price_index(price_rows: list[dict[str, str]]) -> dict[str, list[PricePoint]]:
@@ -382,6 +430,53 @@ def execution_price(point: PricePoint, mode: str) -> float:
     if mode == "next_open":
         return point.unadjusted_open
     return point.unadjusted_close
+
+
+def requested_execution_price_available(status: RawPriceStatus | None, mode: str) -> bool:
+    if status is None:
+        return False
+    if mode == "next_open":
+        return status.has_open
+    return status.has_close
+
+
+def raw_price_row_blank(status: RawPriceStatus) -> bool:
+    return not (status.has_open or status.has_close or status.has_volume or status.has_trading_value)
+
+
+def execution_price_failure_type(
+    *,
+    mode: str,
+    intended_execution_date: date | None,
+    raw_status: RawPriceStatus | None,
+    fill_point: PricePoint | None,
+) -> str | None:
+    if intended_execution_date is None or raw_status is None:
+        return "missing_execution_price_row"
+    if raw_status.tradable_flag is False or raw_price_row_blank(raw_status):
+        return "execution_date_not_tradable"
+    if not requested_execution_price_available(raw_status, mode) or fill_point is None:
+        return "execution_price_unavailable_on_execution_date"
+    return None
+
+
+def execution_price_failure_detail(
+    *,
+    mode: str,
+    intended_execution_date: date | None,
+    raw_status: RawPriceStatus | None,
+) -> str:
+    fields = {
+        "execution_price": mode,
+        "intended_execution_date": intended_execution_date or "",
+        "has_price_row": raw_status is not None,
+        "tradable_flag": "" if raw_status is None or raw_status.tradable_flag is None else raw_status.tradable_flag,
+        "has_open": raw_status.has_open if raw_status else False,
+        "has_close": raw_status.has_close if raw_status else False,
+        "has_volume": raw_status.has_volume if raw_status else False,
+        "has_trading_value": raw_status.has_trading_value if raw_status else False,
+    }
+    return ";".join(f"{key}={value}" for key, value in fields.items())
 
 
 def adjustment_ratio(point: PricePoint) -> float:
@@ -1654,6 +1749,9 @@ def write_report(path: Path, summary_rows: list[dict[str, Any]], initial_capital
         f"| filled orders | {final.get('filled_order_count', '')} |",
         f"| unexecuted orders | {final.get('unexecuted_order_count', '')} |",
         f"| missing execution price | {final.get('missing_execution_price_count', '')} |",
+        f"| missing execution price row | {final.get('missing_execution_price_row_count', '')} |",
+        f"| execution date not tradable | {final.get('execution_date_not_tradable_count', '')} |",
+        f"| execution price unavailable | {final.get('execution_price_unavailable_on_execution_date_count', '')} |",
         f"| sector cap blocked candidates | {final.get('sector_cap_blocked_candidates', '')} |",
         f"| sector cap unfilled slots | {final.get('sector_cap_unfilled_slots', '')} |",
         f"| max selected sector weight | {pct(parse_float(final.get('max_sector_weight_selected'), default=0) or 0)} |",
@@ -1709,6 +1807,8 @@ def main() -> int:
         )
 
     delisting_dates = build_delisting_index(lifecycle_rows_for_check)
+    raw_price_status_index = build_raw_price_status_index(price_rows)
+    execution_calendar = all_raw_price_dates(price_rows)
     price_index = build_price_index(price_rows)
     price_calendar = all_price_dates(price_index)
     dates = rebalance_dates(price_calendar, start_date, end_date, args.frequency)
@@ -1891,13 +1991,16 @@ def main() -> int:
         pending_order_count = 0
         filled_order_count = 0
         missing_execution_price_count = 0
+        missing_execution_price_row_count = 0
+        execution_date_not_tradable_count = 0
+        execution_price_unavailable_on_execution_date_count = 0
         turnover_value = 0.0
         estimated_cost_base = 0.0
         last_execution_date: date | None = None
         intended_execution_date = (
             rebalance_date
             if args.execution_price == "rebalance_close"
-            else next_trading_date(price_calendar, rebalance_date)
+            else next_trading_date(execution_calendar, rebalance_date)
         )
 
         for code in all_codes:
@@ -1905,7 +2008,22 @@ def main() -> int:
             signal_target_shares = targets.get(code, 0)
             position_point = price_at(price_index, code, rebalance_date)
             signal_point = price_on_date(price_index, code, rebalance_date)
-            fill_point = execution_point(price_index, price_calendar, code, rebalance_date, args.execution_price)
+            fill_point = execution_point(price_index, execution_calendar, code, rebalance_date, args.execution_price)
+            raw_execution_status = (
+                raw_price_status_index.get((code, intended_execution_date))
+                if intended_execution_date is not None
+                else None
+            )
+            execution_failure_type = (
+                execution_price_failure_type(
+                    mode=args.execution_price,
+                    intended_execution_date=intended_execution_date,
+                    raw_status=raw_execution_status,
+                    fill_point=fill_point,
+                )
+                if args.execution_price != "rebalance_close"
+                else None
+            )
             signal_current_shares = (
                 int(round(actual_shares_from_adjusted(current_adjusted_shares, position_point)))
                 if position_point
@@ -1916,14 +2034,24 @@ def main() -> int:
                 continue
             if args.execution_price != "rebalance_close":
                 pending_order_count += 1
-            if not signal_point or not fill_point:
+            if not signal_point or execution_failure_type is not None or not fill_point:
                 skipped_orders += 1
-                failure_reason = "missing_signal_price" if not signal_point else "missing_execution_price"
-                if failure_reason == "missing_execution_price":
+                failure_reason = (
+                    "missing_signal_price"
+                    if not signal_point
+                    else execution_failure_type or "missing_execution_price"
+                )
+                if failure_reason in EXECUTION_PRICE_FAILURE_TYPES:
                     missing_execution_price_count += 1
+                if failure_reason == "missing_execution_price_row":
+                    missing_execution_price_row_count += 1
+                if failure_reason == "execution_date_not_tradable":
+                    execution_date_not_tradable_count += 1
+                if failure_reason == "execution_price_unavailable_on_execution_date":
+                    execution_price_unavailable_on_execution_date_count += 1
                 failure_date = (
                     intended_execution_date
-                    if failure_reason == "missing_execution_price" and intended_execution_date is not None
+                    if failure_reason in EXECUTION_PRICE_FAILURE_TYPES and intended_execution_date is not None
                     else rebalance_date
                 )
                 failure_rows.append(
@@ -1932,8 +2060,16 @@ def main() -> int:
                         "code": code,
                         "failure_type": failure_reason,
                         "detail": (
-                            f"execution_price={args.execution_price};"
-                            f"intended_execution_date={intended_execution_date or ''}"
+                            execution_price_failure_detail(
+                                mode=args.execution_price,
+                                intended_execution_date=intended_execution_date,
+                                raw_status=raw_execution_status,
+                            )
+                            if failure_reason in SPECIFIC_EXECUTION_PRICE_FAILURE_TYPES
+                            else (
+                                f"execution_price={args.execution_price};"
+                                f"intended_execution_date={intended_execution_date or ''}"
+                            )
                         ),
                         "value": 0,
                     }
@@ -2206,6 +2342,9 @@ def main() -> int:
             "filled_order_count": filled_order_count,
             "unexecuted_order_count": skipped_orders,
             "missing_execution_price_count": missing_execution_price_count,
+            "missing_execution_price_row_count": missing_execution_price_row_count,
+            "execution_date_not_tradable_count": execution_date_not_tradable_count,
+            "execution_price_unavailable_on_execution_date_count": execution_price_unavailable_on_execution_date_count,
             "cost_scenario": args.cost_scenario,
             "capital_jpy": args.capital_jpy,
             "target_holdings": args.target_holdings or config["portfolio"]["executable_portfolio"].get("target_holdings_max", ""),
@@ -2325,6 +2464,9 @@ def main() -> int:
             "filled_order_count",
             "unexecuted_order_count",
             "missing_execution_price_count",
+            "missing_execution_price_row_count",
+            "execution_date_not_tradable_count",
+            "execution_price_unavailable_on_execution_date_count",
             "cost_scenario",
             "capital_jpy",
             "target_holdings",

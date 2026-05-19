@@ -171,7 +171,7 @@ leave residual holdings or under-size target buys.
 Summary rows include execution diagnostics:
 
 ```text
-last_execution_date,execution_lag_days,pending_order_count,filled_order_count,unexecuted_order_count,missing_execution_price_count
+last_execution_date,execution_lag_days,pending_order_count,filled_order_count,unexecuted_order_count,missing_execution_price_count,missing_execution_price_row_count,execution_date_not_tradable_count,execution_price_unavailable_on_execution_date_count
 ```
 
 Equity rows include both the observation date and the rebalance signal date:
@@ -189,8 +189,19 @@ Trade rows continue to expose:
 signal_date,execution_date
 ```
 
-If a `next_open` or `next_close` order has no price on the next trading date,
-the order is skipped and `failure_type=missing_execution_price` is recorded.
+If a `next_open` or `next_close` order has no executable price on the intended
+next trading date, the engine treats it as a no-fill. It does not forward-fill
+the execution price and does not roll the order to a later date by default.
+Specific failure-case types distinguish the reason:
+
+```text
+missing_execution_price_row
+execution_date_not_tradable
+execution_price_unavailable_on_execution_date
+```
+
+The broad `missing_execution_price_count` summary field remains as an aggregate
+for backward-compatible monitoring.
 
 ## Walk-Forward Sector Cap Outputs
 
