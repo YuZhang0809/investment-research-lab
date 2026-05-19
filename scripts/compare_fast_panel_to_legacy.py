@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
@@ -52,8 +52,19 @@ def build_parser() -> argparse.ArgumentParser:
 def text(value: Any) -> str:
     if value is None:
         return ""
+    try:
+        if value != value:
+            return ""
+    except TypeError:
+        pass
+    if isinstance(value, datetime):
+        if value.time() == time.min:
+            return value.date().isoformat()
+        return value.isoformat()
     if isinstance(value, date):
         return value.isoformat()
+    if str(value) in {"NaT", "nan", "None"}:
+        return ""
     return str(value)
 
 

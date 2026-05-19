@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 
@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from build_rebalance_price_universe_panel import build_panel, build_panel_frame  # noqa: E402
-from compare_fast_panel_to_legacy import DEFAULT_COMPARE_FIELDS, compare_fast_to_legacy  # noqa: E402
+from compare_fast_panel_to_legacy import DEFAULT_COMPARE_FIELDS, compare_fast_to_legacy, compare_rows  # noqa: E402
 from research_common import read_csv, write_csv  # noqa: E402
 
 
@@ -195,6 +195,16 @@ def write_synthetic_fixture(temp: Path) -> tuple[Path, Path, Path, date, date]:
 
 
 class FastPriceUniversePanelTest(unittest.TestCase):
+    def test_compare_rows_normalizes_midnight_datetime_keys(self) -> None:
+        diffs = compare_rows(
+            legacy_rows=[{"rebalance_date": date(2026, 3, 31), "code": "1001", "included_flag": True}],
+            fast_rows=[{"rebalance_date": datetime(2026, 3, 31), "code": "1001", "included_flag": True}],
+            fields=["included_flag"],
+            tolerance=1e-9,
+        )
+
+        self.assertEqual([], diffs)
+
     def test_quarterly_frequency_filters_monthly_rebalances_after_aggregation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
