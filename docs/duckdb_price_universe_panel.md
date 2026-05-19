@@ -157,11 +157,47 @@ python scripts\compare_fast_panel_to_legacy.py `
   --out path\to\fast_panel_diff.csv
 ```
 
-Phase 3 should start only after the private parity run has no unexplained
-differences. The next planned experiments are:
+After the private Phase 1/2 parity run has no unexplained differences, the
+next engineering step is to run the full walk-forward with the fast panel as
+the universe-stage input:
+
+```powershell
+python scripts\run_qvm_walkforward.py `
+  --config path\to\config.yml `
+  --listings path\to\listings.csv `
+  --prices path\to\prices.csv `
+  --fundamentals path\to\fundamentals.csv `
+  --start-date YYYY-MM-DD `
+  --end-date YYYY-MM-DD `
+  --frequency monthly `
+  --price-universe-panel path\to\fast_panel.parquet `
+  --out-dir path\to\fast_walkforward_outputs `
+  --report-dir path\to\fast_walkforward_reports
+```
+
+This only replaces the universe stage. Fundamentals, raw factors, scoring,
+portfolio construction, benchmark accounting, and reports still use the
+existing walk-forward logic. Compare the fast run against a legacy run with the
+same config and runtime parameters before using the fast path for research.
+
+Walk-forward parity should cover:
 
 ```text
-Phase 3: fundamentals latest-as-of selection
-Phase 4: raw Q/V/M factor computation
-Phase 5: optional run_qvm_walkforward.py integration through an explicit fast-panel input
+summary
+trades
+holdings
+equity
+failure cases
+benchmark and market benchmark columns when supplied
+```
+
+`cache_fingerprint` may differ because the universe input source changed. Other
+differences need a documented explanation.
+
+Later planned phases remain:
+
+```text
+fundamentals latest-as-of selection in DuckDB
+raw Q/V/M factor computation in DuckDB
+broader factor-panel reuse once parity is proven
 ```

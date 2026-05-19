@@ -60,6 +60,27 @@ fingerprinted namespaces instead of silently reusing stale tables.
 `--force-rebuild` refreshes files inside the current namespaces. Summary, trades,
 holdings, equity, and failure-case outputs remain CSV.
 
+After a DuckDB price/universe panel has passed parity checks, it can replace
+only the universe stage of the walk-forward run:
+
+```powershell
+python scripts\run_qvm_walkforward.py `
+  --config configs\qvm_v0_1.example.yml `
+  --listings <listings.csv> `
+  --prices <prices.csv> `
+  --fundamentals <fundamentals.csv> `
+  --start-date 2026-01-01 `
+  --end-date 2026-12-31 `
+  --rebalance monthly `
+  --price-universe-panel <rebalance_price_universe_panel.parquet> `
+  --cache-format parquet `
+  --no-manifest
+```
+
+This does not change factor, score, portfolio, benchmark, or report logic.
+Compare the summary, trades, holdings, equity, and failure-case CSVs against a
+same-parameter legacy run before treating the fast path as research-ready.
+
 `--strategy-version weighted_groups` uses `strategy.scoring.weights` and
 `strategy.filters` from the config. It writes `composite_score`,
 `filter_status`, and `filter_reasons` while keeping `qvm_score` populated for

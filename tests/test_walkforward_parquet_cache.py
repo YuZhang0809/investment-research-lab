@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from duckdb_query import parquet_scan, query  # noqa: E402
-from research_common import load_yaml  # noqa: E402
+from build_rebalance_price_universe_panel import build_panel  # noqa: E402
+from research_common import load_yaml, read_csv  # noqa: E402
 import run_qvm_walkforward  # noqa: E402
 
 
@@ -181,6 +182,10 @@ def cache_namespace(cache_dir: Path, layer: str) -> Path:
     return namespaces[0]
 
 
+def without_fields(rows: list[dict[str, str]], excluded: set[str]) -> list[dict[str, str]]:
+    return [{key: value for key, value in row.items() if key not in excluded} for row in rows]
+
+
 class WalkForwardParquetCacheTest(unittest.TestCase):
     def test_walkforward_uses_reuses_and_rebuilds_parquet_cache_while_writing_csv_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -322,6 +327,120 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
                 row for row in holdings if row["code"] == "1001" and row["date"] == "2026-03-31"
             ][0]
             self.assertGreater(float(final_split_holding["shares"]), buy_shares)
+
+    def test_price_universe_panel_walkforward_matches_legacy_portfolio_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            config_path = ROOT / "configs" / "qvm_v0_1.example.yml"
+            fast_panel = temp / "fast_price_universe_panel.parquet"
+            build_panel(
+                config=load_yaml(config_path),
+                listings_path=listings,
+                prices_path=prices,
+                fundamentals_path=fundamentals,
+                start_date="2026-01-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                input_format="csv",
+                out_path=fast_panel,
+                output_format="parquet",
+            )
+
+            base_command = [
+                sys.executable,
+                str(ROOT / "scripts" / "run_qvm_walkforward.py"),
+                "--config",
+                str(config_path),
+                "--listings",
+                str(listings),
+                "--prices",
+                str(prices),
+                "--fundamentals",
+                str(fundamentals),
+                "--start-date",
+                "2026-01-01",
+                "--end-date",
+                "2026-03-31",
+                "--rebalance",
+                "monthly",
+                "--target-holdings",
+                "15",
+                "--adv-cap",
+                "0.005",
+                "--cache-format",
+                "parquet",
+                "--no-manifest",
+                "--skip-stage-manifest",
+            ]
+            legacy_out = temp / "legacy_out"
+            fast_out = temp / "fast_out"
+            subprocess.run(
+                [
+                    *base_command,
+                    "--cache-dir",
+                    str(temp / "legacy_cache"),
+                    "--out-dir",
+                    str(legacy_out),
+                    "--report-dir",
+                    str(temp / "legacy_reports"),
+                    "--run-label",
+                    "legacy",
+                ],
+                cwd=ROOT,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    *base_command,
+                    "--cache-dir",
+                    str(temp / "fast_cache"),
+                    "--out-dir",
+                    str(fast_out),
+                    "--report-dir",
+                    str(temp / "fast_reports"),
+                    "--run-label",
+                    "fast",
+                    "--price-universe-panel",
+                    str(fast_panel),
+                ],
+                cwd=ROOT,
+                check=True,
+            )
+
+            artifact_pairs = [
+                (
+                    legacy_out / "qvm_walkforward_summary_legacy_202601_202603.csv",
+                    fast_out / "qvm_walkforward_summary_fast_202601_202603.csv",
+                    {"cache_fingerprint"},
+                ),
+                (
+                    legacy_out / "qvm_walkforward_trades_legacy_202601_202603.csv",
+                    fast_out / "qvm_walkforward_trades_fast_202601_202603.csv",
+                    set(),
+                ),
+                (
+                    legacy_out / "qvm_walkforward_holdings_legacy_202601_202603.csv",
+                    fast_out / "qvm_walkforward_holdings_fast_202601_202603.csv",
+                    set(),
+                ),
+                (
+                    legacy_out / "qvm_walkforward_equity_legacy_202601_202603.csv",
+                    fast_out / "qvm_walkforward_equity_fast_202601_202603.csv",
+                    set(),
+                ),
+                (
+                    legacy_out / "qvm_walkforward_failure_cases_legacy_202601_202603.csv",
+                    fast_out / "qvm_walkforward_failure_cases_fast_202601_202603.csv",
+                    set(),
+                ),
+            ]
+            for legacy_path, fast_path, excluded_fields in artifact_pairs:
+                self.assertEqual(
+                    without_fields(read_csv(legacy_path), excluded_fields),
+                    without_fields(read_csv(fast_path), excluded_fields),
+                    legacy_path.name,
+                )
 
     def test_cache_namespace_changes_when_config_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
