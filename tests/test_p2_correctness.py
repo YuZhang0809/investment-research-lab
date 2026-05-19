@@ -322,6 +322,45 @@ class P2CorrectnessTest(unittest.TestCase):
             self.assertEqual("Tech", exposures[0]["group"])
             self.assertEqual("1", exposures[0]["selected_count"])
 
+    def test_sector_exposure_actual_violation_uses_signal_date(self) -> None:
+        result = run_qvm_walkforward.SelectionResult(
+            selected_codes=["1001"],
+            research_codes=["1001"],
+            target_count=1,
+            sector_cap=run_qvm_walkforward.SectorCapConfig(
+                enabled=True,
+                mode="name_count",
+                group_field="sector",
+                max_names_per_group=1,
+            ),
+            blocked_candidates=[],
+            unfilled_slots=0,
+            selected_group_counts={"Tech": 1},
+        )
+        price_index = {
+            "1001": [run_qvm_walkforward.PricePoint(date(2026, 1, 31), 100.0, 100.0, 100.0, 1_000_000.0, False)],
+            "1002": [run_qvm_walkforward.PricePoint(date(2026, 1, 31), 100.0, 100.0, 100.0, 1_000_000.0, False)],
+        }
+
+        _exposures, _selected_weight, _actual_weight, violation_count, violations = run_qvm_walkforward.sector_exposure_rows(
+            signal_date=date(2026, 1, 31),
+            valuation_date=date(2026, 1, 31),
+            result=result,
+            targets={"1001": 100},
+            holdings={"1001": 100.0, "1002": 100.0},
+            universe_by_code={
+                "1001": {"code": "1001", "sector": "Tech"},
+                "1002": {"code": "1002", "sector": "Tech"},
+            },
+            price_index=price_index,
+            pre_equity=20_000.0,
+            after_equity=20_000.0,
+        )
+
+        self.assertEqual(1, violation_count)
+        self.assertEqual("sector_cap_actual_violation", violations[0]["failure_type"])
+        self.assertEqual(date(2026, 1, 31), violations[0]["date"])
+
     def test_next_open_marks_equity_on_fill_date_without_prefill_return(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

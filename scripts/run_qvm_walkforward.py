@@ -859,7 +859,7 @@ def sector_exposure_rows(
             violation_count += 1
             violation_rows.append(
                 {
-                    "date": rebalance_date,
+                    "date": signal_date,
                     "code": "",
                     "failure_type": "sector_cap_actual_violation",
                     "detail": (
