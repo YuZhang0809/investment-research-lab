@@ -98,6 +98,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--factor-score-panel",
+        type=Path,
+        help=(
+            "Optional prebuilt factor/score panel. When provided, the walk-forward "
+            "uses its included rows for universe, factor, and score stages while "
+            "keeping portfolio construction and accounting unchanged."
+        ),
+    )
+    parser.add_argument(
         "--cache-format",
         choices=["parquet"],
         help="Enable cache writes in this format. Defaults to parquet when --cache-dir is set.",
@@ -672,6 +681,8 @@ def compute_cache_fingerprints(args: argparse.Namespace, config: dict[str, Any])
     market_benchmark_checksum = checksum(market_benchmark_prices) if market_benchmark_prices else ""
     price_universe_panel = getattr(args, "price_universe_panel", None)
     price_universe_panel_checksum = checksum(price_universe_panel) if price_universe_panel else ""
+    factor_score_panel = getattr(args, "factor_score_panel", None)
+    factor_score_panel_checksum = checksum(factor_score_panel) if factor_score_panel else ""
     inputs_payload = {
         "schema_version": "walkforward_inputs_cache_v0_1",
         "inputs": {
@@ -684,7 +695,9 @@ def compute_cache_fingerprints(args: argparse.Namespace, config: dict[str, Any])
     universe_source = {
         "research_common.py": source_checksum("research_common.py"),
     }
-    if price_universe_panel:
+    if factor_score_panel:
+        universe_source["run_qvm_walkforward.py"] = source_checksum("run_qvm_walkforward.py")
+    elif price_universe_panel:
         universe_source["run_qvm_walkforward.py"] = source_checksum("run_qvm_walkforward.py")
     else:
         universe_source["build_universe.py"] = source_checksum("build_universe.py")
@@ -693,15 +706,25 @@ def compute_cache_fingerprints(args: argparse.Namespace, config: dict[str, Any])
             "schema_version": "walkforward_universe_cache_v0_3",
             "inputs": inputs_fingerprint,
             "price_universe_panel": price_universe_panel_checksum,
+            "factor_score_panel": factor_score_panel_checksum,
             "config": cache_config(config, "scope", "universe"),
             "source": universe_source,
         }
     )
+    factor_source = {
+        "research_common.py": source_checksum("research_common.py"),
+    }
+    if factor_score_panel:
+        factor_source["run_qvm_walkforward.py"] = source_checksum("run_qvm_walkforward.py")
+    else:
+        factor_source["build_factors.py"] = source_checksum("build_factors.py")
+        factor_source["factor_expressions.py"] = source_checksum("factor_expressions.py")
     factors_fingerprint = cache_digest(
         {
             "schema_version": "walkforward_factors_cache_v0_2",
             "inputs": inputs_fingerprint,
             "universe": universe_fingerprint,
+            "factor_score_panel": factor_score_panel_checksum,
             "factor_engine": {
                 "return_12_1": {"lookback_days": 252, "skip_days": 21},
                 "return_6_1": {"lookback_days": 126, "skip_days": 21},
@@ -714,24 +737,25 @@ def compute_cache_fingerprints(args: argparse.Namespace, config: dict[str, Any])
                 validate_unknown=False,
             ),
             "factor_definition_config": ((config.get("factors", {}) or {}).get("definitions", []) or []),
-            "source": {
-                "build_factors.py": source_checksum("build_factors.py"),
-                "factor_expressions.py": source_checksum("factor_expressions.py"),
-                "research_common.py": source_checksum("research_common.py"),
-            },
+            "source": factor_source,
         }
     )
+    score_source = {
+        "research_common.py": source_checksum("research_common.py"),
+    }
+    if factor_score_panel:
+        score_source["run_qvm_walkforward.py"] = source_checksum("run_qvm_walkforward.py")
+    else:
+        score_source["build_scores.py"] = source_checksum("build_scores.py")
+        score_source["factor_expressions.py"] = source_checksum("factor_expressions.py")
     scores_fingerprint = cache_digest(
         {
             "schema_version": "walkforward_scores_cache_v0_1",
             "factors": factors_fingerprint,
+            "factor_score_panel": factor_score_panel_checksum,
             "strategy_version": args.strategy_version,
             "config": cache_config(config, "strategy", "factors"),
-            "source": {
-                "build_scores.py": source_checksum("build_scores.py"),
-                "factor_expressions.py": source_checksum("factor_expressions.py"),
-                "research_common.py": source_checksum("research_common.py"),
-            },
+            "source": score_source,
         }
     )
     run_fingerprint = cache_digest(
@@ -884,6 +908,61 @@ def price_universe_panel_stage_rows(
     return universe_rows, exclusion_rows
 
 
+def read_factor_score_panel_rows(args: argparse.Namespace) -> list[dict[str, str]]:
+    rows = getattr(args, "_factor_score_panel_rows", None)
+    if rows is not None:
+        return rows
+    panel_path = getattr(args, "factor_score_panel", None)
+    if not panel_path:
+        raise ValueError("factor/score panel requested but --factor-score-panel is not set")
+    rows = read_csv(panel_path)
+    args._factor_score_panel_rows = rows
+    return rows
+
+
+def panel_zscore_factors(rows: list[dict[str, str]]) -> list[str]:
+    factors: list[str] = []
+    for row in rows:
+        for field in row:
+            if field.endswith("_z") and field[:-2] not in factors:
+                factors.append(field[:-2])
+    return factors
+
+
+def factor_score_panel_stage_rows(
+    args: argparse.Namespace,
+    rebalance_date: date,
+    config: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    panel_path = getattr(args, "factor_score_panel", None)
+    if panel_path is None:
+        raise ValueError("--factor-score-panel is required for factor/score panel stages")
+    rows = [
+        row
+        for row in read_factor_score_panel_rows(args)
+        if parse_date(row.get("rebalance_date"), field_name="factor_score_panel.rebalance_date") == rebalance_date
+    ]
+    if not rows:
+        raise ValueError(f"No --factor-score-panel rows found for rebalance date {rebalance_date}.")
+
+    universe_rows: list[dict[str, Any]] = []
+    factor_rows: list[dict[str, Any]] = []
+    score_rows: list[dict[str, Any]] = []
+    factor_fields = factor_output_fields(config)
+    raw_factors = panel_zscore_factors(rows)
+    score_fields = score_cache_fields(raw_factors)
+    for row in rows:
+        included = parse_bool(row.get("included_flag"), default=None)
+        if included is None:
+            raise ValueError(f"Invalid included_flag in {panel_path}: {row.get('included_flag')!r}")
+        if not included:
+            continue
+        universe_rows.append({field: row.get(field, "") for field in UNIVERSE_CACHE_FIELDS})
+        factor_rows.append({field: row.get(field, "") for field in factor_fields})
+        score_rows.append({field: row.get(field, "") for field in score_fields})
+    return universe_rows, factor_rows, score_rows, raw_factors
+
+
 def run_cached_stages(args: argparse.Namespace, rebalance_date: date) -> tuple[Path, Path, Path]:
     suffix = month_key(rebalance_date)
     strategy_token = strategy_cache_token(args)
@@ -893,6 +972,30 @@ def run_cached_stages(args: argparse.Namespace, rebalance_date: date) -> tuple[P
     scores_path = cache_path(args, "scores", f"scores_{suffix}_{strategy_token}")
 
     config = args._config if hasattr(args, "_config") else load_yaml(args.config)
+    if getattr(args, "factor_score_panel", None):
+        if (
+            universe_path.exists()
+            and factors_path.exists()
+            and scores_path.exists()
+            and not args.force_rebuild
+        ):
+            universe_rows = read_csv(universe_path)
+            score_rows = read_csv(scores_path)
+        else:
+            universe_rows, factor_rows, score_rows, raw_factors = factor_score_panel_stage_rows(
+                args,
+                rebalance_date,
+                config,
+            )
+            write_table(universe_rows, universe_path, format=args.cache_format or "parquet", fieldnames=UNIVERSE_CACHE_FIELDS)
+            write_table([], exclusions_path, format=args.cache_format or "parquet", fieldnames=EXCLUSION_CACHE_FIELDS)
+            write_table(factor_rows, factors_path, format=args.cache_format or "parquet", fieldnames=factor_output_fields(config))
+            write_table(score_rows, scores_path, format=args.cache_format or "parquet", fieldnames=score_cache_fields(raw_factors))
+        stage_rows = getattr(args, "_stage_rows", {})
+        stage_rows[suffix] = {"universe": universe_rows, "scores": score_rows}
+        args._stage_rows = stage_rows
+        return universe_path, factors_path, scores_path
+
     listing_rows = args._listing_rows if hasattr(args, "_listing_rows") else read_csv(args.listings)
     price_rows = args._price_rows if hasattr(args, "_price_rows") else read_csv(args.prices)
     fundamental_rows = (
@@ -1005,6 +1108,20 @@ def run_stages(args: argparse.Namespace, rebalance_date: date) -> tuple[Path, Pa
     common_manifest_flag = ["--no-manifest"] if args.skip_stage_manifest else []
     universe_path = Path(f"data/processed/universe/universe_{suffix}.csv")
     exclusions_path = Path(f"data/processed/universe/excluded_{suffix}.csv")
+    if getattr(args, "factor_score_panel", None):
+        config = args._config if hasattr(args, "_config") else load_yaml(args.config)
+        universe_rows, factor_rows, score_rows, raw_factors = factor_score_panel_stage_rows(
+            args,
+            rebalance_date,
+            config,
+        )
+        factors_path = Path(f"data/processed/factors/factors_{suffix}.csv")
+        scores_path = Path(f"data/processed/scores/scores_{suffix}.csv")
+        write_csv(universe_path, universe_rows, UNIVERSE_CACHE_FIELDS)
+        write_csv(exclusions_path, [], EXCLUSION_CACHE_FIELDS)
+        write_csv(factors_path, factor_rows, factor_output_fields(config))
+        write_csv(scores_path, score_rows, score_cache_fields(raw_factors))
+        return universe_path, factors_path, scores_path
     if getattr(args, "price_universe_panel", None):
         universe_rows, exclusion_rows = price_universe_panel_stage_rows(args, rebalance_date)
         write_csv(universe_path, universe_rows, UNIVERSE_CACHE_FIELDS)

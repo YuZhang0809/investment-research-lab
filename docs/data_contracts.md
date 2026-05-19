@@ -128,6 +128,24 @@ fundamental rows, compute quality/value ratios, score stocks, or run a
 portfolio. `compare_fast_panel_to_legacy.py` should be used to verify parity on
 synthetic and private local fixtures before any downstream integration.
 
+## Rebalance Factor/Score Panel
+
+`build_rebalance_factor_score_panel.py` writes a reusable factor/score panel
+from a validated rebalance price/universe panel. It reuses the existing
+`build_factors.py` and `build_scores.py` semantics instead of introducing a
+separate scoring engine.
+
+Minimum output contract:
+
+```text
+rebalance_date,code,included_flag,exclusion_reason,latest_price_date,latest_unadjusted_close,adjusted_close,median_60d_trading_value,return_12_1,return_6_1,has_fundamentals,fundamentals_available_date,fundamentals_available_time,period_end,document_type,operating_profit_to_total_assets,equity_to_assets,earnings_yield,book_to_market,quality_score,value_score,momentum_score,composite_score,qvm_score,rank_score,rank,candidate_rank,filter_status,filter_reasons,missing_flags,missing_score_components,<raw_factor>_z
+```
+
+Excluded rows may be present for auditability, but only `included_flag=true`
+rows are consumed by `run_qvm_walkforward.py --factor-score-panel`.
+Portfolio construction and accounting outputs still need legacy parity before
+the fast path is used for research.
+
 ## Run Ledger
 
 Public-safe template:

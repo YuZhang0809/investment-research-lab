@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from duckdb_query import parquet_scan, query  # noqa: E402
+from build_rebalance_factor_score_panel import build_factor_score_panel  # noqa: E402
 from build_rebalance_price_universe_panel import build_panel  # noqa: E402
 from research_common import load_yaml, read_csv  # noqa: E402
 import run_qvm_walkforward  # noqa: E402
@@ -328,7 +329,7 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
             ][0]
             self.assertGreater(float(final_split_holding["shares"]), buy_shares)
 
-    def test_price_universe_panel_walkforward_matches_legacy_portfolio_outputs(self) -> None:
+    def test_fast_panels_walkforward_match_legacy_portfolio_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
@@ -344,6 +345,19 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
                 frequency="monthly",
                 input_format="csv",
                 out_path=fast_panel,
+                output_format="parquet",
+            )
+            factor_score_panel = temp / "factor_score_panel.parquet"
+            build_factor_score_panel(
+                config=load_yaml(config_path),
+                price_universe_panel_path=fast_panel,
+                prices_path=prices,
+                fundamentals_path=fundamentals,
+                start_date="2026-01-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                strategy_version="qvm",
+                out_path=factor_score_panel,
                 output_format="parquet",
             )
 
@@ -407,40 +421,127 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
                 cwd=ROOT,
                 check=True,
             )
+            factor_score_out = temp / "factor_score_out"
+            subprocess.run(
+                [
+                    *base_command,
+                    "--cache-dir",
+                    str(temp / "factor_score_cache"),
+                    "--out-dir",
+                    str(factor_score_out),
+                    "--report-dir",
+                    str(temp / "factor_score_reports"),
+                    "--run-label",
+                    "factor_score",
+                    "--factor-score-panel",
+                    str(factor_score_panel),
+                ],
+                cwd=ROOT,
+                check=True,
+            )
 
             artifact_pairs = [
                 (
                     legacy_out / "qvm_walkforward_summary_legacy_202601_202603.csv",
                     fast_out / "qvm_walkforward_summary_fast_202601_202603.csv",
+                    factor_score_out / "qvm_walkforward_summary_factor_score_202601_202603.csv",
                     {"cache_fingerprint"},
                 ),
                 (
                     legacy_out / "qvm_walkforward_trades_legacy_202601_202603.csv",
                     fast_out / "qvm_walkforward_trades_fast_202601_202603.csv",
+                    factor_score_out / "qvm_walkforward_trades_factor_score_202601_202603.csv",
                     set(),
                 ),
                 (
                     legacy_out / "qvm_walkforward_holdings_legacy_202601_202603.csv",
                     fast_out / "qvm_walkforward_holdings_fast_202601_202603.csv",
+                    factor_score_out / "qvm_walkforward_holdings_factor_score_202601_202603.csv",
                     set(),
                 ),
                 (
                     legacy_out / "qvm_walkforward_equity_legacy_202601_202603.csv",
                     fast_out / "qvm_walkforward_equity_fast_202601_202603.csv",
+                    factor_score_out / "qvm_walkforward_equity_factor_score_202601_202603.csv",
                     set(),
                 ),
                 (
                     legacy_out / "qvm_walkforward_failure_cases_legacy_202601_202603.csv",
                     fast_out / "qvm_walkforward_failure_cases_fast_202601_202603.csv",
+                    factor_score_out / "qvm_walkforward_failure_cases_factor_score_202601_202603.csv",
                     set(),
                 ),
             ]
-            for legacy_path, fast_path, excluded_fields in artifact_pairs:
-                self.assertEqual(
-                    without_fields(read_csv(legacy_path), excluded_fields),
-                    without_fields(read_csv(fast_path), excluded_fields),
-                    legacy_path.name,
-                )
+            for legacy_path, price_panel_path, factor_panel_path, excluded_fields in artifact_pairs:
+                expected = without_fields(read_csv(legacy_path), excluded_fields)
+                self.assertEqual(expected, without_fields(read_csv(price_panel_path), excluded_fields), legacy_path.name)
+                self.assertEqual(expected, without_fields(read_csv(factor_panel_path), excluded_fields), legacy_path.name)
+
+    def test_factor_score_panel_preserves_missing_and_excluded_rows_without_ranking_them(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            config_path = temp / "qvm_allow_missing_fundamentals.yml"
+            config_text = (ROOT / "configs" / "qvm_v0_1.example.yml").read_text(encoding="utf-8")
+            config_path.write_text(config_text.replace("require_fundamentals: true", "require_fundamentals: false"), encoding="utf-8")
+            empty_fundamentals = temp / "empty_fundamentals.csv"
+            write_csv(
+                empty_fundamentals,
+                [],
+                [
+                    "code",
+                    "available_date",
+                    "available_time",
+                    "document_type",
+                    "period_end",
+                    "operating_profit",
+                    "net_profit",
+                    "equity",
+                    "total_assets",
+                    "shares_outstanding",
+                ],
+            )
+            price_panel = temp / "price_panel.parquet"
+            factor_score_panel = temp / "factor_score_panel.parquet"
+            config = load_yaml(config_path)
+            build_panel(
+                config=config,
+                listings_path=listings,
+                prices_path=prices,
+                fundamentals_path=empty_fundamentals,
+                start_date="2026-01-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                input_format="csv",
+                out_path=price_panel,
+                output_format="parquet",
+            )
+            build_factor_score_panel(
+                config=config,
+                price_universe_panel_path=price_panel,
+                prices_path=prices,
+                fundamentals_path=empty_fundamentals,
+                start_date="2026-01-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                strategy_version="qvm",
+                out_path=factor_score_panel,
+                output_format="parquet",
+            )
+
+            rows = read_csv(factor_score_panel)
+            by_key = {(row["rebalance_date"], row["code"]): row for row in rows}
+            stale_row = by_key[("2026-03-31", "1002")]
+            self.assertEqual("true", stale_row["included_flag"])
+            self.assertEqual("True", stale_row["latest_price_stale"])
+            self.assertEqual("", stale_row["rank"])
+            self.assertIn("quality_score", stale_row["missing_score_components"])
+
+            excluded_row = by_key[("2026-03-31", "1003")]
+            self.assertEqual("false", excluded_row["included_flag"])
+            self.assertIn("delisted_before_rebalance", excluded_row["exclusion_reason"])
+            self.assertEqual("", excluded_row["rank"])
+            self.assertEqual("", excluded_row["candidate_rank"])
 
     def test_cache_namespace_changes_when_config_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

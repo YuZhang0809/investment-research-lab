@@ -197,7 +197,30 @@ differences need a documented explanation.
 Later planned phases remain:
 
 ```text
-fundamentals latest-as-of selection in DuckDB
-raw Q/V/M factor computation in DuckDB
-broader factor-panel reuse once parity is proven
+broader DuckDB-native fundamentals latest-as-of optimization
+broader DuckDB-native raw Q/V/M factor optimization
 ```
+
+## Fast Path Layers
+
+The public engine now has two explicit fast-path layers:
+
+```text
+P3: price/universe panel
+P4: factor/score panel
+P5: walk-forward direct panel consumption
+```
+
+P3 is the `rebalance_date x code` price/universe acceleration layer documented
+above. P4 is documented in `docs/factor_score_panel.md`; it precomputes factor
+and score rows by reusing the existing `build_factors.py` and
+`build_scores.py` semantics. P5 is the explicit `run_qvm_walkforward.py`
+consumption path:
+
+```text
+--price-universe-panel
+--factor-score-panel
+```
+
+All fast paths must pass legacy parity on synthetic fixtures and private local
+data before they are used for research.

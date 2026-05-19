@@ -81,6 +81,44 @@ This does not change factor, score, portfolio, benchmark, or report logic.
 Compare the summary, trades, holdings, equity, and failure-case CSVs against a
 same-parameter legacy run before treating the fast path as research-ready.
 
+The next fast-path layer precomputes factors and scores from the validated
+price/universe panel:
+
+```powershell
+python scripts\build_rebalance_factor_score_panel.py `
+  --config configs\qvm_v0_1.example.yml `
+  --price-universe-panel <rebalance_price_universe_panel.parquet> `
+  --prices <prices.csv> `
+  --fundamentals <fundamentals.csv> `
+  --start-date 2026-01-01 `
+  --end-date 2026-12-31 `
+  --frequency monthly `
+  --strategy-version qvm `
+  --out <rebalance_factor_score_panel.parquet> `
+  --output-format parquet
+```
+
+`run_qvm_walkforward.py` can then consume that panel directly:
+
+```powershell
+python scripts\run_qvm_walkforward.py `
+  --config configs\qvm_v0_1.example.yml `
+  --listings <listings.csv> `
+  --prices <prices.csv> `
+  --fundamentals <fundamentals.csv> `
+  --start-date 2026-01-01 `
+  --end-date 2026-12-31 `
+  --rebalance monthly `
+  --factor-score-panel <rebalance_factor_score_panel.parquet> `
+  --cache-format parquet `
+  --no-manifest
+```
+
+This skips per-rebalance universe/factor/score stage builds, but keeps the
+existing portfolio, execution, benchmark, holdings, equity, and failure-case
+logic. It also requires same-parameter parity against the legacy run before
+research use.
+
 `--strategy-version weighted_groups` uses `strategy.scoring.weights` and
 `strategy.filters` from the config. It writes `composite_score`,
 `filter_status`, and `filter_reasons` while keeping `qvm_score` populated for
