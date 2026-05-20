@@ -19,7 +19,7 @@ from factor_expressions import (
     factor_definition_fingerprints,
     factor_definition_names,
 )
-from build_scores import STRATEGY_VERSION_CHOICES, build_scores, score_output_field
+from build_scores import STRATEGY_VERSION_CHOICES, build_scores, score_direct_fields, score_output_field
 from build_universe import build_universe_from_rows
 from research_common import (
     append_manifest,
@@ -1271,7 +1271,7 @@ CANDIDATE_CACHE_FIELDS = [
 ]
 
 
-def score_cache_fields(raw_factors: list[str]) -> list[str]:
+def score_cache_fields(raw_factors: list[str], *, direct_fields: set[str] | None = None) -> list[str]:
     return [
         "rebalance_date",
         "rank",
@@ -1287,7 +1287,7 @@ def score_cache_fields(raw_factors: list[str]) -> list[str]:
         "filter_status",
         "filter_reasons",
         "missing_score_components",
-        *[score_output_field(factor) for factor in raw_factors],
+        *[score_output_field(factor, direct_fields=direct_fields) for factor in raw_factors],
     ]
 
 
@@ -1596,11 +1596,12 @@ def read_factor_score_panel_rows(args: argparse.Namespace) -> list[dict[str, str
     return rows
 
 
-def panel_zscore_factors(rows: list[dict[str, str]]) -> list[str]:
+def panel_zscore_factors(rows: list[dict[str, str]], config: dict[str, Any]) -> list[str]:
     factors: list[str] = []
+    direct_fields = score_direct_fields(config)
     for row in rows:
         for field in row:
-            if field.endswith("_rank_pct") and field not in factors:
+            if field in direct_fields and field not in factors:
                 factors.append(field)
             elif field.endswith("_z") and field[:-2] not in factors:
                 factors.append(field[:-2])
@@ -1627,8 +1628,8 @@ def factor_score_panel_stage_rows(
     factor_rows: list[dict[str, Any]] = []
     score_rows: list[dict[str, Any]] = []
     factor_fields = factor_output_fields(config)
-    raw_factors = panel_zscore_factors(rows)
-    score_fields = score_cache_fields(raw_factors)
+    raw_factors = panel_zscore_factors(rows, config)
+    score_fields = score_cache_fields(raw_factors, direct_fields=score_direct_fields(config))
     for row in rows:
         included = parse_bool(row.get("included_flag"), default=None)
         if included is None:
@@ -1676,7 +1677,12 @@ def run_cached_stages(args: argparse.Namespace, rebalance_date: date) -> tuple[P
             write_table(universe_rows, universe_path, format=args.cache_format or "parquet", fieldnames=UNIVERSE_CACHE_FIELDS)
             write_table([], exclusions_path, format=args.cache_format or "parquet", fieldnames=EXCLUSION_CACHE_FIELDS)
             write_table(factor_rows, factors_path, format=args.cache_format or "parquet", fieldnames=factor_output_fields(config))
-            write_table(score_rows, scores_path, format=args.cache_format or "parquet", fieldnames=score_cache_fields(raw_factors))
+            write_table(
+                score_rows,
+                scores_path,
+                format=args.cache_format or "parquet",
+                fieldnames=score_cache_fields(raw_factors, direct_fields=score_direct_fields(config)),
+            )
         stage_rows = getattr(args, "_stage_rows", {})
         stage_rows[suffix] = {"universe": universe_rows, "scores": score_rows}
         args._stage_rows = stage_rows
@@ -1735,7 +1741,7 @@ def run_cached_stages(args: argparse.Namespace, rebalance_date: date) -> tuple[P
             score_rows,
             scores_path,
             format=args.cache_format or "parquet",
-            fieldnames=score_cache_fields(raw_factors),
+            fieldnames=score_cache_fields(raw_factors, direct_fields=score_direct_fields(config)),
         )
 
     stage_rows = getattr(args, "_stage_rows", {})
@@ -1806,7 +1812,7 @@ def run_stages(args: argparse.Namespace, rebalance_date: date) -> tuple[Path, Pa
         write_csv(universe_path, universe_rows, UNIVERSE_CACHE_FIELDS)
         write_csv(exclusions_path, [], EXCLUSION_CACHE_FIELDS)
         write_csv(factors_path, factor_rows, factor_output_fields(config))
-        write_csv(scores_path, score_rows, score_cache_fields(raw_factors))
+        write_csv(scores_path, score_rows, score_cache_fields(raw_factors, direct_fields=score_direct_fields(config)))
         return universe_path, factors_path, scores_path
     if getattr(args, "price_universe_panel", None):
         universe_rows, exclusion_rows = price_universe_panel_stage_rows(args, rebalance_date)

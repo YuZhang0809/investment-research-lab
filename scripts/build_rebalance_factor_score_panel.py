@@ -14,6 +14,7 @@ from build_scores import (
     build_scores,
     configured_filters,
     configured_group_weights,
+    score_direct_fields,
     strategy_factor_groups,
 )
 from duckdb_query import require_duckdb
@@ -131,7 +132,7 @@ def factor_score_panel_fields(config: dict[str, Any], raw_factors: list[str]) ->
             *PANEL_EXTRA_FIELDS,
             *UNIVERSE_CACHE_FIELDS,
             *factor_output_fields(config),
-            *score_cache_fields(raw_factors),
+            *score_cache_fields(raw_factors, direct_fields=score_direct_fields(config)),
         ]
     )
 
@@ -745,7 +746,7 @@ def build_duckdb_factor_score_frame(
                 *PANEL_EXTRA_FIELDS,
                 *UNIVERSE_CACHE_FIELDS,
                 *factor_output_fields(config),
-                *score_cache_fields(raw_factors),
+                *score_cache_fields(raw_factors, direct_fields=score_direct_fields(config)),
             ]
         )
         ranked_columns = set(connection.execute("describe scored_ranked").df()["column_name"].to_list())

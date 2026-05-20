@@ -564,6 +564,33 @@ class TableIODuckDBTest(unittest.TestCase):
         ranked = sorted([row for row in scores if row["rank"]], key=lambda row: int(row["rank"]))
         self.assertEqual(["1003", "1002"], [row["code"] for row in ranked])
 
+    def test_custom_factor_name_ending_z_keeps_raw_factor_zscore_schema(self) -> None:
+        config = {
+            "strategy": {
+                "scoring": {"mode": "weighted_factors", "weights": {"custom_z": 1.0}},
+                "filters": [],
+            },
+            "factors": {
+                "winsorize": {"lower_pct": 0, "upper_pct": 100},
+                "quality": {"variables": []},
+                "value": {"variables": []},
+                "momentum": {"variables": []},
+            },
+        }
+        factors = [
+            {"rebalance_date": "2026-03-31", "code": "1001", "custom_z": "1"},
+            {"rebalance_date": "2026-03-31", "code": "1002", "custom_z": "2"},
+            {"rebalance_date": "2026-03-31", "code": "1003", "custom_z": "3"},
+        ]
+
+        scores, raw_factors = build_scores(config=config, factor_rows=factors, strategy_version="configurable")
+
+        self.assertEqual(["custom_z"], raw_factors)
+        self.assertIn("custom_z_z", scores[0])
+        self.assertNotIn("custom_z", scores[0])
+        ranked = sorted([row for row in scores if row["rank"]], key=lambda row: int(row["rank"]))
+        self.assertEqual(["1003", "1002", "1001"], [row["code"] for row in ranked])
+
     def test_configurable_weighted_factors_reject_unknown_weight_field(self) -> None:
         config = {
             "strategy": {
@@ -725,6 +752,32 @@ class TableIODuckDBTest(unittest.TestCase):
                     group_field="missing_group",
                 ),
                 factor_rows=[relative_factor_row("1001", "Sector A", 1)],
+                strategy_version="configurable",
+            )
+
+    def test_group_relative_transform_rejects_duplicate_output_fields(self) -> None:
+        config = group_relative_config(
+            weights={"sector_relative_book_to_market_z": 1.0},
+            filters=[],
+        )
+        config["strategy"]["group_relative_transforms"].append(
+            {
+                "group_field": "market",
+                "fields": ["book_to_market"],
+                "methods": ["zscore"],
+                "min_group_size": 3,
+                "output_prefix": "sector_relative",
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "Duplicate group_relative_transforms output field"):
+            build_scores(
+                config=config,
+                factor_rows=[
+                    {**relative_factor_row("1001", "Sector A", 1), "market": "Prime"},
+                    {**relative_factor_row("1002", "Sector A", 2), "market": "Prime"},
+                    {**relative_factor_row("1003", "Sector A", 3), "market": "Prime"},
+                ],
                 strategy_version="configurable",
             )
 

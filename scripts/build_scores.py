@@ -155,12 +155,8 @@ def configured_factor_weights(config: dict[str, Any]) -> dict[str, float]:
     return weights
 
 
-def direct_score_field(field: str) -> bool:
-    return field.endswith("_z") or field.endswith("_rank_pct")
-
-
-def score_output_field(factor: str) -> str:
-    return factor if direct_score_field(factor) else f"{factor}_z"
+def score_output_field(factor: str, *, direct_fields: set[str] | None = None) -> str:
+    return factor if factor in (direct_fields or set()) else f"{factor}_z"
 
 
 def list_config_values(value: Any, *, field_name: str) -> list[str]:
@@ -209,6 +205,7 @@ def configured_group_relative_transforms(config: dict[str, Any]) -> list[dict[st
                 "output_prefix": output_prefix,
             }
         )
+    validate_unique_group_relative_outputs(transforms)
     return transforms
 
 
@@ -227,6 +224,26 @@ def group_relative_output_fields(transforms: list[dict[str, Any]]) -> list[str]:
                 if output_field not in fields:
                     fields.append(output_field)
     return fields
+
+
+def validate_unique_group_relative_outputs(transforms: list[dict[str, Any]]) -> None:
+    seen: dict[str, str] = {}
+    for index, transform in enumerate(transforms, start=1):
+        output_prefix = str(transform["output_prefix"])
+        for field in transform["fields"]:
+            for method in transform["methods"]:
+                output_field = group_relative_output_field(output_prefix, field, method)
+                source = f"strategy.group_relative_transforms[{index}]"
+                if output_field in seen:
+                    raise ValueError(
+                        f"Duplicate group_relative_transforms output field {output_field!r} "
+                        f"from {seen[output_field]} and {source}."
+                    )
+                seen[output_field] = source
+
+
+def score_direct_fields(config: dict[str, Any]) -> set[str]:
+    return set(group_relative_output_fields(configured_group_relative_transforms(config)))
 
 
 def validate_group_relative_transforms(transforms: list[dict[str, Any]], rows: list[dict[str, Any]]) -> None:
@@ -660,7 +677,7 @@ def build_scores(
                 "filter_reasons": "",
                 "missing_score_components": ";".join(missing_score_components),
                 **{
-                    score_output_field(factor): (
+                    score_output_field(factor, direct_fields=set(group_relative_fields)): (
                         score_components.get(factor) if factor in group_relative_fields else z.get(factor)
                     )
                     for factor in raw_factors
@@ -717,7 +734,7 @@ def main() -> int:
         "filter_status",
         "filter_reasons",
         "missing_score_components",
-        *[score_output_field(factor) for factor in raw_factors],
+        *[score_output_field(factor, direct_fields=score_direct_fields(config)) for factor in raw_factors],
     ]
     write_csv(output_path, [{key: fmt(value) for key, value in row.items()} for row in score_rows], fieldnames)
     if not args.no_manifest:
