@@ -76,4 +76,6 @@ python scripts\validate_optional_factor_contract.py `
 
 Supported contracts are `dividend`, `balance_sheet`, and `crowding`. The
 validator checks that a key, date, and any present numeric fields are parseable.
-It does not download or infer vendor data.
+The `crowding` contract is issuer-level and requires an issuer code; sector-only
+short-sale panels should be joined through `external_factor_panels` under a
+sector-level field. The validator does not download or infer vendor data.

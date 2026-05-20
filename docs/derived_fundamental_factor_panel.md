@@ -55,7 +55,11 @@ For each code, rebalance mode selects the latest reporting `period_end`
 available by the rebalance date, then applies any PIT-eligible restatements for
 that reporting period and its same-period prior-year comparison. A later
 restatement for an older fiscal period does not replace a more recent reporting
-period.
+period. Within the selected reporting period, rows with core statement inputs
+such as sales, profit, equity, assets, or shares are preferred over
+forecast/dividend-only revision rows so that a later revision does not blank the
+core derived fundamental factors. Use event mode or a separate external panel
+for revision-specific research fields.
 
 Rebalance output rejects mixed `period_type` values for the same rebalance date
 by default because fields such as `roe` and `roa` are not cross-sectionally

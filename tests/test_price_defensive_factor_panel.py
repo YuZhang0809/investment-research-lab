@@ -87,6 +87,9 @@ class PriceDefensiveFactorPanelTest(unittest.TestCase):
         self.assertIn("price_limit_hit", panel[0]["defensive_filter_reasons"])
         self.assertIn("insufficient_history_3m", panel[0]["missing_flags"])
         self.assertIn("missing_beta_to_benchmark", panel[0]["missing_flags"])
+        self.assertEqual("", panel[0]["realized_vol_3m"])
+        self.assertEqual("", panel[0]["realized_vol_6m"])
+        self.assertEqual("", panel[0]["realized_vol_12m"])
 
     def test_cli_writes_csv_panel(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

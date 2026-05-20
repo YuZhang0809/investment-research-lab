@@ -50,6 +50,27 @@ class OptionalFactorContractsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid numeric field"):
                 validate_panel(panel, "dividend")
 
+    def test_validator_rejects_sector_only_crowding_panel_for_issuer_builder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            panel = Path(temp_dir) / "crowding.csv"
+            with panel.open("w", encoding="utf-8", newline="") as file:
+                writer = csv.DictWriter(file, fieldnames=["Sector33Code", "available_date", "long_margin_balance"])
+                writer.writeheader()
+                writer.writerow({"Sector33Code": "6050", "available_date": "2026-01-31", "long_margin_balance": "20"})
+
+            with self.assertRaisesRegex(ValueError, "requires one key field"):
+                validate_panel(panel, "crowding")
+
+    def test_required_numeric_accepts_supported_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            panel = Path(temp_dir) / "crowding.csv"
+            with panel.open("w", encoding="utf-8", newline="") as file:
+                writer = csv.DictWriter(file, fieldnames=["LocalCode", "available_date", "LongMarginTradeVolume"])
+                writer.writeheader()
+                writer.writerow({"LocalCode": "1001", "available_date": "2026-01-31", "LongMarginTradeVolume": "20"})
+
+            self.assertEqual(1, validate_panel(panel, "crowding", ["long_margin_balance"]))
+
     def test_crowding_panel_computes_ratios_zscore_and_change(self) -> None:
         rows = [
             {
@@ -85,6 +106,38 @@ class OptionalFactorContractsTest(unittest.TestCase):
         self.assertAlmostEqual(0.1, float(jan["1001"]["margin_buy_balance_to_volume"]))
         self.assertGreater(float(jan["1002"]["crowding_zscore"]), float(jan["1001"]["crowding_zscore"]))
         self.assertAlmostEqual(0.01166666667, float(feb["1001"]["crowding_change"]))
+
+    def test_crowding_change_resets_after_missing_raw_gap(self) -> None:
+        rows = [
+            {
+                "code": "1001",
+                "available_date": "2026-01-31",
+                "long_margin_balance": "100",
+                "volume": "1000",
+            },
+            {
+                "code": "1001",
+                "available_date": "2026-02-28",
+                "long_margin_balance": "120",
+                "volume": "",
+            },
+            {
+                "code": "1001",
+                "available_date": "2026-03-31",
+                "long_margin_balance": "140",
+                "volume": "1000",
+            },
+        ]
+
+        panel = build_crowding_panel(
+            rows,
+            rebalance_dates=[date(2026, 1, 31), date(2026, 2, 28), date(2026, 3, 31)],
+            max_lag_days=40,
+        )
+        by_date = {row["rebalance_date"]: row for row in panel}
+
+        self.assertEqual("", by_date["2026-02-28"]["crowding_raw"])
+        self.assertEqual("", by_date["2026-03-31"]["crowding_change"])
 
 
 if __name__ == "__main__":

@@ -199,8 +199,9 @@ def build_panel(
             if row["code"] in z_by_code:
                 row["crowding_zscore"] = fmt(z_by_code[row["code"]])
             if row["crowding_zscore"] == "" and row["crowding_raw"]:
-                row["missing_flags"] = ";".join(dict.fromkeys([*row["missing_flags"].split(";"), "crowding_zscore"])).strip(";")
-        previous_raw_by_code.update(raw_by_code)
+                flags = [value for value in row["missing_flags"].split(";") if value]
+                row["missing_flags"] = ";".join(dict.fromkeys([*flags, "crowding_zscore"]))
+        previous_raw_by_code = raw_by_code
         output.extend(rows_for_date)
     output.sort(key=lambda row: (row["rebalance_date"], row["code"]))
     return output

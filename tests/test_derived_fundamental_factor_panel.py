@@ -209,6 +209,44 @@ class DerivedFundamentalFactorPanelTest(unittest.TestCase):
         self.assertEqual("FinancialStatement", panel[0]["document_type"])
         self.assertEqual("120", panel[0]["sales"])
 
+    def test_dividend_revision_does_not_override_core_statement_row(self) -> None:
+        statement = row(
+            available_date="2026-02-01",
+            period_type="FY",
+            period_end="2025-12-31",
+            sales="120",
+            operating_profit="12",
+            net_profit="8",
+            equity="40",
+            total_assets="100",
+            disclosure_number="1",
+        )
+        revision = row(
+            available_date="2026-03-01",
+            period_type="FY",
+            period_end="2025-12-31",
+            sales="",
+            operating_profit="",
+            net_profit="",
+            equity="",
+            total_assets="",
+            shares_outstanding="",
+            disclosure_number="2",
+        )
+        revision["document_type"] = "DividendForecastRevision"
+        revision["ForecastDividendPerShareAnnual"] = "12"
+
+        panel = build_panel(
+            [statement, revision],
+            panel_mode="rebalance",
+            rebalance_dates=[date(2026, 3, 31)],
+            period_types={"fy"},
+        )
+
+        self.assertEqual("FinancialStatement", panel[0]["document_type"])
+        self.assertEqual("120", panel[0]["sales"])
+        self.assertEqual("0.1", panel[0]["operating_margin"])
+
     def test_document_type_filter_and_raw_jquants_aliases(self) -> None:
         rows = [
             {

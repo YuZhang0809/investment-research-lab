@@ -135,7 +135,7 @@ latest_price_date,latest_price_stale,price_staleness_trading_days,price_limit_fl
 
 ## Crowding Factor Panels
 
-`build_crowding_factor_panel.py` consumes a generic local panel with `code`,
+`build_crowding_factor_panel.py` consumes a generic local issuer-level panel with `code`,
 an availability date, margin/short-interest fields, and either per-row volume
 or a separate price/volume file. It writes:
 
@@ -143,8 +143,14 @@ or a separate price/volume file. It writes:
 rebalance_date,code,available_date,margin_buy_balance_to_volume,margin_sell_balance_to_volume,short_interest_to_volume,crowding_raw,crowding_zscore,crowding_change,missing_flags
 ```
 
-Sector-level short-sale panels can be validated as optional external factors,
-but they should not be mislabeled as issuer-level short interest.
+`crowding_raw` is a simple unweighted mean of the available issuer-level ratios
+and is provided as a convenience audit field. Research configs that need a
+specific economic interpretation should weight or filter the component ratios
+explicitly.
+
+Sector-level short-sale panels should be joined as separate external factor
+panels keyed by their own sector field. The issuer-level crowding validator
+requires an issuer code and intentionally rejects sector-only panels.
 
 ## External Factor Panels
 

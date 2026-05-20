@@ -323,13 +323,14 @@ def build_panel(
                 window_points = clean_window(points, latest_index, window_days)
                 returns = returns_from_points(window_points)
                 row[f"history_observations_{label}"] = str(len(window_points))
-                vol = realized_volatility(returns)
+                has_full_window = len(returns) >= window_days
+                vol = realized_volatility(returns) if has_full_window else None
                 row[f"realized_vol_{label}"] = fmt(vol)
-                if vol is None or len(returns) < window_days:
+                if vol is None or not has_full_window:
                     missing_flags.append(f"insufficient_history_{label}")
                 if label in {"6m", "12m"}:
-                    row[f"downside_vol_{label}"] = fmt(downside_volatility(returns) if len(returns) >= window_days else None)
-                    row[f"max_drawdown_{label}"] = fmt(max_drawdown(window_points) if len(returns) >= window_days else None)
+                    row[f"downside_vol_{label}"] = fmt(downside_volatility(returns) if has_full_window else None)
+                    row[f"max_drawdown_{label}"] = fmt(max_drawdown(window_points) if has_full_window else None)
 
             beta, beta_count = beta_to_benchmark(
                 points,

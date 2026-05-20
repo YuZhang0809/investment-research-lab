@@ -42,6 +42,14 @@ RAW_OUTPUT_FIELDS = [
     "forecast_payout_ratio",
     "result_payout_ratio",
 ]
+CORE_STATEMENT_INPUT_FIELDS = [
+    "sales",
+    "operating_profit",
+    "net_profit",
+    "equity",
+    "total_assets",
+    "shares_outstanding",
+]
 METADATA_FIELDS = [
     "available_date",
     "available_time",
@@ -254,6 +262,11 @@ def normalized_numbers(row: dict[str, Any]) -> dict[str, float | None]:
 
 def useful_value_count(row: dict[str, Any]) -> int:
     return sum(value is not None for value in normalized_numbers(row).values())
+
+
+def core_statement_value_count(row: dict[str, Any]) -> int:
+    values = normalized_numbers(row)
+    return sum(values.get(field) is not None for field in CORE_STATEMENT_INPUT_FIELDS)
 
 
 def safe_ratio(numerator: float | None, denominator: float | None) -> float | None:
@@ -543,9 +556,13 @@ def rebalance_panel_rows(
                 continue
             latest_period = max(selected_reporting_period_key(row) for row in candidates)
             period_candidates = [row for row in candidates if selected_reporting_period_key(row) == latest_period]
-            useful_period_candidates = [row for row in period_candidates if useful_value_count(row) > 0]
-            if useful_period_candidates:
-                period_candidates = useful_period_candidates
+            core_period_candidates = [row for row in period_candidates if core_statement_value_count(row) > 0]
+            if core_period_candidates:
+                period_candidates = core_period_candidates
+            else:
+                useful_period_candidates = [row for row in period_candidates if useful_value_count(row) > 0]
+                if useful_period_candidates:
+                    period_candidates = useful_period_candidates
             selected = sorted(period_candidates, key=disclosure_sort_key)[-1]
             prior = latest_prior_year(selected, prior_index, as_of_key=as_of_availability_key(rebalance_date))
             copied = enrich_disclosure(selected, prior)

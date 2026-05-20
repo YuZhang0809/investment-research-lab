@@ -379,10 +379,13 @@ python scripts\build_crowding_factor_panel.py `
   --no-manifest
 ```
 
-Crowding outputs are also exact-join external factor panels. Missing issuer
+Crowding outputs are also exact-join issuer-level external factor panels. Missing issuer
 volume, margin balance, or short-interest fields remain blank and are listed in
 `missing_flags`; the script does not use sector-level short-sale data as an
-issuer-level proxy.
+issuer-level proxy. Sector-only short-sale panels should be joined separately
+with `external_factor_panels` using the relevant sector key. `crowding_raw` is a
+simple unweighted mean of available issuer ratios, so strategy configs should
+prefer explicit component weights when a specific interpretation matters.
 
 ### Execution Diagnostics
 
