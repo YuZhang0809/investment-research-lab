@@ -120,6 +120,37 @@ class P2CorrectnessTest(unittest.TestCase):
         self.assertEqual(50.0, snapshot["borrowed_value"])
         self.assertAlmostEqual(5.0, run_qvm_walkforward.financing_cost_for_period(50.0, margin, 365))
 
+    def test_margin_buying_power_uses_gross_headroom_not_cash_plus_headroom(self) -> None:
+        margin = run_qvm_walkforward.MarginConfig(
+            enabled=True,
+            account_type="margin_long",
+            max_gross_leverage=2.0,
+            initial_margin_requirement=0.5,
+        )
+
+        self.assertEqual(20_000.0, run_qvm_walkforward.margin_available_buying_power(10_000.0, 0.0, margin))
+        self.assertEqual(5_000.0, run_qvm_walkforward.margin_available_buying_power(-5_000.0, 15_000.0, margin))
+
+    def test_margin_unbounded_leverage_is_visible_in_summary_stats(self) -> None:
+        margin = run_qvm_walkforward.MarginConfig(enabled=True, account_type="margin_long")
+        snapshot = run_qvm_walkforward.margin_snapshot(100.0, 0.0, margin)
+        stats = run_qvm_walkforward.margin_summary_stats(
+            [
+                {
+                    "margin_ratio": snapshot["margin_ratio"],
+                    "gross_leverage": snapshot["gross_leverage"],
+                    "borrowed_value": snapshot["borrowed_value"],
+                    "maintenance_margin_breach": True,
+                    "minimum_equity_breach": True,
+                    "date": date(2026, 1, 31),
+                }
+            ],
+            cumulative_financing_cost=0.0,
+        )
+
+        self.assertEqual("unbounded", snapshot["gross_leverage"])
+        self.assertEqual("unbounded", stats["max_margin_gross_leverage"])
+
     def test_margin_no_borrow_no_interest(self) -> None:
         margin = run_qvm_walkforward.MarginConfig(
             enabled=True,
@@ -233,7 +264,12 @@ class P2CorrectnessTest(unittest.TestCase):
                     ["code", "sector", "lot_size", "median_60d_trading_value"],
                 )
                 write_csv(factors, [{"code": "1001"}], ["code"])
-                write_csv(scores, [{"code": "1001", "rank": "1", "sector": "Tech", "latest_unadjusted_close": "100"}], ["code", "rank", "sector", "latest_unadjusted_close"])
+                score_rows = (
+                    []
+                    if rebalance_date == date(2026, 2, 28)
+                    else [{"code": "1001", "rank": "1", "sector": "Tech", "latest_unadjusted_close": "100"}]
+                )
+                write_csv(scores, score_rows, ["code", "rank", "sector", "latest_unadjusted_close"])
                 return universe, factors, scores
 
             try:
@@ -287,6 +323,7 @@ class P2CorrectnessTest(unittest.TestCase):
             self.assertEqual("True", summary[-1]["margin_enabled"])
             self.assertAlmostEqual(5000.0, float(summary[0]["borrowed_value"]))
             self.assertGreater(float(summary[-1]["financing_cost_period"]), 0.0)
+            self.assertEqual("0", summary[-1]["holdings_count"])
             self.assertTrue(margin_daily)
             self.assertEqual("5000.0", margin_summary[0]["max_borrowed_value"])
 

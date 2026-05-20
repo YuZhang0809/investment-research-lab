@@ -179,7 +179,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--initial-margin-requirement", type=float, help="Override initial margin requirement.")
     parser.add_argument("--maintenance-margin-requirement", type=float, help="Override maintenance margin requirement.")
     parser.add_argument("--minimum-required-equity", type=float, help="Override minimum required account equity.")
-    parser.add_argument("--margin-call-action", choices=["flag_only", "force_deleverage_to_target"], help="Margin call handling mode.")
+    parser.add_argument(
+        "--margin-call-action",
+        choices=["flag_only"],
+        help="Margin call handling mode. Only flag_only is implemented.",
+    )
     parser.add_argument("--out-dir", type=Path, default=Path("data/processed/walkforward"))
     parser.add_argument("--report-dir", type=Path, default=Path("reports/walkforward"))
     parser.add_argument("--manifest", type=Path, default=Path("data/manifest/data_manifest.csv"))
@@ -893,9 +897,23 @@ def financing_cost_for_period(borrowed_value: float, config: MarginConfig, days_
     return borrowed_value * config.annual_borrow_rate * days_held / config.interest_day_count
 
 
+def margin_available_buying_power(cash: float, gross_before_fill: float, config: MarginConfig) -> float:
+    if not config.enabled:
+        return cash
+    account_equity = cash + gross_before_fill
+    gross_limit = max_allowed_gross_leverage(config) * max(account_equity, 0.0)
+    return max(gross_limit - gross_before_fill, 0.0)
+
+
 def margin_snapshot(gross_exposure: float, account_equity: float, config: MarginConfig) -> dict[str, Any]:
     borrowed_value = max(gross_exposure - account_equity, 0.0)
-    gross_leverage = gross_exposure / account_equity if account_equity > 0 else ""
+    gross_leverage: float | str
+    if account_equity > 0:
+        gross_leverage = gross_exposure / account_equity
+    elif gross_exposure > 0:
+        gross_leverage = "unbounded"
+    else:
+        gross_leverage = 0.0
     margin_ratio = account_equity / gross_exposure if gross_exposure > 0 else 1.0
     return {
         "gross_exposure": gross_exposure,
@@ -966,6 +984,7 @@ def margin_summary_stats(rows: list[dict[str, Any]], cumulative_financing_cost: 
             "cumulative_financing_cost": cumulative_financing_cost,
         }
     ratios = [float(row["margin_ratio"]) for row in rows if parse_float(row.get("margin_ratio")) is not None]
+    has_unbounded_leverage = any(str(row.get("gross_leverage", "")).lower() == "unbounded" for row in rows)
     leverages = [float(row["gross_leverage"]) for row in rows if parse_float(row.get("gross_leverage")) is not None]
     borrowed_values = [float(row["borrowed_value"]) for row in rows if parse_float(row.get("borrowed_value")) is not None]
     breach_rows = [row for row in rows if parse_bool(row.get("maintenance_margin_breach"), default=False)]
@@ -975,8 +994,8 @@ def margin_summary_stats(rows: list[dict[str, Any]], cumulative_financing_cost: 
         "margin_breach_count": len(breach_rows),
         "first_margin_breach_date": breach_rows[0]["date"] if breach_rows else "",
         "minimum_equity_breach_count": len(min_equity_rows),
-        "max_margin_gross_leverage": max(leverages) if leverages else "",
-        "avg_margin_gross_leverage": (sum(leverages) / len(leverages)) if leverages else "",
+        "max_margin_gross_leverage": "unbounded" if has_unbounded_leverage else (max(leverages) if leverages else ""),
+        "avg_margin_gross_leverage": "unbounded" if has_unbounded_leverage else ((sum(leverages) / len(leverages)) if leverages else ""),
         "max_borrowed_value": max(borrowed_values) if borrowed_values else "",
         "cumulative_financing_cost": cumulative_financing_cost,
     }
@@ -2464,6 +2483,7 @@ def main() -> int:
     warned_price_tail_gaps: set[tuple[str, date]] = set()
 
     for rebalance_date in dates:
+        financing_cost_period = 0.0
         universe_path, _factors_path, scores_path = run_stages(args, rebalance_date)
         stage_rows = getattr(args, "_stage_rows", {}).get(month_key(rebalance_date), {})
         universe_rows = stage_rows.get("universe") or read_csv(universe_path)
@@ -2482,6 +2502,29 @@ def main() -> int:
                 config=margin,
             )
             margin_daily_rows.extend(period_margin_rows)
+            period_borrowed_value = max(
+                (parse_float(row.get("borrowed_value"), default=0.0) or 0.0 for row in period_margin_rows),
+                default=0.0,
+            )
+            days_held = max((rebalance_date - previous_valuation_date).days, 0)
+            financing_cost_period = financing_cost_for_period(period_borrowed_value, margin, days_held)
+            if financing_cost_period:
+                cash -= financing_cost_period
+                cumulative_financing_cost += financing_cost_period
+                failure_rows.append(
+                    {
+                        "date": rebalance_date,
+                        "code": "",
+                        "failure_type": "financing_cost_drag",
+                        "detail": (
+                            f"borrowed_value={period_borrowed_value};"
+                            f"annual_borrow_rate={margin.annual_borrow_rate};"
+                            f"days_held={days_held};"
+                            f"interest_day_count={margin.interest_day_count}"
+                        ),
+                        "value": financing_cost_period,
+                    }
+                )
             for item in period_margin_rows:
                 if parse_bool(item.get("maintenance_margin_breach"), default=False):
                     failure_rows.append(
@@ -2840,9 +2883,7 @@ def main() -> int:
                     if mark_point is None:
                         continue
                     gross_before_fill += position_value(adjusted_shares, mark_point)
-                equity_before_fill = cash + gross_before_fill
-                gross_limit = max_allowed_gross_leverage(margin) * max(equity_before_fill, 0.0)
-                available_buying_power = cash + max(gross_limit - gross_before_fill, 0.0)
+                available_buying_power = margin_available_buying_power(cash, gross_before_fill, margin)
             if filled_delta > 0 and trade_value + cost > available_buying_power:
                 affordable_shares = floor_lot(max(available_buying_power, 0), fill_price, lot)
                 filled_delta = min(filled_delta, affordable_shares)
@@ -2963,37 +3004,8 @@ def main() -> int:
             value = position_value(adjusted_shares, point)
             post_holdings_value += value
         after_equity = cash + post_holdings_value
-        pre_financing_margin_snapshot = margin_snapshot(post_holdings_value, after_equity, margin)
-        days_since_previous_valuation = (
-            max((valuation_date - previous_valuation_date).days, 0)
-            if previous_valuation_date is not None
-            else 0
-        )
-        financing_cost_period = financing_cost_for_period(
-            pre_financing_margin_snapshot["borrowed_value"],
-            margin,
-            days_since_previous_valuation,
-        )
-        if financing_cost_period:
-            cash -= financing_cost_period
-            after_equity -= financing_cost_period
-            cumulative_financing_cost += financing_cost_period
-            failure_rows.append(
-                {
-                    "date": valuation_date,
-                    "code": "",
-                    "failure_type": "financing_cost_drag",
-                    "detail": (
-                        f"borrowed_value={pre_financing_margin_snapshot['borrowed_value']};"
-                        f"annual_borrow_rate={margin.annual_borrow_rate};"
-                        f"days_held={days_since_previous_valuation};"
-                        f"interest_day_count={margin.interest_day_count}"
-                    ),
-                    "value": financing_cost_period,
-                }
-            )
         current_margin_snapshot = margin_snapshot(post_holdings_value, after_equity, margin)
-        if margin.enabled and previous_valuation_date is None:
+        if margin.enabled and (previous_valuation_date is None or rebalance_date == dates[-1]):
             margin_daily_rows.append(
                 {
                     "date": valuation_date,
