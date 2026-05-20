@@ -28,6 +28,7 @@ Initial commit:
 - QVM research pipeline scripts
 - J-Quants adapter scripts
 - TDnet event-observation scaffolding
+- PIT derived fundamental factor panel tooling for public-safe event and factor research
 - Example configs ending in `.example.yml`
 - Synthetic sample CSVs
 - Empty templates for holdings, trades, events, and paper-trading logs
@@ -79,10 +80,13 @@ dashboard files, IPS/core-layer docs, private keys, and common token patterns.
 
 ## Next Useful Tasks
 
-1. Expand from the five-code real sample to a broader but still local J-Quants research universe.
-2. Decide whether to wrap the official J-Quants client or keep the current lightweight adapter.
-3. Add lightweight privacy scanning.
-4. Add CI for compile checks, focused unit tests, and smoke test.
-5. Keep synthetic fixtures only for public no-key tests and schema examples.
-6. Decide whether to add an open-source license.
-7. Keep the private workspace as the only place where real portfolio data and vendor data live.
+1. Continue the event and defensive factor capability plan in `docs/next_capability_handoff_event_factors.md`.
+2. Build event-driven entry and holding-window simulation primitives on top of public-safe event panels.
+3. Add matched-control event benchmarks for same date, same group, and same size-bucket controls.
+4. Add defensive price factor panel generation for realized volatility, downside volatility, drawdown, and benchmark beta.
+5. Expand optional data-contract extensions for dividend, forecast, balance-sheet, and crowding fields.
+6. Add lightweight privacy scanning.
+7. Add CI for compile checks, focused unit tests, and smoke test.
+8. Keep synthetic fixtures only for public no-key tests and schema examples.
+9. Decide whether to add an open-source license.
+10. Keep the private workspace as the only place where real portfolio data and vendor data live.

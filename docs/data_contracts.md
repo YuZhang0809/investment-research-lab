@@ -81,6 +81,32 @@ and comparison periods in one disclosure. When present, `period_end` and
 latest usable accounting row by disclosure timestamp, period end, and disclosure
 number, ignoring rows that do not contain factor inputs when a usable row exists.
 
+## Derived Fundamental Factor Panels
+
+`build_derived_fundamental_factor_panel.py` creates point-in-time derived
+features from disclosure history. Rebalance-mode output is keyed by:
+
+```text
+rebalance_date,code
+```
+
+Event-mode output is keyed by:
+
+```text
+available_date,code
+```
+
+Both modes may include:
+
+```text
+available_time,period_type,period_end,document_type,disclosure_number,statement_scope,prior_year_available_date,prior_year_period_end,source_duplicate_count,source_disclosure_count,sales,operating_profit,net_profit,equity,total_assets,shares_outstanding,sales_yoy,operating_profit_yoy,net_profit_yoy,operating_margin,operating_margin_delta_yoy,roe,roa,equity_to_assets,shares_outstanding_change_yoy,profit_turn_positive,missing_flags
+```
+
+The script uses `available_date`/`disclosure_date` as the PIT gate and matches
+same-period prior-year rows by `code`, `period_type`, `period_end`, and
+statement scope. Missing prior-year comparisons are reported through
+`missing_flags`. Public committed outputs must be synthetic.
+
 ## External Factor Panels
 
 Optional external factor panels can be joined by the legacy factor stage through

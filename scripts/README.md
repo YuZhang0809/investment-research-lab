@@ -293,6 +293,39 @@ Then run the factor/score path with a config that contains
 field filters such as `exclude_equals`, `require_in`, `exclude_above_pct`, and
 `exclude_below_pct`. Public examples must use synthetic external panels only.
 
+### Derived Fundamental Factor Panels
+
+`build_derived_fundamental_factor_panel.py` turns disclosure history into
+point-in-time derived factors for event workflows or rebalance workflows.
+
+Event/as-of panel example:
+
+```powershell
+python scripts\build_derived_fundamental_factor_panel.py `
+  --fundamentals <synthetic_fundamentals.csv> `
+  --panel-mode event `
+  --out <derived_fundamentals_event.parquet> `
+  --output-format parquet `
+  --no-manifest
+```
+
+Rebalance panel example:
+
+```powershell
+python scripts\build_derived_fundamental_factor_panel.py `
+  --fundamentals <synthetic_fundamentals.csv> `
+  --panel-mode rebalance `
+  --rebalance-date 2026-03-31 `
+  --out <derived_fundamentals_202603.csv> `
+  --output-format csv `
+  --no-manifest
+```
+
+The output includes generic fields such as `sales_yoy`,
+`operating_profit_yoy`, `operating_margin_delta_yoy`, `roe`, `roa`, and
+`profit_turn_positive`. The script uses `available_date` as the PIT gate and
+does not use future restatements before their availability date.
+
 ### Execution Diagnostics
 
 Small-account execution diagnostics are optional:
