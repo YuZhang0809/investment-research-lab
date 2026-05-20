@@ -193,16 +193,16 @@ def assign_quantiles(observations: list[FactorObservation], requested_quantiles:
     return quantile_count
 
 
-def assign_quantiles_by_group(observations: list[FactorObservation], requested_quantiles: int) -> int:
+def assign_quantiles_by_group(observations: list[FactorObservation], requested_quantiles: int) -> dict[str, int]:
     if requested_quantiles < 2:
         raise ValueError("quantiles must be at least 2.")
     grouped: dict[str, list[FactorObservation]] = defaultdict(list)
     for item in observations:
         grouped[item.group].append(item)
-    max_quantile_count = 0
+    quantile_counts: dict[str, int] = {}
     for values in grouped.values():
-        max_quantile_count = max(max_quantile_count, assign_quantiles(values, requested_quantiles))
-    return max_quantile_count
+        quantile_counts[values[0].group] = assign_quantiles(values, requested_quantiles)
+    return quantile_counts
 
 
 def factor_rank_map(observations: list[FactorObservation]) -> dict[str, float]:
@@ -580,17 +580,33 @@ def main() -> int:
             bottom_return = average([item.forward_return for item in bottom])
             factor_values = [item.factor_value for item in observations]
             forward_values = [item.forward_return for item in observations]
-            quantile_count = (
-                assign_quantiles_by_group(observations, args.quantiles)
-                if args.group_neutral_quantiles
-                else assign_quantiles(observations, args.quantiles)
-            )
+            group_quantile_counts: dict[str, int] = {}
+            if args.group_neutral_quantiles:
+                group_quantile_counts = assign_quantiles_by_group(observations, args.quantiles)
+                quantile_count = max(group_quantile_counts.values()) if group_quantile_counts else 0
+            else:
+                quantile_count = assign_quantiles(observations, args.quantiles)
             quantile_returns = {
                 index: average([item.forward_return for item in observations if item.factor_quantile == index])
                 for index in range(1, quantile_count + 1)
             }
-            bottom_quantile_return = quantile_returns.get(1)
-            top_quantile_return = quantile_returns.get(quantile_count)
+            if args.group_neutral_quantiles:
+                bottom_quantile_items = [
+                    item
+                    for item in observations
+                    if (group_quantile_counts.get(item.group) or 0) >= 2 and item.factor_quantile == 1
+                ]
+                top_quantile_items = [
+                    item
+                    for item in observations
+                    if (group_quantile_counts.get(item.group) or 0) >= 2
+                    and item.factor_quantile == group_quantile_counts.get(item.group)
+                ]
+                bottom_quantile_return = average([item.forward_return for item in bottom_quantile_items])
+                top_quantile_return = average([item.forward_return for item in top_quantile_items])
+            else:
+                bottom_quantile_return = quantile_returns.get(1)
+                top_quantile_return = quantile_returns.get(quantile_count)
             top_bottom_quantile_spread = (
                 top_quantile_return - bottom_quantile_return
                 if top_quantile_return is not None and bottom_quantile_return is not None
@@ -599,7 +615,12 @@ def main() -> int:
             top_quantile_assets = {
                 item.code
                 for item in observations
-                if quantile_count and item.factor_quantile == quantile_count
+                if (
+                    args.group_neutral_quantiles
+                    and (group_quantile_counts.get(item.group) or 0) >= 2
+                    and item.factor_quantile == group_quantile_counts.get(item.group)
+                )
+                or (not args.group_neutral_quantiles and quantile_count and item.factor_quantile == quantile_count)
             }
             previous_assets = previous_top_assets.get(factor)
             top_quantile_turnover = None

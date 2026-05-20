@@ -953,6 +953,29 @@ class TableIODuckDBTest(unittest.TestCase):
                     asof_date_field=None,
                 )
 
+    def test_external_factor_panel_validator_accepts_asof_shape_without_rebalance_date_column(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            panel = temp / "asof_external.csv"
+            write_table(
+                [
+                    {"code": "1001", "available_date": "2026-03-01", "risk_score": "1.0"},
+                    {"code": "1001", "available_date": "2026-03-15", "risk_score": "2.0"},
+                ],
+                panel,
+                format="csv",
+                fieldnames=["code", "available_date", "risk_score"],
+            )
+
+            row_count = validate_panel(
+                panel=panel,
+                join_keys=["rebalance_date", "code"],
+                fields=parse_field_contracts(["risk_score:float"]),
+                asof_date_field="available_date",
+            )
+
+            self.assertEqual(2, row_count)
+
 
 def factor_row(code: str, value: float) -> dict[str, str]:
     return {

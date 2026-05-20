@@ -308,7 +308,7 @@ reporting:
 When enabled, `run_qvm_walkforward.py` writes
 `qvm_walkforward_execution_diagnostics_<token>.csv` with cash-weight, target
 slot fill ratio, affordability skips, ADV reductions, buy/sell turnover, cost
-drag, tax drag, and selected/skipped lot-value distributions.
+and tax drag for the period, and selected/skipped lot-value distributions.
 
 ### Grouped Factor Diagnostics
 

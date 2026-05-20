@@ -66,7 +66,10 @@ Future rows are never used. If the latest available row is older than
 `max_lag_days`, the joined field is missing and is added to `missing_flags`.
 Duplicate keys fail by default. `duplicate_policy: latest_available_date` is
 reserved for as-of panels where the availability timestamp is the intended
-canonicalization key.
+canonicalization key. It does not choose among different availability dates;
+as-of joins already keep distinct dates and choose the latest date no later than
+the rebalance date. The policy only permits duplicate rows with the same match
+key and availability date to be canonicalized by file order.
 
 ## Validation
 

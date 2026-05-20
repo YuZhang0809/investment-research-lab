@@ -187,6 +187,80 @@ class FactorDiagnosticsTest(unittest.TestCase):
             self.assertIn("| 10.00% | 2.00% | 8.00% | 50.00% |", summary_line)
             self.assertEqual("| custom_factor | 2.00% | 10.00% |", quantile_line)
 
+    def test_group_neutral_quantiles_include_small_group_top_bucket_in_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            factors_dir = temp / "factors"
+            out_dir = temp / "out"
+            report_dir = temp / "reports"
+            prices_path = temp / "prices.csv"
+            factor_fields = ["rebalance_date", "code", "name", "sector", "custom_factor"]
+            factor_rows = []
+            price_rows = []
+            specs = [
+                ("A", "Large", 1, 0.01),
+                ("B", "Large", 2, 0.02),
+                ("C", "Large", 3, 0.03),
+                ("D", "Large", 4, 0.04),
+                ("E", "Large", 5, 0.05),
+                ("X", "Small", 1, 0.10),
+                ("Y", "Small", 2, 0.20),
+            ]
+            for code, sector, factor_value, forward_return in specs:
+                factor_rows.append(
+                    {
+                        "rebalance_date": "2026-01-01",
+                        "code": code,
+                        "name": f"Synthetic {code}",
+                        "sector": sector,
+                        "custom_factor": factor_value,
+                    }
+                )
+                exit_price = 100 * (1 + forward_return)
+                price_rows.extend(
+                    [
+                        {"date": "2026-01-01", "code": code, "adjusted_close": 100, "unadjusted_close": 100},
+                        {"date": "2026-01-02", "code": code, "adjusted_close": exit_price, "unadjusted_close": exit_price},
+                    ]
+                )
+            write_csv(factors_dir / "factors_202601.csv", factor_rows, factor_fields)
+            write_csv(prices_path, price_rows, ["date", "code", "adjusted_close", "unadjusted_close"])
+
+            original_argv = sys.argv[:]
+            try:
+                sys.argv = [
+                    "analyze_factor_forward_returns.py",
+                    "--factors-dir",
+                    str(factors_dir),
+                    "--prices",
+                    str(prices_path),
+                    "--start-date",
+                    "2026-01-01",
+                    "--end-date",
+                    "2026-01-01",
+                    "--holding-days",
+                    "1",
+                    "--factor",
+                    "custom_factor",
+                    "--quantiles",
+                    "5",
+                    "--group-field",
+                    "sector",
+                    "--group-neutral-quantiles",
+                    "--out-dir",
+                    str(out_dir),
+                    "--report-dir",
+                    str(report_dir),
+                    "--no-manifest",
+                ]
+                self.assertEqual(0, analyze_factor_forward_returns_main())
+            finally:
+                sys.argv = original_argv
+
+            summary_rows = read_csv(out_dir / "factor_forward_returns_202601_202601_1d.csv")
+            self.assertEqual("0.125", summary_rows[0]["top_quantile_return"])
+            self.assertEqual("0.055", summary_rows[0]["bottom_quantile_return"])
+
 
 if __name__ == "__main__":
     unittest.main()

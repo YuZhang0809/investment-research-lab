@@ -52,16 +52,17 @@ def validate_panel(
     rows = read_csv(panel)
     if not rows:
         raise ValueError(f"External factor panel is empty: {panel}")
-    required = set(join_keys) | {field.name for field in fields}
+    panel_join_keys = [key for key in join_keys if not (asof_date_field and key == "rebalance_date")]
+    required = set(panel_join_keys) | {field.name for field in fields}
     if asof_date_field:
         required.add(asof_date_field)
     missing = sorted(required - set(rows[0]))
     if missing:
         raise ValueError(f"External factor panel missing required field(s): {', '.join(missing)}")
     seen: set[tuple[str, ...]] = set()
-    duplicate_key_fields = [*join_keys, *([asof_date_field] if asof_date_field else [])]
+    duplicate_key_fields = [*panel_join_keys, *([asof_date_field] if asof_date_field else [])]
     for row_number, row in enumerate(rows, start=2):
-        for key in join_keys:
+        for key in panel_join_keys:
             if normalize_key_value(row.get(key), field_name=key) == "":
                 raise ValueError(f"Blank join key {key!r} at row {row_number}.")
         if asof_date_field:

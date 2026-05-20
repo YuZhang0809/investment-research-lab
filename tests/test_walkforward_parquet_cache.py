@@ -1573,6 +1573,38 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
             self.assertNotEqual(fingerprints["factors"], changed["factors"])
             self.assertNotEqual(fingerprints["scores"], changed["scores"])
 
+    def test_run_cache_fingerprint_includes_execution_diagnostics_reporting_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            args = Namespace(
+                listings=listings,
+                prices=prices,
+                fundamentals=fundamentals,
+                strategy_version="qvm",
+                start_date="2026-03-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                execution_price="rebalance_close",
+                cost_scenario="base",
+                capital_jpy=5_000_000,
+                tax_rate=0.20315,
+            )
+            config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            changed_config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            changed_config["reporting"] = {
+                "execution_diagnostics": {
+                    "enabled": True,
+                    "high_cash_threshold": 0.30,
+                }
+            }
+
+            fingerprints = run_qvm_walkforward.compute_cache_fingerprints(args, config)
+            changed = run_qvm_walkforward.compute_cache_fingerprints(args, changed_config)
+
+            self.assertEqual(fingerprints["scores"], changed["scores"])
+            self.assertNotEqual(fingerprints["run"], changed["run"])
+
     def test_rebalance_candidate_cache_is_run_dependent_for_capital(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

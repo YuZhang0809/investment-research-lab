@@ -1487,7 +1487,15 @@ def compute_cache_fingerprints(args: argparse.Namespace, config: dict[str, Any])
             "scores": scores_fingerprint,
             "date_range": {"start": args.start_date, "end": args.end_date},
             "frequency": args.frequency,
-            "portfolio": cache_config(config, "portfolio", "execution", "cost_model", "tax", "missing_price_tail_policy"),
+            "portfolio": cache_config(
+                config,
+                "portfolio",
+                "execution",
+                "cost_model",
+                "tax",
+                "missing_price_tail_policy",
+                "reporting",
+            ),
             "execution_price": args.execution_price,
             "cost_scenario": args.cost_scenario,
             "capital_jpy": args.capital_jpy,
@@ -2654,8 +2662,8 @@ def main() -> int:
         ]
         selected_lot_stats = distribution_stats(selected_lot_values, "selected_lot_value")
         skipped_lot_stats = distribution_stats(skipped_lot_values, "skipped_lot_value")
-        cost_drag = estimated_cost_base / pre_equity if pre_equity else 0
-        tax_drag = period_estimated_tax / pre_equity if pre_equity else 0
+        period_cost_drag = estimated_cost_base / pre_equity if pre_equity else 0
+        period_tax_drag = period_estimated_tax / pre_equity if pre_equity else 0
         high_cash_flag = cash_pct > execution_diagnostics.high_cash_threshold
         if cash_pct > 0.2:
             failure_rows.append(
@@ -2758,8 +2766,8 @@ def main() -> int:
             "buy_turnover": buy_turnover_value / pre_equity if pre_equity else 0,
             "sell_turnover": sell_turnover_value / pre_equity if pre_equity else 0,
             "estimated_cost_base": estimated_cost_base,
-            "cost_drag": cost_drag,
-            "tax_drag": tax_drag,
+            "period_cost_drag": period_cost_drag,
+            "period_tax_drag": period_tax_drag,
             "cumulative_cost_optimistic": cumulative_cost_by_scenario["optimistic"],
             "cumulative_cost_base": cumulative_cost_by_scenario["base"],
             "cumulative_cost_pessimistic": cumulative_cost_by_scenario["pessimistic"],
@@ -2794,8 +2802,8 @@ def main() -> int:
                     "sell_turnover": row["sell_turnover"],
                     "turnover": row["turnover"],
                     "estimated_cost_base": estimated_cost_base,
-                    "cost_drag": cost_drag,
-                    "tax_drag": tax_drag,
+                    "period_cost_drag": period_cost_drag,
+                    "period_tax_drag": period_tax_drag,
                     "cash_drag": cash_pct,
                     **selected_lot_stats,
                     **skipped_lot_stats,
@@ -2965,8 +2973,8 @@ def main() -> int:
             "buy_turnover",
             "sell_turnover",
             "estimated_cost_base",
-            "cost_drag",
-            "tax_drag",
+            "period_cost_drag",
+            "period_tax_drag",
             "cumulative_cost_optimistic",
             "cumulative_cost_base",
             "cumulative_cost_pessimistic",
@@ -3053,8 +3061,8 @@ def main() -> int:
                 "sell_turnover",
                 "turnover",
                 "estimated_cost_base",
-                "cost_drag",
-                "tax_drag",
+                "period_cost_drag",
+                "period_tax_drag",
                 "cash_drag",
                 "selected_lot_value_min",
                 "selected_lot_value_median",
