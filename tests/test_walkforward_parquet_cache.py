@@ -1024,6 +1024,66 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
                 ],
             )
 
+    def test_duckdb_factor_score_panel_exact_external_join_normalizes_rebalance_date_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            external_path = temp / "exact_external.csv"
+            write_csv(
+                external_path,
+                [
+                    {"rebalance_date": "2026-03-31", "code": "1001", "low_pbr_flag": "true"},
+                    {"rebalance_date": "2026-03-31", "code": "1004", "low_pbr_flag": "false"},
+                ],
+                ["rebalance_date", "code", "low_pbr_flag"],
+            )
+            config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            config["external_factor_panels"] = [
+                {
+                    "name": "synthetic_low_pbr",
+                    "path": str(external_path),
+                    "join_keys": ["rebalance_date", "code"],
+                    "fields": [{"name": "low_pbr_flag", "dtype": "bool"}],
+                }
+            ]
+
+            price_panel = temp / "price_panel.parquet"
+            build_panel(
+                config=config,
+                listings_path=listings,
+                prices_path=prices,
+                fundamentals_path=fundamentals,
+                start_date="2026-03-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                input_format="csv",
+                out_path=price_panel,
+                output_format="parquet",
+            )
+            duckdb_panel = temp / "duckdb_exact_external.parquet"
+            build_factor_score_panel(
+                config=config,
+                price_universe_panel_path=price_panel,
+                prices_path=prices,
+                fundamentals_path=fundamentals,
+                start_date="2026-03-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                strategy_version="qvm",
+                out_path=duckdb_panel,
+                output_format="parquet",
+                engine="duckdb",
+            )
+
+            by_code = {
+                row["code"]: row
+                for row in read_csv(duckdb_panel)
+                if row["rebalance_date"] == "2026-03-31"
+            }
+            self.assertEqual("True", by_code["1001"]["low_pbr_flag"])
+            self.assertEqual("False", by_code["1004"]["low_pbr_flag"])
+            self.assertNotIn("low_pbr_flag", by_code["1001"]["missing_flags"])
+
     def test_factor_score_panel_stage_rows_accepts_score_only_panel_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

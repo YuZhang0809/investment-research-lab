@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -130,12 +130,19 @@ def external_factor_panel_fingerprints(config: dict[str, Any] | None) -> list[di
 
 
 def normalize_key_value(value: Any, *, field_name: str) -> str:
+    if field_name.endswith("date") or field_name in {"rebalance_date", "available_date"}:
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        text = str(value or "").strip()
+        if len(text) >= 10 and text[4:5] == "-" and text[7:8] == "-":
+            text = text[:10]
+        parsed = parse_date(text, field_name=field_name)
+        return parsed.isoformat() if parsed else ""
     if isinstance(value, date):
         return value.isoformat()
     text = str(value or "").strip()
-    if field_name.endswith("date") or field_name in {"rebalance_date", "available_date"}:
-        parsed = parse_date(text, field_name=field_name)
-        return parsed.isoformat() if parsed else ""
     return text
 
 

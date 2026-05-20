@@ -4,7 +4,7 @@ import csv
 import sys
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 
@@ -846,6 +846,18 @@ class TableIODuckDBTest(unittest.TestCase):
             self.assertEqual("risk_flag_equals_blocked", by_code["1002"]["filter_reasons"])
             ranked = sorted([row for row in scores if row["rank"]], key=lambda row: int(row["rank"]))
             self.assertEqual(["1003", "1001"], [row["code"] for row in ranked])
+
+    def test_external_factor_panel_date_key_normalizes_datetime_values(self) -> None:
+        from external_factor_panels import normalize_key_value
+
+        self.assertEqual(
+            "2026-03-31",
+            normalize_key_value(datetime(2026, 3, 31, 0, 0), field_name="rebalance_date"),
+        )
+        self.assertEqual(
+            "2026-03-31",
+            normalize_key_value("2026-03-31 00:00:00", field_name="rebalance_date"),
+        )
 
     def test_external_factor_panel_sector_join_and_duplicate_fail_fast(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
