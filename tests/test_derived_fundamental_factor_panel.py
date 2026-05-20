@@ -177,6 +177,102 @@ class DerivedFundamentalFactorPanelTest(unittest.TestCase):
         self.assertEqual("15", latest["operating_profit"])
         self.assertAlmostEqual(0.5, float(latest["operating_profit_yoy"]))
 
+    def test_empty_revision_row_does_not_override_useful_statement_row(self) -> None:
+        statement = row(
+            available_date="2026-02-01",
+            period_type="FY",
+            period_end="2025-12-31",
+            sales="120",
+            disclosure_number="1",
+        )
+        empty_revision = row(
+            available_date="2026-03-01",
+            period_type="FY",
+            period_end="2025-12-31",
+            sales="",
+            operating_profit="",
+            net_profit="",
+            equity="",
+            total_assets="",
+            shares_outstanding="",
+            disclosure_number="2",
+        )
+        empty_revision["document_type"] = "EarnForecastRevision"
+
+        panel = build_panel(
+            [statement, empty_revision],
+            panel_mode="rebalance",
+            rebalance_dates=[date(2026, 3, 31)],
+            period_types={"fy"},
+        )
+
+        self.assertEqual("FinancialStatement", panel[0]["document_type"])
+        self.assertEqual("120", panel[0]["sales"])
+
+    def test_document_type_filter_and_raw_jquants_aliases(self) -> None:
+        rows = [
+            {
+                "LocalCode": "1001",
+                "DisclosedDate": "2026-02-01",
+                "DisclosedTime": "15:00:00",
+                "TypeOfDocument": "FYFinancialStatements_Consolidated_IFRS",
+                "TypeOfCurrentPeriod": "FY",
+                "CurrentPeriodEndDate": "2025-12-31",
+                "DisclosureNumber": "20260201000001",
+                "NetSales": "120",
+                "OperatingProfit": "12",
+                "Profit": "8",
+                "Equity": "40",
+                "TotalAssets": "100",
+            },
+            {
+                "LocalCode": "1001",
+                "DisclosedDate": "2026-03-01",
+                "DisclosedTime": "15:00:00",
+                "TypeOfDocument": "DividendForecastRevision",
+                "TypeOfCurrentPeriod": "FY",
+                "CurrentPeriodEndDate": "2025-12-31",
+                "DisclosureNumber": "20260301000001",
+            },
+        ]
+
+        panel = build_panel(
+            rows,
+            panel_mode="rebalance",
+            rebalance_dates=[date(2026, 3, 31)],
+            period_types={"fy"},
+            document_type_contains={"financialstatements"},
+            require_useful=True,
+        )
+
+        self.assertEqual(1, len(panel))
+        self.assertEqual("1001", panel[0]["code"])
+        self.assertEqual("FYFinancialStatements_Consolidated_IFRS", panel[0]["document_type"])
+        self.assertEqual("120", panel[0]["sales"])
+
+    def test_optional_balance_sheet_value_fields_are_missing_without_explicit_inputs(self) -> None:
+        base = row(available_date="2026-02-01", period_end="2025-12-31")
+
+        missing_panel = build_panel([base], panel_mode="event")
+        self.assertEqual("", missing_panel[0]["net_cash_to_market_cap"])
+        self.assertIn("net_cash_to_market_cap", missing_panel[0]["missing_flags"])
+
+        enriched = dict(base)
+        enriched.update(
+            {
+                "market_cap": "200",
+                "cash_and_equivalents": "80",
+                "interest_bearing_debt": "20",
+                "total_liabilities": "50",
+            }
+        )
+        panel = build_panel([enriched], panel_mode="event")
+
+        self.assertAlmostEqual(0.4, float(panel[0]["cash_to_market_cap"]))
+        self.assertAlmostEqual(0.3, float(panel[0]["net_cash_to_market_cap"]))
+        self.assertAlmostEqual(0.5, float(panel[0]["debt_to_equity"]))
+        self.assertAlmostEqual(0.5, float(panel[0]["liabilities_to_assets"]))
+
     def test_event_panel_is_unique_by_code_available_date(self) -> None:
         rows = [
             row(available_date="2025-02-01", period_end="2024-12-31", sales="100"),

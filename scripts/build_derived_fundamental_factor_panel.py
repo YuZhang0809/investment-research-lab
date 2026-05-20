@@ -20,6 +20,10 @@ DERIVED_FIELDS = [
     "equity_to_assets",
     "shares_outstanding_change_yoy",
     "profit_turn_positive",
+    "cash_to_market_cap",
+    "net_cash_to_market_cap",
+    "debt_to_equity",
+    "liabilities_to_assets",
 ]
 RAW_OUTPUT_FIELDS = [
     "sales",
@@ -28,6 +32,15 @@ RAW_OUTPUT_FIELDS = [
     "equity",
     "total_assets",
     "shares_outstanding",
+    "market_cap",
+    "cash_and_equivalents",
+    "interest_bearing_debt",
+    "total_liabilities",
+    "forecast_eps",
+    "forecast_dividend_per_share",
+    "result_dividend_per_share",
+    "forecast_payout_ratio",
+    "result_payout_ratio",
 ]
 METADATA_FIELDS = [
     "available_date",
@@ -60,13 +73,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--period-type",
         action="append",
         dest="period_type_values",
-        help="Optional normalized period type to keep, for example annual or q1. Can be repeated.",
+        help="Optional normalized period type to keep, for example fy or 1q. Can be repeated.",
     )
     parser.add_argument(
         "--allow-mixed-period-types",
         action="store_true",
         help="Allow rebalance output rows for the same date to contain multiple period_type values.",
     )
+    parser.add_argument(
+        "--document-type-contains",
+        action="append",
+        dest="document_type_contains",
+        help="Keep rows whose document_type contains this text, case-insensitive. Can be repeated.",
+    )
+    parser.add_argument(
+        "--exclude-document-type-contains",
+        action="append",
+        dest="exclude_document_type_contains",
+        help="Drop rows whose document_type contains this text, case-insensitive. Can be repeated.",
+    )
+    parser.add_argument("--require-useful", action="store_true", help="Drop rows that contain none of the supported numeric inputs.")
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--output-format", choices=["csv", "parquet"], default="parquet")
     parser.add_argument("--run-label", default="derived_fundamentals")
@@ -87,7 +113,10 @@ def parse_optional_date(value: Any, field_name: str) -> date | None:
 
 
 def available_date(row: dict[str, Any]) -> date | None:
-    return parse_optional_date(row.get("available_date") or row.get("disclosure_date"), "fundamentals.available_date")
+    return parse_optional_date(
+        row.get("available_date") or row.get("disclosure_date") or row.get("DisclosedDate"),
+        "fundamentals.available_date",
+    )
 
 
 def available_date_text(row: dict[str, Any]) -> str:
@@ -96,7 +125,7 @@ def available_date_text(row: dict[str, Any]) -> str:
 
 
 def period_end(row: dict[str, Any]) -> date | None:
-    return parse_optional_date(row.get("period_end"), "fundamentals.period_end")
+    return parse_optional_date(row.get("period_end") or row.get("CurrentPeriodEndDate"), "fundamentals.period_end")
 
 
 def period_end_text(row: dict[str, Any]) -> str:
@@ -109,6 +138,7 @@ def period_type(row: dict[str, Any]) -> str:
         row.get("period_type")
         or row.get("type_of_current_period")
         or row.get("current_period_type")
+        or row.get("TypeOfCurrentPeriod")
         or row.get("period")
         or ""
     )
@@ -134,7 +164,7 @@ def normalize_token(value: Any) -> str:
 
 
 def disclosure_time(row: dict[str, Any]) -> str:
-    return str(row.get("available_time") or row.get("disclosure_time") or "").strip()
+    return str(row.get("available_time") or row.get("disclosure_time") or row.get("DisclosedTime") or "").strip()
 
 
 def disclosure_number_sort_value(value: Any) -> tuple[int, int, str]:
@@ -148,7 +178,7 @@ def availability_sort_key(row: dict[str, Any]) -> tuple[str, str, tuple[int, int
     return (
         available_date_text(row),
         disclosure_time(row),
-        disclosure_number_sort_value(row.get("disclosure_number")),
+        disclosure_number_sort_value(disclosure_number(row)),
         int(row.get("_source_index", 0) or 0),
     )
 
@@ -162,7 +192,7 @@ def disclosure_sort_key(row: dict[str, Any]) -> tuple[str, str, str, tuple[int, 
         available_date_text(row),
         disclosure_time(row),
         period_end_text(row),
-        disclosure_number_sort_value(row.get("disclosure_number")),
+        disclosure_number_sort_value(disclosure_number(row)),
         useful_value_count(row),
         int(row.get("_source_index", 0) or 0),
     )
@@ -178,12 +208,47 @@ def first_number(row: dict[str, Any], *fields: str) -> float | None:
 
 def normalized_numbers(row: dict[str, Any]) -> dict[str, float | None]:
     return {
-        "sales": first_number(row, "sales", "net_sales", "revenue"),
-        "operating_profit": first_number(row, "operating_profit", "operating_income"),
-        "net_profit": first_number(row, "net_profit", "profit", "profit_attributable_to_owners_of_parent"),
-        "equity": first_number(row, "equity", "net_assets"),
-        "total_assets": first_number(row, "total_assets", "assets"),
+        "sales": first_number(row, "sales", "net_sales", "revenue", "NetSales"),
+        "operating_profit": first_number(row, "operating_profit", "operating_income", "OperatingProfit"),
+        "net_profit": first_number(row, "net_profit", "profit", "profit_attributable_to_owners_of_parent", "Profit"),
+        "equity": first_number(row, "equity", "net_assets", "Equity"),
+        "total_assets": first_number(row, "total_assets", "assets", "TotalAssets"),
         "shares_outstanding": first_number(row, "shares_outstanding", "shares", "avg_shares"),
+        "market_cap": first_number(row, "market_cap", "MarketCapitalization"),
+        "cash_and_equivalents": first_number(row, "cash_and_equivalents", "CashAndEquivalents"),
+        "interest_bearing_debt": first_number(
+            row,
+            "interest_bearing_debt",
+            "InterestBearingDebt",
+            "bonds_and_borrowings",
+            "debt",
+        ),
+        "total_liabilities": first_number(row, "total_liabilities", "TotalLiabilities", "liabilities"),
+        "forecast_eps": first_number(
+            row,
+            "forecast_eps",
+            "ForecastEarningsPerShare",
+            "ForecastNonConsolidatedEarningsPerShare",
+        ),
+        "forecast_dividend_per_share": first_number(
+            row,
+            "forecast_dividend_per_share",
+            "ForecastDividendPerShareAnnual",
+            "ForecastDividendPerShareFiscalYearEnd",
+        ),
+        "result_dividend_per_share": first_number(
+            row,
+            "result_dividend_per_share",
+            "ResultDividendPerShareAnnual",
+            "ResultDividendPerShareFiscalYearEnd",
+        ),
+        "forecast_payout_ratio": first_number(
+            row,
+            "forecast_payout_ratio",
+            "ForecastPayoutRatio",
+            "ForecastNonConsolidatedPayoutRatio",
+        ),
+        "result_payout_ratio": first_number(row, "result_payout_ratio", "ResultPayoutRatio"),
     }
 
 
@@ -217,7 +282,7 @@ def dedupe_disclosures(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
     for index, row in enumerate(rows, start=1):
         copied: dict[str, Any] = dict(row)
         copied["_source_index"] = index
-        code = str(copied.get("code") or "").strip()
+        code = disclosure_code(copied)
         if not code:
             continue
         key = (
@@ -234,13 +299,21 @@ def dedupe_disclosures(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
         selected = sorted(values, key=disclosure_sort_key)[-1]
         selected["_source_duplicate_count"] = len(values)
         output.append(selected)
-    output.sort(key=lambda row: (str(row.get("code") or ""), disclosure_sort_key(row)))
+    output.sort(key=lambda row: (disclosure_code(row), disclosure_sort_key(row)))
     return output
+
+
+def disclosure_code(row: dict[str, Any]) -> str:
+    return str(row.get("code") or row.get("LocalCode") or row.get("Code") or "").strip()
+
+
+def disclosure_number(row: dict[str, Any]) -> str:
+    return str(row.get("disclosure_number") or row.get("DisclosureNumber") or "").strip()
 
 
 def prior_lookup_key(row: dict[str, Any], target_period_end: date | None = None) -> tuple[str, str, str, str]:
     return (
-        str(row.get("code") or "").strip(),
+        disclosure_code(row),
         period_type(row),
         target_period_end.isoformat() if target_period_end else period_end_text(row),
         statement_scope(row),
@@ -309,6 +382,15 @@ def derived_values(row: dict[str, Any], prior: dict[str, Any] | None) -> dict[st
         "profit_turn_positive": None
         if prior_net_profit is None or net_profit is None
         else (1.0 if prior_net_profit < 0 < net_profit else 0.0),
+        "cash_to_market_cap": safe_ratio(current["cash_and_equivalents"], current["market_cap"]),
+        "net_cash_to_market_cap": safe_ratio(
+            current["cash_and_equivalents"] - current["interest_bearing_debt"]
+            if current["cash_and_equivalents"] is not None and current["interest_bearing_debt"] is not None
+            else None,
+            current["market_cap"],
+        ),
+        "debt_to_equity": safe_ratio(current["interest_bearing_debt"], current["equity"]),
+        "liabilities_to_assets": safe_ratio(current["total_liabilities"], current["total_assets"]),
     }
     missing = [field for field in DERIVED_FIELDS if values.get(field) is None]
     if prior is None:
@@ -320,13 +402,13 @@ def derived_values(row: dict[str, Any], prior: dict[str, Any] | None) -> dict[st
 def enrich_disclosure(row: dict[str, Any], prior: dict[str, Any] | None) -> dict[str, Any]:
     values = derived_values(row, prior)
     return {
-        "code": str(row.get("code") or "").strip(),
+        "code": disclosure_code(row),
         "available_date": available_date_text(row),
         "available_time": disclosure_time(row),
         "period_type": period_type(row),
         "period_end": period_end_text(row),
-        "document_type": row.get("document_type", ""),
-        "disclosure_number": row.get("disclosure_number", ""),
+        "document_type": document_type(row),
+        "disclosure_number": disclosure_number(row),
         "statement_scope": statement_scope(row),
         "prior_year_available_date": available_date_text(prior or {}),
         "prior_year_period_end": period_end_text(prior or {}),
@@ -387,6 +469,40 @@ def selected_reporting_period_key(row: dict[str, Any]) -> tuple[date, str]:
     return (period_end(row) or date.min, period_type(row))
 
 
+def document_type(row: dict[str, Any]) -> str:
+    return str(row.get("document_type") or row.get("TypeOfDocument") or "").strip()
+
+
+def contains_any(value: str, needles: set[str] | None) -> bool:
+    if not needles:
+        return False
+    lowered = value.lower()
+    return any(needle in lowered for needle in needles)
+
+
+def filter_disclosures(
+    disclosures: list[dict[str, Any]],
+    *,
+    period_types: set[str] | None,
+    document_type_contains: set[str] | None,
+    exclude_document_type_contains: set[str] | None,
+    require_useful: bool,
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for row in disclosures:
+        if period_types and period_type(row) not in period_types:
+            continue
+        row_document_type = document_type(row)
+        if document_type_contains and not contains_any(row_document_type, document_type_contains):
+            continue
+        if contains_any(row_document_type, exclude_document_type_contains):
+            continue
+        if require_useful and useful_value_count(row) == 0:
+            continue
+        output.append(row)
+    return output
+
+
 def validate_rebalance_period_types(rows: list[dict[str, Any]], *, allow_mixed_period_types: bool) -> None:
     if allow_mixed_period_types:
         return
@@ -411,7 +527,7 @@ def rebalance_panel_rows(
 ) -> list[dict[str, Any]]:
     by_code: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in disclosures:
-        by_code[str(row.get("code") or "").strip()].append(row)
+        by_code[disclosure_code(row)].append(row)
     for values in by_code.values():
         values.sort(key=disclosure_sort_key)
     output: list[dict[str, Any]] = []
@@ -427,6 +543,9 @@ def rebalance_panel_rows(
                 continue
             latest_period = max(selected_reporting_period_key(row) for row in candidates)
             period_candidates = [row for row in candidates if selected_reporting_period_key(row) == latest_period]
+            useful_period_candidates = [row for row in period_candidates if useful_value_count(row) > 0]
+            if useful_period_candidates:
+                period_candidates = useful_period_candidates
             selected = sorted(period_candidates, key=disclosure_sort_key)[-1]
             prior = latest_prior_year(selected, prior_index, as_of_key=as_of_availability_key(rebalance_date))
             copied = enrich_disclosure(selected, prior)
@@ -458,10 +577,18 @@ def build_panel(
     rebalance_dates: list[date] | None = None,
     period_types: set[str] | None = None,
     allow_mixed_period_types: bool = False,
+    document_type_contains: set[str] | None = None,
+    exclude_document_type_contains: set[str] | None = None,
+    require_useful: bool = False,
 ) -> list[dict[str, Any]]:
     disclosures = dedupe_disclosures(fundamentals_rows)
-    if period_types:
-        disclosures = [row for row in disclosures if period_type(row) in period_types]
+    disclosures = filter_disclosures(
+        disclosures,
+        period_types=period_types,
+        document_type_contains=document_type_contains,
+        exclude_document_type_contains=exclude_document_type_contains,
+        require_useful=require_useful,
+    )
     if panel_mode == "event":
         return event_panel_rows(enrich_disclosures(disclosures))
     return rebalance_panel_rows(
@@ -485,6 +612,9 @@ def main() -> int:
         rebalance_dates=rebalance_dates,
         period_types={normalize_token(value) for value in args.period_type_values or []},
         allow_mixed_period_types=args.allow_mixed_period_types,
+        document_type_contains={str(value).lower() for value in args.document_type_contains or []},
+        exclude_document_type_contains={str(value).lower() for value in args.exclude_document_type_contains or []},
+        require_useful=args.require_useful,
     )
     write_table(rows, args.out, format=args.output_format, fieldnames=fieldnames(args.panel_mode))
     if not args.no_manifest:

@@ -316,7 +316,9 @@ python scripts\build_derived_fundamental_factor_panel.py `
   --fundamentals <synthetic_fundamentals.csv> `
   --panel-mode rebalance `
   --rebalance-date 2026-03-31 `
-  --period-type annual `
+  --period-type fy `
+  --document-type-contains FinancialStatements `
+  --require-useful `
   --out <derived_fundamentals_202603.csv> `
   --output-format csv `
   --no-manifest
@@ -328,7 +330,59 @@ The output includes generic fields such as `sales_yoy`,
 does not use future restatements before their availability date. Rebalance mode
 selects the latest reporting period as of the rebalance date and rejects mixed
 `period_type` values by default, because annual and quarterly ROE/ROA should
-not be ranked together without an explicit research decision.
+not be ranked together without an explicit research decision. J-Quants-style
+period types such as `FY` and `1Q` normalize to `fy` and `1q`.
+
+### Price Defensive Factor Panels
+
+`build_price_defensive_factor_panel.py` builds low-volatility and drawdown
+factors from adjusted daily prices:
+
+```powershell
+python scripts\build_price_defensive_factor_panel.py `
+  --prices <synthetic_prices.csv> `
+  --market-benchmark-prices <synthetic_topix.csv> `
+  --rebalance-date 2026-03-31 `
+  --stale-filter-days 1 `
+  --flag-price-limit `
+  --out <price_defensive_202603.parquet> `
+  --output-format parquet `
+  --no-manifest
+```
+
+The output is keyed by `rebalance_date + code` and can be joined through
+`external_factor_panels`. It includes 3M/6M/12M realized volatility, 6M/12M
+downside volatility, 6M/12M max drawdown, benchmark beta, stale-price flags,
+price-limit flags, and insufficient-history `missing_flags`.
+
+### Optional Factor Contracts And Crowding Panels
+
+Validate optional dividend, balance-sheet, or crowding inputs before joining or
+transforming them:
+
+```powershell
+python scripts\validate_optional_factor_contract.py `
+  --panel <synthetic_crowding_panel.csv> `
+  --contract crowding `
+  --require-numeric long_margin_balance
+```
+
+Build a generic crowding factor panel:
+
+```powershell
+python scripts\build_crowding_factor_panel.py `
+  --crowding-panel <synthetic_crowding_panel.csv> `
+  --prices <synthetic_prices_with_volume.csv> `
+  --rebalance-date 2026-03-31 `
+  --out <crowding_202603.parquet> `
+  --output-format parquet `
+  --no-manifest
+```
+
+Crowding outputs are also exact-join external factor panels. Missing issuer
+volume, margin balance, or short-interest fields remain blank and are listed in
+`missing_flags`; the script does not use sector-level short-sale data as an
+issuer-level proxy.
 
 ### Execution Diagnostics
 

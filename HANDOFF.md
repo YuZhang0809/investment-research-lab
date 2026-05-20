@@ -29,6 +29,7 @@ Initial commit:
 - J-Quants adapter scripts
 - TDnet event-observation scaffolding
 - PIT derived fundamental factor panel tooling for public-safe event and factor research
+- Price defensive and crowding factor panel tooling for synthetic/public-safe factor research
 - Example configs ending in `.example.yml`
 - Synthetic sample CSVs
 - Empty templates for holdings, trades, events, and paper-trading logs

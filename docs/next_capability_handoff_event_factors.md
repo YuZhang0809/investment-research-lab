@@ -162,9 +162,11 @@ All new workflows should produce public-safe diagnostics:
 
 ## Suggested Build Order
 
-1. Implement the PIT derived fundamental factor panel.
+1. Implement the PIT derived fundamental factor panel. Completed by
+   `build_derived_fundamental_factor_panel.py`.
 2. Add event-driven entry and holding-window simulation primitives.
 3. Add matched-control event benchmarks.
-4. Add defensive price factor panel generation.
+4. Add defensive price factor panel generation. Initial generic builder:
+   `build_price_defensive_factor_panel.py`.
 5. Add optional contract extensions for dividend, forecast, balance-sheet, and
    crowding fields.

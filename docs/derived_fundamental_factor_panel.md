@@ -45,7 +45,7 @@ python scripts\build_derived_fundamental_factor_panel.py `
   --fundamentals <synthetic_fundamentals.csv> `
   --panel-mode rebalance `
   --rebalance-date 2026-03-31 `
-  --period-type annual `
+  --period-type fy `
   --out data\processed\factors\derived_fundamentals_202603.csv `
   --output-format csv `
   --no-manifest
@@ -88,6 +88,10 @@ roa
 equity_to_assets
 shares_outstanding_change_yoy
 profit_turn_positive
+cash_to_market_cap
+net_cash_to_market_cap
+debt_to_equity
+liabilities_to_assets
 ```
 
 `missing_flags` lists unavailable derived fields and `missing_prior_year` when
@@ -95,7 +99,28 @@ no same-period prior-year comparison row is available as of the current
 disclosure timestamp or rebalance as-of date. `profit_turn_positive` is missing
 when either current or prior net profit is missing. `roe` and `roa` use
 point-in-time net profit divided by end-of-period equity/assets; they are not
-average-balance textbook ROE/ROA.
+average-balance textbook ROE/ROA. Cash/debt/liability factors remain missing
+unless the input explicitly contains the required fields; the script does not
+use proxies for net cash.
+
+Useful-row and document-type filters are available when feeding broad
+fundamentals exports:
+
+```powershell
+python scripts\build_derived_fundamental_factor_panel.py `
+  --fundamentals <synthetic_fundamentals.csv> `
+  --panel-mode rebalance `
+  --rebalance-date 2026-03-31 `
+  --period-type fy `
+  --document-type-contains FinancialStatements `
+  --require-useful `
+  --out data\processed\factors\derived_fundamentals_202603.parquet `
+  --output-format parquet `
+  --no-manifest
+```
+
+J-Quants-style period types such as `FY`, `1Q`, `2Q`, and `3Q` normalize to
+`fy`, `1q`, `2q`, and `3q`.
 
 ## Integration
 

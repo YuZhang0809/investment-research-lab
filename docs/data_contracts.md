@@ -99,7 +99,7 @@ available_date,code
 Both modes may include:
 
 ```text
-available_time,period_type,period_end,document_type,disclosure_number,statement_scope,prior_year_available_date,prior_year_period_end,source_duplicate_count,source_disclosure_count,sales,operating_profit,net_profit,equity,total_assets,shares_outstanding,sales_yoy,operating_profit_yoy,net_profit_yoy,operating_margin,operating_margin_delta_yoy,roe,roa,equity_to_assets,shares_outstanding_change_yoy,profit_turn_positive,missing_flags
+available_time,period_type,period_end,document_type,disclosure_number,statement_scope,prior_year_available_date,prior_year_period_end,source_duplicate_count,source_disclosure_count,sales,operating_profit,net_profit,equity,total_assets,shares_outstanding,market_cap,cash_and_equivalents,interest_bearing_debt,total_liabilities,forecast_eps,forecast_dividend_per_share,result_dividend_per_share,forecast_payout_ratio,result_payout_ratio,sales_yoy,operating_profit_yoy,net_profit_yoy,operating_margin,operating_margin_delta_yoy,roe,roa,equity_to_assets,shares_outstanding_change_yoy,profit_turn_positive,cash_to_market_cap,net_cash_to_market_cap,debt_to_equity,liabilities_to_assets,missing_flags
 ```
 
 The script uses `available_date`/`disclosure_date` as the PIT gate and matches
@@ -110,6 +110,41 @@ of the rebalance date, so a later restatement for an older period does not
 replace a newer period row. It rejects mixed `period_type` values for the same
 rebalance date unless explicitly allowed; use `--period-type` for ordinary
 cross-sectional scoring. Public committed outputs must be synthetic.
+
+Optional dividend, balance-sheet, and crowding inputs should stay in separate
+public-safe panels unless the base fundamentals file already contains the
+fields. `validate_optional_factor_contract.py` validates the generic
+`dividend`, `balance_sheet`, and `crowding` contracts. The engine leaves
+cash/debt/dividend/crowding factors missing when the explicit input fields are
+absent; it does not infer them from weak proxies.
+
+## Price Defensive Factor Panels
+
+`build_price_defensive_factor_panel.py` writes exact-join external factor
+panels keyed by:
+
+```text
+rebalance_date,code
+```
+
+Output fields include:
+
+```text
+latest_price_date,latest_price_stale,price_staleness_trading_days,price_limit_flag,realized_vol_3m,realized_vol_6m,realized_vol_12m,downside_vol_6m,downside_vol_12m,max_drawdown_6m,max_drawdown_12m,beta_to_benchmark,history_observations_3m,history_observations_6m,history_observations_12m,benchmark_observations,defensive_filter_reasons,missing_flags
+```
+
+## Crowding Factor Panels
+
+`build_crowding_factor_panel.py` consumes a generic local panel with `code`,
+an availability date, margin/short-interest fields, and either per-row volume
+or a separate price/volume file. It writes:
+
+```text
+rebalance_date,code,available_date,margin_buy_balance_to_volume,margin_sell_balance_to_volume,short_interest_to_volume,crowding_raw,crowding_zscore,crowding_change,missing_flags
+```
+
+Sector-level short-sale panels can be validated as optional external factors,
+but they should not be mislabeled as issuer-level short interest.
 
 ## External Factor Panels
 
