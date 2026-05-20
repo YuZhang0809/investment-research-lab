@@ -188,9 +188,10 @@ strategy:
 `group_field` is not hard-coded to `sector`; it may be any discrete field that
 exists in the factor rows, such as `market`, `sector`, or a generic
 classification column. Missing group fields or missing source fields fail fast.
-The legacy factor/score path supports this primitive. The DuckDB factor-score
-builder currently rejects `strategy.group_relative_transforms` with a clear
-error instead of silently falling back or ignoring the transform.
+The legacy factor/score path and the DuckDB factor-score builder both support
+this primitive for supported panel fields. Custom expression-generated fields
+remain on the legacy reference path until the DuckDB expression engine has its
+own parity coverage.
 
 ## External Factor Panels
 
@@ -224,8 +225,9 @@ strategy:
 ```
 
 See `docs/external_factor_panels.md` for the full contract and validation
-command. The DuckDB factor-score builder rejects external panels until that
-fast path has its own parity-tested implementation.
+command. The DuckDB factor-score builder supports documented exact and as-of
+external joins for supported panel fields; custom factor expressions still use
+the legacy reference path.
 
 ## Filters
 

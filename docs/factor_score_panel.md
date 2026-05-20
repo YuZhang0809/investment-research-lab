@@ -37,14 +37,12 @@ legacy: reference, validation, and fallback path; reuses build_factors.py and
 ```
 
 The DuckDB engine is intentionally narrower than the legacy engine. It supports
-the base Q/V/M raw factors and `qvm`, `qv`, `value_only`, and `weighted_groups`
-strategy versions with group-level filters. It rejects `factors.definitions`,
-`strategy.group_relative_transforms`, `configurable` / `weighted_factors`, and
-field-level filters with a clear error. It also rejects
-`external_factor_panels` until the DuckDB join implementation has its own
-parity tests. Use `--engine legacy` explicitly for those mechanics. There is no
-automatic fallback because a silent semantic change would make parity harder to
-trust.
+base Q/V/M raw factors, documented `external_factor_panels`,
+`strategy.group_relative_transforms`, field filters, and `configurable`
+`weighted_factors` when those mechanics use supported panel fields. It still
+rejects `factors.definitions` because custom expression evaluation remains a
+legacy reference-path primitive. There is no automatic fallback because a
+silent semantic change would make parity harder to trust.
 
 ## Usage
 
@@ -105,19 +103,25 @@ executable target allocation, then continue to the next ranked candidate. Do not
 rewrite factor-score panel ranks to remove expensive names.
 
 Group-relative factor transforms are factor/score rules, not portfolio
-construction rules. The legacy panel engine supports
-`strategy.group_relative_transforms` and writes fields such as
+construction rules. The legacy and DuckDB panel engines support
+`strategy.group_relative_transforms` and write fields such as
 `sector_relative_book_to_market_z` and
 `sector_relative_book_to_market_rank_pct` into the factor-score panel. These
-fields can then drive `weighted_factors` scoring or field filters. The DuckDB
-panel engine does not support this primitive yet and fails explicitly when it
-is configured.
+fields can then drive `weighted_factors` scoring or field filters.
 
 External factor panels are also factor/score rules. The legacy engine can join
 generic `external_factor_panels` into factor rows and preserve those joined
 fields in the factor-score panel. Those fields can drive `weighted_factors`
-scoring and field filters. The DuckDB engine rejects external panels until that
-fast path supports the same point-in-time join contract.
+scoring and field filters. The DuckDB engine supports the same documented
+exact and as-of join contract for supported panel fields.
+
+Score-only panels are allowed when a research workflow precomputes scores
+outside the raw-factor builder. The panel must still carry
+`rebalance_date`, `code`, `included_flag`, and the universe cache fields needed
+by portfolio construction. It must provide either `rank`/`candidate_rank` or a
+numeric `rank_score`/`composite_score`/`qvm_score`; if only a score is supplied,
+the walk-forward engine derives ranks deterministically by descending score and
+ascending code.
 
 ## Minimum Fields
 
@@ -161,9 +165,10 @@ missing_score_components
 <external_factor_panel_field>
 ```
 
-Configured factor definitions and configurable scoring modes are available in
-the legacy engine through the same `build_factors.py` and `build_scores.py`
-mechanics used by the original path.
+Configured factor definitions are available in the legacy engine through the
+same `build_factors.py` mechanics used by the original path. Configurable
+weighted-factor scoring is supported by DuckDB when the inputs are base,
+external, or group-relative panel fields.
 
 ## Required Parity
 

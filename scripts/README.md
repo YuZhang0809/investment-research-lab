@@ -103,15 +103,13 @@ python scripts\build_rebalance_factor_score_panel.py `
   --output-format parquet
 ```
 
-`--engine duckdb` is the recommended research path for supported base
-factor/score panels. `--engine legacy` is the reference, validation, and
-fallback implementation; the CLI default remains legacy for backward
-compatibility. DuckDB supports `qvm`, `qv`, `value_only`, and `weighted_groups`
-with group filters, and it rejects custom factor expressions,
-`strategy.group_relative_transforms`, `weighted_factors`, and field filters
-instead of falling back silently. Configs with `external_factor_panels` should
-also use `--engine legacy` until the DuckDB join path is implemented and
-parity-tested.
+`--engine duckdb` is the recommended research path for supported factor/score
+panels. `--engine legacy` is the reference, validation, and fallback
+implementation; the CLI default remains legacy for backward compatibility.
+DuckDB supports base Q/V/M factors, documented group-relative transforms,
+external factor panels, field filters, and configurable weighted factors when
+the inputs are supported panel fields. It still rejects custom factor
+expressions instead of falling back silently.
 
 Step C consumes the factor/score panel directly:
 
@@ -248,7 +246,8 @@ strategy:
       sector_relative_book_to_market_z: 1.0
 ```
 
-For now this primitive is supported by the legacy factor/score path:
+This primitive is supported by the legacy reference path and by the DuckDB
+factor-score builder for supported panel fields:
 
 ```powershell
 python scripts\build_rebalance_factor_score_panel.py `
@@ -260,7 +259,7 @@ python scripts\build_rebalance_factor_score_panel.py `
   --end-date 2026-12-31 `
   --frequency monthly `
   --strategy-version configurable `
-  --engine legacy `
+  --engine duckdb `
   --out <rebalance_factor_score_panel.parquet> `
   --output-format parquet
 ```
@@ -269,7 +268,7 @@ The resulting panel keeps fields such as
 `sector_relative_book_to_market_z` and
 `sector_relative_book_to_market_rank_pct`, and
 `run_qvm_walkforward.py --factor-score-panel` can consume them through the
-normal score rows. DuckDB currently rejects this config explicitly.
+normal score rows.
 
 ### External Factor Panels
 
@@ -289,7 +288,7 @@ python scripts\validate_external_factor_panel.py `
   --field risk_flag:string
 ```
 
-Then run the legacy factor/score path with a config that contains
+Then run the factor/score path with a config that contains
 `external_factor_panels`. Joined fields can be used by `weighted_factors` and
 field filters such as `exclude_equals`, `require_in`, `exclude_above_pct`, and
 `exclude_below_pct`. Public examples must use synthetic external panels only.
@@ -309,6 +308,10 @@ When enabled, `run_qvm_walkforward.py` writes
 `qvm_walkforward_execution_diagnostics_<token>.csv` with cash-weight, target
 slot fill ratio, affordability skips, ADV reductions, buy/sell turnover, cost
 and tax drag for the period, and selected/skipped lot-value distributions.
+The summary and diagnostics also expose `small_account_path_dependency_flag`
+and detail text when lot size, affordability, ADV caps, costs, taxes, or cash
+can change future holdings. In that case, cost scenarios are path-dependent
+simulations rather than a simple monotonic cost sensitivity.
 
 ### Grouped Factor Diagnostics
 

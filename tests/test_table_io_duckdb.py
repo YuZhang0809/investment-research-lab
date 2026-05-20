@@ -782,6 +782,21 @@ class TableIODuckDBTest(unittest.TestCase):
                 strategy_version="configurable",
             )
 
+    def test_group_relative_transform_rejects_output_collision_with_factor_rows(self) -> None:
+        config = group_relative_config(
+            weights={"sector_relative_book_to_market_z": 1.0},
+            filters=[],
+        )
+        row = relative_factor_row("1001", "Sector A", 1)
+        row["sector_relative_book_to_market_z"] = "999"
+
+        with self.assertRaisesRegex(ValueError, "output field.*collide"):
+            build_scores(
+                config=config,
+                factor_rows=[row],
+                strategy_version="configurable",
+            )
+
     def test_external_factor_panel_exact_join_fields_can_score_and_filter(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

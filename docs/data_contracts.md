@@ -156,12 +156,10 @@ synthetic and private local fixtures before any downstream integration.
 `build_rebalance_factor_score_panel.py` writes a reusable factor/score panel
 from a validated rebalance price/universe panel. The default `legacy` engine
 reuses the existing `build_factors.py` and `build_scores.py` semantics. The
-optional `duckdb` engine is a narrower optimized path for base Q/V/M factors and
-group-filter scoring; unsupported custom expressions and field-level filters
-must use the legacy engine. Group-relative transforms are also legacy-only until
-the DuckDB factor/score builder implements the same contract. External factor
-panels are legacy-only until the DuckDB factor/score builder implements the same
-point-in-time join contract.
+optional `duckdb` engine is the optimized path for supported base Q/V/M factors,
+group-relative transforms, external factor panels, field filters, and
+configurable weighted-factor scoring. Unsupported custom factor expressions
+must use the legacy engine.
 
 Minimum output contract:
 
@@ -169,7 +167,7 @@ Minimum output contract:
 rebalance_date,code,included_flag,exclusion_reason,latest_price_date,latest_unadjusted_close,adjusted_close,median_60d_trading_value,return_12_1,return_6_1,has_fundamentals,fundamentals_available_date,fundamentals_available_time,period_end,document_type,operating_profit_to_total_assets,equity_to_assets,earnings_yield,book_to_market,quality_score,value_score,momentum_score,composite_score,qvm_score,rank_score,rank,candidate_rank,filter_status,filter_reasons,missing_flags,missing_score_components,<raw_factor>_z
 ```
 
-When `strategy.group_relative_transforms` is configured, the legacy engine also
+When `strategy.group_relative_transforms` is configured, the panel also
 emits dynamic fields:
 
 ```text
@@ -182,6 +180,12 @@ Excluded rows may be present for auditability, but only `included_flag=true`
 rows are consumed by `run_qvm_walkforward.py --factor-score-panel`.
 Portfolio construction and accounting outputs still need legacy parity before
 the fast path is used for research.
+
+Score-only factor-score panels may omit raw factor fields if they keep the
+universe cache fields needed by portfolio construction and provide either
+`rank`/`candidate_rank` or a numeric `rank_score`/`composite_score`/`qvm_score`.
+When only a numeric score is supplied, `run_qvm_walkforward.py` derives ranks by
+descending score and ascending code.
 
 ## Walk-Forward Execution Timing
 
@@ -242,13 +246,13 @@ When `reporting.execution_diagnostics.enabled` is true, summary rows also
 include:
 
 ```text
-execution_diagnostics_enabled,high_cash_threshold,high_cash_flag,average_cash_weight,max_cash_weight,periods_with_cash_weight_above_threshold,target_slots_filled_ratio,selected_but_untradeable_count,selected_but_unaffordable_count,skipped_due_to_affordable_lot_count,skipped_due_to_adv_cap_count,buy_turnover,sell_turnover,period_cost_drag,period_tax_drag
+execution_diagnostics_enabled,high_cash_threshold,high_cash_flag,average_cash_weight,max_cash_weight,periods_with_cash_weight_above_threshold,target_slots_filled_ratio,selected_but_untradeable_count,selected_but_unaffordable_count,skipped_due_to_affordable_lot_count,skipped_due_to_adv_cap_count,small_account_path_dependency_flag,small_account_path_dependency_detail,buy_turnover,sell_turnover,period_cost_drag,period_tax_drag
 ```
 
 The optional execution diagnostics CSV uses:
 
 ```text
-rebalance_date,valuation_date,execution_price,cash_weight,high_cash_threshold,high_cash_flag,selected_count,target_holdings,holdings_count,target_slots_filled_ratio,selected_but_untradeable_count,selected_but_unaffordable_count,skipped_due_to_affordable_lot_count,skipped_due_to_adv_cap_count,pending_order_count,filled_order_count,skipped_orders,buy_turnover,sell_turnover,turnover,estimated_cost_base,period_cost_drag,period_tax_drag,cash_drag,selected_lot_value_min,selected_lot_value_median,selected_lot_value_max,skipped_lot_value_min,skipped_lot_value_median,skipped_lot_value_max,average_cash_weight,max_cash_weight,periods_with_cash_weight_above_threshold,realized_holdings_count_avg,realized_holdings_count_min,realized_holdings_count_max
+rebalance_date,valuation_date,execution_price,cash_weight,high_cash_threshold,high_cash_flag,selected_count,target_holdings,holdings_count,target_slots_filled_ratio,selected_but_untradeable_count,selected_but_unaffordable_count,skipped_due_to_affordable_lot_count,skipped_due_to_adv_cap_count,small_account_path_dependency_flag,small_account_path_dependency_detail,pending_order_count,filled_order_count,skipped_orders,buy_turnover,sell_turnover,turnover,estimated_cost_base,period_cost_drag,period_tax_drag,cash_drag,selected_lot_value_min,selected_lot_value_median,selected_lot_value_max,skipped_lot_value_min,skipped_lot_value_median,skipped_lot_value_max,average_cash_weight,max_cash_weight,periods_with_cash_weight_above_threshold,realized_holdings_count_avg,realized_holdings_count_min,realized_holdings_count_max
 ```
 
 ## Walk-Forward Sector Cap Outputs

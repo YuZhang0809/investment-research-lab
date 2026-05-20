@@ -36,10 +36,12 @@ external_factor_panels:
         dtype: float
 ```
 
-Supported dtypes are `float`, `int`, `string`, and `bool`. The legacy factor
-stage validates required fields and duplicate keys before joining. Joined
-fields are written to factor outputs and factor-score panels, can be used by
-`weighted_factors`, and can be used by field filters.
+Supported dtypes are `float`, `int`, `string`, and `bool`. The factor stage
+validates required fields and duplicate keys before joining. Joined fields are
+written to factor outputs and factor-score panels, can be used by
+`weighted_factors`, and can be used by field filters. Both the legacy reference
+path and the DuckDB factor-score builder support the documented exact/as-of
+contracts for supported panel fields.
 
 ## As-Of Join
 
@@ -96,8 +98,17 @@ private endpoint, ticker, candidate list, or research conclusion.
 
 ## Fast-Path Support
 
-The legacy factor/score path supports external factor panels. The DuckDB
-factor-score builder currently rejects `external_factor_panels` with a clear
-error instead of silently ignoring the join or falling back to legacy. Use
-`--engine legacy` for configs that require external joins until DuckDB support
-is implemented and parity-tested.
+The DuckDB factor-score builder supports external panels for exact and as-of
+joins and includes those fields in configurable weighted scoring and field
+filters. Continue to compare DuckDB output with the legacy reference path on
+synthetic fixtures and sampled private windows before using a new external
+panel contract for research-scale runs.
+
+## Crowding And Market-Risk Proxies
+
+This contract is intentionally generic. It can carry margin-balance ratios,
+sector short-pressure proxies, market-state labels, or manual risk flags, but
+it does not define a complete crowding or retail-heat model by itself. Data
+availability, history, coverage, and publication timing belong to the external
+panel producer. The public engine only validates the point-in-time join
+contract and preserves missing fields through `missing_flags`.

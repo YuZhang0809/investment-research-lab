@@ -261,6 +261,12 @@ def validate_group_relative_transforms(transforms: list[dict[str, Any]], rows: l
                 missing.append(field)
     if missing:
         raise ValueError(f"Unknown group_relative_transforms field(s): {', '.join(sorted(set(missing)))}")
+    output_collisions = sorted(field for field in group_relative_output_fields(transforms) if field in columns)
+    if output_collisions:
+        raise ValueError(
+            "group_relative_transforms output field(s) collide with existing factor fields: "
+            f"{', '.join(output_collisions)}"
+        )
 
 
 def normalized_group_value(row: dict[str, Any], field: str) -> str:
@@ -829,7 +835,7 @@ def main() -> int:
         row["rebalance_date"] = row.get("rebalance_date") or args.rebalance_date
 
     output_path = args.out_dir / f"scores_{month_key(rebalance_date)}.csv"
-    fieldnames = [
+    fieldnames = list(dict.fromkeys([
         "rebalance_date",
         "rank",
         "code",
@@ -846,7 +852,7 @@ def main() -> int:
         "missing_score_components",
         *external_factor_field_names(config),
         *[score_output_field(factor, direct_fields=score_direct_fields(config)) for factor in raw_factors],
-    ]
+    ]))
     write_csv(output_path, [{key: fmt(value) for key, value in row.items()} for row in score_rows], fieldnames)
     if not args.no_manifest:
         append_manifest(

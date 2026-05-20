@@ -5,19 +5,26 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from build_factors import BASE_FACTOR_FIELDS, build_factors, factor_output_fields
+from build_factors import BASE_FACTOR_FIELDS, build_factors, factor_output_fields, validate_custom_factor_names
 from build_rebalance_price_universe_panel import first_nonblank, optional_column, register_scan
 from build_scores import (
     FACTOR_GROUPS,
     GROUP_SCORE_FIELDS,
     STRATEGY_VERSION_CHOICES,
     build_scores,
+    configured_factor_weights,
     configured_filters,
     configured_group_weights,
+    configured_group_relative_transforms,
+    configured_scoring_mode,
+    group_relative_output_fields,
+    group_relative_output_field,
     score_direct_fields,
+    score_output_field,
     strategy_factor_groups,
 )
 from duckdb_query import require_duckdb
+from external_factor_panels import join_external_factor_panels
 from research_common import (
     append_manifest,
     checksum,
@@ -26,6 +33,7 @@ from research_common import (
     normalize_row_value,
     parse_bool,
     parse_date,
+    require_pandas,
     read_csv,
     read_table,
     trading_calendar_from_rows,
@@ -157,26 +165,48 @@ def included_universe_rows(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
 
 
 def supported_duckdb_raw_factors(config: dict[str, Any], strategy_version: str) -> list[str]:
+    validate_custom_factor_names(config)
     if (config.get("factors", {}) or {}).get("definitions"):
         raise ValueError("DuckDB factor/score panel does not support factors.definitions yet. Use --engine legacy.")
-    if (config.get("external_factor_panels") or []):
-        raise ValueError("DuckDB factor/score panel does not support external_factor_panels yet. Use --engine legacy.")
-    if (config.get("strategy", {}) or {}).get("group_relative_transforms"):
-        raise ValueError(
-            "DuckDB factor/score panel does not support strategy.group_relative_transforms yet. "
-            "Use --engine legacy."
-        )
-    if strategy_version not in {"qvm", "qv", "value_only", "weighted_groups"}:
+    if strategy_version not in {"qvm", "qv", "value_only", "weighted_groups", "configurable"}:
         raise ValueError(f"DuckDB factor/score panel does not support strategy-version {strategy_version!r}.")
     quality_factors, value_factors, momentum_factors = strategy_factor_groups(config, strategy_version)
-    raw_factors = list(dict.fromkeys([*quality_factors, *value_factors, *momentum_factors]))
+    scoring_mode = configured_scoring_mode(config, strategy_version)
+    group_relative_transforms = configured_group_relative_transforms(config)
+    group_relative_fields = group_relative_output_fields(group_relative_transforms)
+    factor_weights = configured_factor_weights(config) if scoring_mode == "weighted_factors" else {}
+    raw_factors = list(
+        dict.fromkeys(
+            [
+                *quality_factors,
+                *value_factors,
+                *momentum_factors,
+                *[factor for factor in factor_weights if factor not in group_relative_fields],
+                *[
+                    field
+                    for transform in group_relative_transforms
+                    for field in transform["fields"]
+                ],
+                *group_relative_fields,
+            ]
+        )
+    )
     unsupported = [factor for factor in raw_factors if factor not in BASE_FACTOR_FIELDS]
+    external_fields = {
+        field["name"] if isinstance(field, dict) else ""
+        for panel in (config.get("external_factor_panels") or [])
+        for field in (panel.get("fields", []) if isinstance(panel, dict) else [])
+    }
+    unsupported = [
+        factor
+        for factor in unsupported
+        if factor not in external_fields and factor not in group_relative_fields
+    ]
     if unsupported:
-        raise ValueError(f"DuckDB factor/score panel only supports base QVM factors, got: {', '.join(unsupported)}")
-    if strategy_version == "weighted_groups":
-        for filter_config in configured_filters(config):
-            if filter_config.get("field"):
-                raise ValueError("DuckDB factor/score panel supports group filters only. Use --engine legacy for field filters.")
+        raise ValueError(
+            "DuckDB factor/score panel only supports base QVM, configured external, and group-relative fields, "
+            f"got: {', '.join(unsupported)}"
+        )
     return raw_factors
 
 
@@ -245,6 +275,128 @@ def zscore_sql(factor: str) -> str:
         f"  / stddev_pop({clipped}) over (partition by rebalance_date) "
         f"end as {factor}_z"
     )
+
+
+def table_columns(connection: Any, table_name: str) -> set[str]:
+    return set(connection.execute(f"describe {table_name}").df()["column_name"].to_list())
+
+
+def require_duckdb_columns(connection: Any, table_name: str, fields: list[str], label: str) -> None:
+    columns = table_columns(connection, table_name)
+    missing = sorted(field for field in fields if field not in columns)
+    if missing:
+        raise ValueError(f"{label} missing field(s): {', '.join(missing)}")
+
+
+def join_external_panels_in_duckdb(connection: Any, config: dict[str, Any]) -> None:
+    if not (config.get("external_factor_panels") or []):
+        return
+    factor_rows = connection.execute("select * from factors order by rebalance_date, code").df().to_dict(orient="records")
+    joined_rows = join_external_factor_panels(factor_rows, config)
+    pd = require_pandas()
+    frame = pd.DataFrame(joined_rows)
+    connection.register("joined_external_factors_frame", frame)
+    connection.execute("create or replace temp table factors as select * from joined_external_factors_frame")
+
+
+def create_group_relative_table(
+    connection: Any,
+    transforms: list[dict[str, Any]],
+) -> None:
+    if not transforms:
+        connection.execute("create or replace temp table factor_group_relative as select * from factor_z")
+        return
+    columns = table_columns(connection, "factor_z")
+    output_fields = group_relative_output_fields(transforms)
+    collisions = sorted(field for field in output_fields if field in columns)
+    if collisions:
+        raise ValueError(
+            "group_relative_transforms output field(s) collide with existing factor fields: "
+            f"{', '.join(collisions)}"
+        )
+    missing: list[str] = []
+    for transform in transforms:
+        group_field = str(transform["group_field"])
+        if group_field not in columns:
+            missing.append(group_field)
+        for field in transform["fields"]:
+            if field not in columns:
+                missing.append(field)
+    if missing:
+        raise ValueError(f"Unknown group_relative_transforms field(s): {', '.join(sorted(set(missing)))}")
+
+    select_exprs: list[str] = ["*"]
+    for transform in transforms:
+        group_field = str(transform["group_field"])
+        output_prefix = str(transform["output_prefix"])
+        min_group_size = int(transform["min_group_size"])
+        group_expr = f"coalesce(nullif({group_field}::varchar, ''), 'UNKNOWN')"
+        for field in transform["fields"]:
+            if "zscore" in transform["methods"]:
+                output_field = group_relative_output_field(output_prefix, field, "zscore")
+                partition = f"rebalance_date, {group_expr}"
+                select_exprs.append(
+                    f"""
+                    case
+                      when {field} is null then null
+                      when count({field}) over (partition by {partition}) < {min_group_size} then null
+                      when stddev_pop({field}) over (partition by {partition}) is null
+                        or stddev_pop({field}) over (partition by {partition}) = 0 then null
+                      else ({field} - avg({field}) over (partition by {partition}))
+                        / stddev_pop({field}) over (partition by {partition})
+                    end as {output_field}
+                    """
+                )
+            if "rank_pct" in transform["methods"]:
+                output_field = group_relative_output_field(output_prefix, field, "rank_pct")
+                partition = f"rebalance_date, {group_expr}"
+                value_partition = f"rebalance_date, {group_expr}, {field}"
+                select_exprs.append(
+                    f"""
+                    case
+                      when {field} is null then null
+                      when count({field}) over (partition by {partition}) < {min_group_size} then null
+                      when count({field}) over (partition by {partition}) = 1 then 1.0
+                      else (
+                        (rank() over (partition by {partition} order by {field} asc nulls last) - 1)
+                        + ((count({field}) over (partition by {value_partition}) - 1) / 2.0)
+                      ) / nullif(count({field}) over (partition by {partition}) - 1, 0)
+                    end as {output_field}
+                    """
+                )
+    connection.execute(
+        f"""
+        create or replace temp table factor_group_relative as
+        select {", ".join(select_exprs)}
+        from factor_z
+        """
+    )
+
+
+def resolve_duckdb_filter_field(connection: Any, filter_config: dict[str, Any]) -> tuple[str, str]:
+    group = str(filter_config.get("group", "") or "")
+    if group:
+        return GROUP_SCORE_FIELDS[group], group
+    configured_field = str(filter_config.get("field", "") or "")
+    rule = str(filter_config.get("rule", ""))
+    columns = table_columns(connection, "scored")
+    allow_z_resolution = rule in {
+        "exclude_bottom_pct",
+        "exclude_top_pct",
+        "exclude_above_pct",
+        "exclude_below_pct",
+        "require_not_missing",
+    }
+    if configured_field in columns:
+        return configured_field, configured_field
+    z_field = f"{configured_field}_z"
+    if allow_z_resolution and z_field in columns:
+        return z_field, configured_field
+    raise ValueError(f"Unknown filter field: {configured_field}")
+
+
+def sql_literal(value: Any) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 def create_raw_panel_table(connection: Any, columns: set[str]) -> None:
@@ -376,11 +528,7 @@ def create_fundamental_table(connection: Any, columns: set[str]) -> None:
 
 def apply_duckdb_filters(connection: Any, filters: list[dict[str, Any]]) -> None:
     for filter_config in filters:
-        group = str(filter_config.get("group", "") or "")
-        if not group:
-            raise ValueError("DuckDB factor/score panel supports group filters only. Use --engine legacy for field filters.")
-        field = GROUP_SCORE_FIELDS[group]
-        label = group
+        field, label = resolve_duckdb_filter_field(connection, filter_config)
         rule = str(filter_config["rule"])
         connection.execute(
             f"""
@@ -392,10 +540,39 @@ def apply_duckdb_filters(connection: Any, filters: list[dict[str, Any]]) -> None
                 when missing_score_components = '' then '{field}'
                 else missing_score_components || ';{field}'
               end
-            where filter_status = 'pass' and {field} is null
+            where filter_status = 'pass' and ({field} is null or nullif({field}::varchar, '') is null)
             """
         )
         if rule == "require_not_missing":
+            continue
+        if rule in {"exclude_equals", "require_equals", "exclude_in", "require_in"}:
+            targets = filter_config.get("values") if rule.endswith("_in") else [filter_config.get("value")]
+            targets = targets or []
+            target_list = ", ".join(sql_literal(target) for target in targets)
+            if not target_list:
+                continue
+            if rule in {"exclude_equals", "exclude_in"}:
+                reason = f"{label}_in" if rule == "exclude_in" else f"{label}_equals_{str(targets[0]).strip()}"
+                connection.execute(
+                    f"""
+                    update scored
+                    set filter_status = 'filtered',
+                        filter_reasons = case when filter_reasons = '' then '{reason}' else filter_reasons || ';{reason}' end
+                    where filter_status = 'pass'
+                      and trim(coalesce({field}::varchar, '')) in ({target_list})
+                    """
+                )
+            else:
+                reason = f"{label}_not_in" if rule == "require_in" else f"{label}_not_equals_{str(targets[0]).strip()}"
+                connection.execute(
+                    f"""
+                    update scored
+                    set filter_status = 'filtered',
+                        filter_reasons = case when filter_reasons = '' then '{reason}' else filter_reasons || ';{reason}' end
+                    where filter_status = 'pass'
+                      and trim(coalesce({field}::varchar, '')) not in ({target_list})
+                    """
+                )
             continue
         if rule in {"exclude_below", "exclude_above"}:
             threshold = float(filter_config["value"])
@@ -410,6 +587,29 @@ def apply_duckdb_filters(connection: Any, filters: list[dict[str, Any]]) -> None
                 where filter_status = 'pass' and {field} is not null and {field} {comparator} ?
                 """,
                 [threshold],
+            )
+            continue
+        if rule in {"exclude_above_pct", "exclude_below_pct"}:
+            pct = float(filter_config["pct"])
+            comparator = ">" if rule == "exclude_above_pct" else "<"
+            reason = f"{label}_{'above' if rule == 'exclude_above_pct' else 'below'}_p{pct:g}"
+            connection.execute(
+                f"""
+                update scored
+                set
+                  filter_status = 'filtered',
+                  filter_reasons = case when filter_reasons = '' then '{reason}' else filter_reasons || ';{reason}' end
+                from (
+                  select rebalance_date, code, {field},
+                         quantile_cont({field}, ? / 100.0) over (partition by rebalance_date) as threshold
+                  from scored
+                  where filter_status = 'pass' and {field} is not null
+                ) selected
+                where scored.rebalance_date = selected.rebalance_date
+                  and scored.code = selected.code
+                  and selected.{field} {comparator} selected.threshold
+                """,
+                [pct],
             )
             continue
         if rule in {"exclude_bottom_pct", "exclude_top_pct"}:
@@ -516,15 +716,21 @@ def build_duckdb_factor_score_frame(
     input_format: str,
 ) -> tuple[Any, list[str]]:
     raw_factors = supported_duckdb_raw_factors(config, strategy_version)
+    group_relative_transforms = configured_group_relative_transforms(config)
+    group_relative_fields = group_relative_output_fields(group_relative_transforms)
+    direct_fields = score_direct_fields(config)
+    normal_raw_factors = [factor for factor in raw_factors if factor not in direct_fields]
     quality_factors, value_factors, momentum_factors = strategy_factor_groups(config, strategy_version)
+    scoring_mode = configured_scoring_mode(config, strategy_version)
     factor_config = config.get("factors", {}) or {}
     lower_pct = float((factor_config.get("winsorize", {}) or {}).get("lower_pct", 1))
     upper_pct = float((factor_config.get("winsorize", {}) or {}).get("upper_pct", 99))
     quality_weight = float((factor_config.get("quality", {}) or {}).get("weight", 0.4))
     value_weight = float((factor_config.get("value", {}) or {}).get("weight", 0.4))
     momentum_weight = float((factor_config.get("momentum", {}) or {}).get("weight", 0.2))
-    group_weights = configured_group_weights(config) if strategy_version == "weighted_groups" else {}
-    filters = configured_filters(config) if strategy_version == "weighted_groups" else []
+    group_weights = configured_group_weights(config) if scoring_mode == "weighted_groups" else {}
+    factor_weights = configured_factor_weights(config) if scoring_mode == "weighted_factors" else {}
+    filters = configured_filters(config) if scoring_mode in {"weighted_groups", "weighted_factors"} else []
 
     duckdb = require_duckdb()
     with duckdb.connect(database=":memory:") as connection:
@@ -638,16 +844,18 @@ def build_duckdb_factor_score_frame(
             from factor_base
             """
         )
+        join_external_panels_in_duckdb(connection, config)
+        require_duckdb_columns(connection, "factors", normal_raw_factors, "DuckDB factor inputs")
         bounds_select = [
             f"quantile_cont({factor}, {lower_pct / 100.0}) over (partition by rebalance_date) as {factor}_lower,"
             f"quantile_cont({factor}, {upper_pct / 100.0}) over (partition by rebalance_date) as {factor}_upper"
-            for factor in raw_factors
+            for factor in normal_raw_factors
         ]
         clipped_select = [
             f"case when {factor} is null then null else least(greatest({factor}, {factor}_lower), {factor}_upper) end as {factor}_clipped"
-            for factor in raw_factors
+            for factor in normal_raw_factors
         ]
-        z_select = [zscore_sql(factor) for factor in raw_factors]
+        z_select = [zscore_sql(factor) for factor in normal_raw_factors]
         connection.execute(
             f"""
             create or replace temp table factor_z as
@@ -669,6 +877,7 @@ def build_duckdb_factor_score_frame(
             from clipped
             """
         )
+        create_group_relative_table(connection, group_relative_transforms)
         quality_score = group_score_sql(quality_factors)
         value_score = group_score_sql(value_factors)
         momentum_score = group_score_sql(momentum_factors)
@@ -680,11 +889,27 @@ def build_duckdb_factor_score_frame(
               {quality_score} as quality_score,
               {value_score} as value_score,
               {momentum_score} as momentum_score
-            from factor_z
+            from factor_group_relative
             """
         )
 
-        if strategy_version == "value_only":
+        if scoring_mode == "weighted_factors":
+            missing_fields = [
+                score_output_field(factor, direct_fields=direct_fields)
+                for factor, weight in factor_weights.items()
+                if weight > 0
+            ]
+            missing_condition = " or ".join(f"{field} is null" for field in missing_fields) or "false"
+            weighted_terms = []
+            for factor, weight in factor_weights.items():
+                if weight <= 0:
+                    continue
+                field = score_output_field(factor, direct_fields=direct_fields)
+                weighted_terms.append(f"{weight} * coalesce({field}, 0)")
+            weighted_sum = " + ".join(weighted_terms) or "null"
+            composite_expr = f"case when {missing_condition} then null else {weighted_sum} end"
+            missing_expr = missing_components_sql(missing_fields)
+        elif strategy_version == "value_only":
             composite_expr = "case when value_score is null then null else value_score end"
             missing_expr = missing_components_sql(["value_score"])
         elif strategy_version == "qv":
@@ -696,7 +921,7 @@ def build_duckdb_factor_score_frame(
                 f"else {quality_weight} * quality_score + {value_weight} * value_score + {momentum_weight} * momentum_score end"
             )
             missing_expr = missing_components_sql(["quality_score", "value_score", "momentum_score"])
-        elif strategy_version == "weighted_groups":
+        elif scoring_mode == "weighted_groups":
             missing_fields = [GROUP_SCORE_FIELDS[group] for group in FACTOR_GROUPS if group_weights.get(group, 0.0) > 0]
             missing_condition = " or ".join(f"{field} is null" for field in missing_fields) or "false"
             weighted_sum = " + ".join(

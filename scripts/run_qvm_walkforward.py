@@ -1319,7 +1319,7 @@ CANDIDATE_CACHE_FIELDS = [
 
 
 def score_cache_fields(raw_factors: list[str], *, direct_fields: set[str] | None = None) -> list[str]:
-    return [
+    return list(dict.fromkeys([
         "rebalance_date",
         "rank",
         "code",
@@ -1335,7 +1335,7 @@ def score_cache_fields(raw_factors: list[str], *, direct_fields: set[str] | None
         "filter_reasons",
         "missing_score_components",
         *[score_output_field(factor, direct_fields=direct_fields) for factor in raw_factors],
-    ]
+    ]))
 
 
 def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
@@ -1665,6 +1665,55 @@ def panel_zscore_factors(rows: list[dict[str, str]], config: dict[str, Any]) -> 
     return factors
 
 
+def normalize_factor_score_panel_slice(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    normalized = [dict(row) for row in rows]
+    included_rows = [row for row in normalized if parse_bool(row.get("included_flag"), default=None)]
+    if not included_rows:
+        return normalized
+
+    for row in included_rows:
+        if not row.get("rank") and row.get("candidate_rank"):
+            row["rank"] = row.get("candidate_rank", "")
+        if not row.get("composite_score") and row.get("rank_score"):
+            row["composite_score"] = row.get("rank_score", "")
+        if not row.get("qvm_score") and row.get("composite_score"):
+            row["qvm_score"] = row.get("composite_score", "")
+        if not row.get("filter_status") and row.get("rank"):
+            row["filter_status"] = "pass"
+        if "filter_reasons" not in row:
+            row["filter_reasons"] = ""
+        if "missing_score_components" not in row:
+            row["missing_score_components"] = ""
+
+    if all(parse_int(row.get("rank")) is None for row in included_rows):
+        score_fields = ["rank_score", "composite_score", "qvm_score"]
+        score_field = next(
+            (
+                field
+                for field in score_fields
+                if any(parse_float(row.get(field)) is not None for row in included_rows)
+            ),
+            "",
+        )
+        if not score_field:
+            raise ValueError(
+                "factor/score panel requires rank or candidate_rank, or a numeric rank_score/composite_score/qvm_score."
+            )
+        ranked = sorted(
+            [
+                row
+                for row in included_rows
+                if parse_float(row.get(score_field)) is not None
+                and str(row.get("filter_status", "pass") or "pass") == "pass"
+            ],
+            key=lambda row: (-(parse_float(row.get(score_field)) or 0.0), str(row.get("code", ""))),
+        )
+        for rank, row in enumerate(ranked, start=1):
+            row["rank"] = str(rank)
+            row.setdefault("filter_status", "pass")
+    return normalized
+
+
 def factor_score_panel_stage_rows(
     args: argparse.Namespace,
     rebalance_date: date,
@@ -1680,6 +1729,7 @@ def factor_score_panel_stage_rows(
     ]
     if not rows:
         raise ValueError(f"No --factor-score-panel rows found for rebalance date {rebalance_date}.")
+    rows = normalize_factor_score_panel_slice(rows)
 
     universe_rows: list[dict[str, Any]] = []
     factor_rows: list[dict[str, Any]] = []
@@ -2053,6 +2103,7 @@ def write_report(path: Path, summary_rows: list[dict[str, Any]], initial_capital
         f"| sector cap violations | {final.get('sector_cap_violation_count', '')} |",
         f"| affordability excluded | {final.get('affordability_excluded', '')} |",
         f"| zero-lot avoided | {final.get('zero_lot_avoided', '')} |",
+        f"| small-account path dependency | {final.get('small_account_path_dependency_flag', '')} |",
         f"| zero-lot targets | {final['zero_lot_targets']} |",
         f"| holdings count | {final['holdings_count']} |",
         f"| cash | {money(float(final['cash']))} |",
@@ -2062,6 +2113,16 @@ def write_report(path: Path, summary_rows: list[dict[str, Any]], initial_capital
         f"| sells | {final['sell_trades']} |",
         f"| skipped orders | {final['skipped_orders']} |",
         "",
+        *(
+            [
+                "## Small-Account Path Dependency",
+                "",
+                "Lot size, cash, costs, taxes, ADV caps, and affordability filters can change future holdings and cash. Cost scenarios should be read as path-dependent simulations, not as monotonic one-line cost sensitivities.",
+                "",
+            ]
+            if any(str(row.get("small_account_path_dependency_flag", "")).lower() == "true" for row in summary_rows)
+            else []
+        ),
         "## Caveat",
         "",
         "This is an engineering walk-forward run. It supports execution timing and rough FIFO realized-tax accounting, but still uses simplified fills, costs, and tax treatment.",
@@ -2665,6 +2726,17 @@ def main() -> int:
         period_cost_drag = estimated_cost_base / pre_equity if pre_equity else 0
         period_tax_drag = period_estimated_tax / pre_equity if pre_equity else 0
         high_cash_flag = cash_pct > execution_diagnostics.high_cash_threshold
+        small_account_path_dependency_flag = bool(
+            selection.affordable_lot_filter.enabled
+            or zero_lot_targets
+            or selection.affordability_excluded
+            or adv_cap_reduction_count
+        )
+        small_account_path_dependency_detail = (
+            "lot_size_cost_cash_path_can_change_future_affordability_and_holdings"
+            if small_account_path_dependency_flag
+            else ""
+        )
         if cash_pct > 0.2:
             failure_rows.append(
                 {
@@ -2743,6 +2815,8 @@ def main() -> int:
             "selected_but_unaffordable_count": len(selection.affordability_excluded),
             "skipped_due_to_affordable_lot_count": len(selection.affordability_excluded),
             "skipped_due_to_adv_cap_count": adv_cap_reduction_count,
+            "small_account_path_dependency_flag": small_account_path_dependency_flag,
+            "small_account_path_dependency_detail": small_account_path_dependency_detail,
             "universe_count": len(universe_rows),
             "selected_count": len(selected_codes),
             "zero_lot_targets": zero_lot_targets,
@@ -2795,6 +2869,8 @@ def main() -> int:
                     "selected_but_unaffordable_count": len(selection.affordability_excluded),
                     "skipped_due_to_affordable_lot_count": len(selection.affordability_excluded),
                     "skipped_due_to_adv_cap_count": adv_cap_reduction_count,
+                    "small_account_path_dependency_flag": small_account_path_dependency_flag,
+                    "small_account_path_dependency_detail": small_account_path_dependency_detail,
                     "pending_order_count": pending_order_count,
                     "filled_order_count": filled_order_count,
                     "skipped_orders": skipped_orders,
@@ -2950,6 +3026,8 @@ def main() -> int:
             "selected_but_unaffordable_count",
             "skipped_due_to_affordable_lot_count",
             "skipped_due_to_adv_cap_count",
+            "small_account_path_dependency_flag",
+            "small_account_path_dependency_detail",
             "universe_count",
             "selected_count",
             "zero_lot_targets",
@@ -3054,6 +3132,8 @@ def main() -> int:
                 "selected_but_unaffordable_count",
                 "skipped_due_to_affordable_lot_count",
                 "skipped_due_to_adv_cap_count",
+                "small_account_path_dependency_flag",
+                "small_account_path_dependency_detail",
                 "pending_order_count",
                 "filled_order_count",
                 "skipped_orders",
