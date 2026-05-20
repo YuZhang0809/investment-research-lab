@@ -102,6 +102,13 @@ Affordable-lot filtering follows the same boundary. Use
 executable target allocation, then continue to the next ranked candidate. Do not
 rewrite factor-score panel ranks to remove expensive names.
 
+Margin and leverage accounting also belongs to portfolio construction and
+walk-forward accounting, not factor-score panel construction. Use the generic
+`margin` config or the matching `run_qvm_walkforward.py` CLI overrides to size
+target gross exposure, accrue financing cost, and report margin diagnostics.
+Do not encode leverage assumptions by pre-editing panel ranks or candidate
+lists.
+
 Group-relative factor transforms are factor/score rules, not portfolio
 construction rules. The legacy and DuckDB panel engines support
 `strategy.group_relative_transforms` and write fields such as

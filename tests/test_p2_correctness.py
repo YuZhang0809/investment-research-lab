@@ -25,6 +25,271 @@ def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) 
 
 
 class P2CorrectnessTest(unittest.TestCase):
+    def test_margin_disabled_keeps_cash_only_target_sizing(self) -> None:
+        rebalance = date(2026, 1, 31)
+        price_index = {
+            "1001": [
+                run_qvm_walkforward.PricePoint(
+                    rebalance,
+                    unadjusted_open=10,
+                    unadjusted_close=10,
+                    adjusted_close=10,
+                    trading_value=100000,
+                    price_limit_flag=False,
+                )
+            ],
+            "1002": [
+                run_qvm_walkforward.PricePoint(
+                    rebalance,
+                    unadjusted_open=10,
+                    unadjusted_close=10,
+                    adjusted_close=10,
+                    trading_value=100000,
+                    price_limit_flag=False,
+                )
+            ],
+        }
+
+        universe = {"1001": {"lot_size": "1"}, "1002": {"lot_size": "1"}}
+        base = run_qvm_walkforward.build_targets(["1001", "1002"], universe, price_index, rebalance, 100.0)
+        explicit_disabled = run_qvm_walkforward.build_targets(
+            ["1001", "1002"],
+            universe,
+            price_index,
+            rebalance,
+            100.0,
+            margin=run_qvm_walkforward.MarginConfig(enabled=False),
+        )
+
+        self.assertEqual(base, explicit_disabled)
+        self.assertEqual({"1001": 5, "1002": 5}, base)
+
+    def test_margin_leverage_cap_limits_target_sizing(self) -> None:
+        rebalance = date(2026, 1, 31)
+        price_index = {
+            "1001": [
+                run_qvm_walkforward.PricePoint(
+                    rebalance,
+                    unadjusted_open=10,
+                    unadjusted_close=10,
+                    adjusted_close=10,
+                    trading_value=100000,
+                    price_limit_flag=False,
+                )
+            ],
+            "1002": [
+                run_qvm_walkforward.PricePoint(
+                    rebalance,
+                    unadjusted_open=10,
+                    unadjusted_close=10,
+                    adjusted_close=10,
+                    trading_value=100000,
+                    price_limit_flag=False,
+                )
+            ],
+        }
+        margin = run_qvm_walkforward.MarginConfig(
+            enabled=True,
+            account_type="margin_long",
+            target_gross_leverage=3.0,
+            max_gross_leverage=2.5,
+            initial_margin_requirement=0.5,
+        )
+
+        targets = run_qvm_walkforward.build_targets(
+            ["1001", "1002"],
+            {"1001": {"lot_size": "1"}, "1002": {"lot_size": "1"}},
+            price_index,
+            rebalance,
+            100.0,
+            margin=margin,
+        )
+
+        self.assertEqual(2.0, run_qvm_walkforward.effective_target_gross_leverage(margin))
+        self.assertEqual({"1001": 10, "1002": 10}, targets)
+
+    def test_margin_financing_cost_uses_borrowed_value_and_day_count(self) -> None:
+        margin = run_qvm_walkforward.MarginConfig(
+            enabled=True,
+            account_type="margin_long",
+            annual_borrow_rate=0.10,
+            interest_day_count=365,
+        )
+        snapshot = run_qvm_walkforward.margin_snapshot(150.0, 100.0, margin)
+
+        self.assertEqual(50.0, snapshot["borrowed_value"])
+        self.assertAlmostEqual(5.0, run_qvm_walkforward.financing_cost_for_period(50.0, margin, 365))
+
+    def test_margin_no_borrow_no_interest(self) -> None:
+        margin = run_qvm_walkforward.MarginConfig(
+            enabled=True,
+            account_type="margin_long",
+            annual_borrow_rate=0.10,
+        )
+
+        self.assertEqual(0.0, run_qvm_walkforward.financing_cost_for_period(0.0, margin, 365))
+        self.assertEqual(0.0, run_qvm_walkforward.margin_snapshot(80.0, 100.0, margin)["borrowed_value"])
+
+    def test_margin_daily_rows_flag_maintenance_and_minimum_equity_breaches(self) -> None:
+        margin = run_qvm_walkforward.MarginConfig(
+            enabled=True,
+            account_type="margin_long",
+            maintenance_margin_requirement=0.20,
+            minimum_required_equity=50.0,
+        )
+        jan31 = date(2026, 1, 31)
+        feb1 = date(2026, 2, 1)
+        price_index = {
+            "1001": [
+                run_qvm_walkforward.PricePoint(
+                    jan31,
+                    unadjusted_open=100,
+                    unadjusted_close=100,
+                    adjusted_close=100,
+                    trading_value=100000,
+                    price_limit_flag=False,
+                ),
+                run_qvm_walkforward.PricePoint(
+                    feb1,
+                    unadjusted_open=60,
+                    unadjusted_close=60,
+                    adjusted_close=60,
+                    trading_value=100000,
+                    price_limit_flag=False,
+                ),
+            ]
+        }
+
+        rows = run_qvm_walkforward.margin_daily_rows_for_period(
+            start_date=jan31,
+            end_date=feb1,
+            rebalance_date=feb1,
+            holdings={"1001": 3.0},
+            cash=-200.0,
+            price_index=price_index,
+            price_calendar=[jan31, feb1],
+            config=margin,
+        )
+
+        self.assertEqual(1, len(rows))
+        self.assertEqual(feb1, rows[0]["date"])
+        self.assertTrue(rows[0]["maintenance_margin_breach"])
+        self.assertTrue(rows[0]["minimum_equity_breach"])
+
+    def test_walkforward_margin_outputs_and_financing_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            prices = temp / "prices.csv"
+            listings = temp / "listings.csv"
+            fundamentals = temp / "fundamentals.csv"
+            config_path = temp / "margin.yml"
+            out_dir = temp / "out"
+            report_dir = temp / "reports"
+
+            config_text = (ROOT / "configs" / "qvm_v0_1.example.yml").read_text(encoding="utf-8")
+            config_text = config_text.replace("  enabled: false\n  account_type: margin_long", "  enabled: true\n  account_type: margin_long", 1)
+            config_text = config_text.replace("  target_gross_leverage: 1.0", "  target_gross_leverage: 1.5", 1)
+            config_text = config_text.replace("  max_gross_leverage: 1.0", "  max_gross_leverage: 2.0", 1)
+            config_text = config_text.replace("  annual_borrow_rate: 0.0", "  annual_borrow_rate: 0.365", 1)
+            config_text = config_text.replace("  initial_margin_requirement: 1.0", "  initial_margin_requirement: 0.5", 1)
+            config_text = config_text.replace("  maintenance_margin_requirement: 0.0", "  maintenance_margin_requirement: 0.2", 1)
+            config_text = config_text.replace("spread_multiplier: 0.5", "spread_multiplier: 0.0", 1)
+            config_text = config_text.replace("spread_multiplier: 1.0", "spread_multiplier: 0.0", 1)
+            config_text = config_text.replace("spread_multiplier: 2.0", "spread_multiplier: 0.0", 1)
+            config_text = config_text.replace("impact_multiplier: 1.0", "impact_multiplier: 0.0", 1)
+            config_text = config_text.replace("impact_multiplier: 2.0", "impact_multiplier: 0.0", 1)
+            config_path.write_text(config_text, encoding="utf-8")
+            write_csv(
+                prices,
+                [
+                    {
+                        "date": day,
+                        "code": "1001",
+                        "unadjusted_open": 100,
+                        "unadjusted_close": 100,
+                        "adjusted_close": 100,
+                        "trading_value": 10_000_000,
+                        "price_limit_flag": "false",
+                    }
+                    for day in ["2026-01-31", "2026-02-28"]
+                ],
+                ["date", "code", "unadjusted_open", "unadjusted_close", "adjusted_close", "trading_value", "price_limit_flag"],
+            )
+            write_csv(listings, [{"code": "1001", "listed_date": "2020-01-01", "delisted_date": ""}], ["code", "listed_date", "delisted_date"])
+            write_csv(fundamentals, [], ["code"])
+
+            original_argv = sys.argv[:]
+            original_run_stages = run_qvm_walkforward.run_stages
+
+            def fake_run_stages(args, rebalance_date):
+                suffix = rebalance_date.strftime("%Y%m%d")
+                stage = temp / "stage"
+                universe = stage / f"universe_{suffix}.csv"
+                factors = stage / f"factors_{suffix}.csv"
+                scores = stage / f"scores_{suffix}.csv"
+                write_csv(
+                    universe,
+                    [{"code": "1001", "sector": "Tech", "lot_size": "1", "median_60d_trading_value": "10000000"}],
+                    ["code", "sector", "lot_size", "median_60d_trading_value"],
+                )
+                write_csv(factors, [{"code": "1001"}], ["code"])
+                write_csv(scores, [{"code": "1001", "rank": "1", "sector": "Tech", "latest_unadjusted_close": "100"}], ["code", "rank", "sector", "latest_unadjusted_close"])
+                return universe, factors, scores
+
+            try:
+                run_qvm_walkforward.run_stages = fake_run_stages
+                sys.argv = [
+                    "run_qvm_walkforward.py",
+                    "--config",
+                    str(config_path),
+                    "--listings",
+                    str(listings),
+                    "--prices",
+                    str(prices),
+                    "--fundamentals",
+                    str(fundamentals),
+                    "--start-date",
+                    "2026-01-31",
+                    "--end-date",
+                    "2026-02-28",
+                    "--frequency",
+                    "monthly",
+                    "--capital-jpy",
+                    "10000",
+                    "--out-dir",
+                    str(out_dir),
+                    "--report-dir",
+                    str(report_dir),
+                    "--no-manifest",
+                    "--skip-stage-manifest",
+                    "--run-label",
+                    "margin_test",
+                ]
+
+                self.assertEqual(0, run_qvm_walkforward.main())
+            finally:
+                run_qvm_walkforward.run_stages = original_run_stages
+                sys.argv = original_argv
+
+            with (out_dir / "qvm_walkforward_summary_margin_test_202601_202602.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as file:
+                summary = list(csv.DictReader(file))
+            with (out_dir / "qvm_walkforward_margin_daily_margin_test_202601_202602.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as file:
+                margin_daily = list(csv.DictReader(file))
+            with (out_dir / "qvm_walkforward_margin_summary_margin_test_202601_202602.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as file:
+                margin_summary = list(csv.DictReader(file))
+
+            self.assertEqual("True", summary[-1]["margin_enabled"])
+            self.assertAlmostEqual(5000.0, float(summary[0]["borrowed_value"]))
+            self.assertGreater(float(summary[-1]["financing_cost_period"]), 0.0)
+            self.assertTrue(margin_daily)
+            self.assertEqual("5000.0", margin_summary[0]["max_borrowed_value"])
+
     def test_buy_rule_limits_new_buys_instead_of_always_filling_target_count(self) -> None:
         scores = [{"code": f"100{index}", "rank": str(index)} for index in range(1, 6)]
         config = {

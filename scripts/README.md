@@ -313,6 +313,56 @@ and detail text when lot size, affordability, ADV caps, costs, taxes, or cash
 can change future holdings. In that case, cost scenarios are path-dependent
 simulations rather than a simple monotonic cost sensitivity.
 
+### Margin and Leverage Diagnostics
+
+Margin accounting is a generic long-margin research primitive and is disabled
+by default. It does not encode broker-specific parameters or strategy
+conclusions.
+
+Config example:
+
+```yaml
+margin:
+  enabled: true
+  account_type: margin_long
+  target_gross_leverage: 1.5
+  max_gross_leverage: 2.0
+  annual_borrow_rate: 0.03
+  initial_margin_requirement: 0.50
+  maintenance_margin_requirement: 0.25
+  minimum_required_equity: 100000
+  interest_day_count: 365
+  margin_call_action: flag_only
+```
+
+CLI overrides are also available:
+
+```powershell
+python scripts\run_qvm_walkforward.py `
+  --config configs\qvm_v0_1.example.yml `
+  --listings <listings.csv> `
+  --prices <prices.csv> `
+  --fundamentals <fundamentals.csv> `
+  --start-date 2026-01-01 `
+  --end-date 2026-12-31 `
+  --margin-enabled `
+  --target-gross-leverage 1.5 `
+  --max-gross-leverage 2.0 `
+  --annual-borrow-rate 0.03 `
+  --initial-margin-requirement 0.50 `
+  --maintenance-margin-requirement 0.25 `
+  --minimum-required-equity 100000 `
+  --margin-call-action flag_only
+```
+
+When enabled, target construction uses gross exposure capped by
+`max_gross_leverage` and `initial_margin_requirement`, while lot size,
+affordable-lot filtering, ADV caps, costs, tax lots, sector caps, and buy/hold
+buffers still apply. Financing cost is reported separately from execution cost
+and tax drag. The engine writes `qvm_walkforward_margin_daily_<token>.csv` and
+`qvm_walkforward_margin_summary_<token>.csv`. `flag_only` reports margin and
+minimum-equity breaches; it is not a forced liquidation model.
+
 ### Grouped Factor Diagnostics
 
 `analyze_factor_forward_returns.py` can report factor behavior by group:

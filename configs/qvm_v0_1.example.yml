@@ -101,6 +101,18 @@ portfolio:
   max_single_name_weight: 0.1
   report_sector_exposure: true
 
+margin:
+  enabled: false
+  account_type: margin_long
+  target_gross_leverage: 1.0
+  max_gross_leverage: 1.0
+  annual_borrow_rate: 0.0
+  initial_margin_requirement: 1.0
+  maintenance_margin_requirement: 0.0
+  minimum_required_equity: 0
+  interest_day_count: 365
+  margin_call_action: flag_only
+
 execution:
   price_for_signal_returns: adjusted_close
   price_for_order_size: unadjusted_price

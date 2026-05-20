@@ -255,6 +255,64 @@ The optional execution diagnostics CSV uses:
 rebalance_date,valuation_date,execution_price,cash_weight,high_cash_threshold,high_cash_flag,selected_count,target_holdings,holdings_count,target_slots_filled_ratio,selected_but_untradeable_count,selected_but_unaffordable_count,skipped_due_to_affordable_lot_count,skipped_due_to_adv_cap_count,small_account_path_dependency_flag,small_account_path_dependency_detail,pending_order_count,filled_order_count,skipped_orders,buy_turnover,sell_turnover,turnover,estimated_cost_base,period_cost_drag,period_tax_drag,cash_drag,selected_lot_value_min,selected_lot_value_median,selected_lot_value_max,skipped_lot_value_min,skipped_lot_value_median,skipped_lot_value_max,average_cash_weight,max_cash_weight,periods_with_cash_weight_above_threshold,realized_holdings_count_avg,realized_holdings_count_min,realized_holdings_count_max
 ```
 
+## Walk-Forward Margin Outputs
+
+`run_qvm_walkforward.py` can run broker-neutral long-margin research accounting.
+It is disabled by default. When enabled, margin changes target gross exposure
+and financing-cost accounting, but it does not bypass lot-size, affordable-lot,
+ADV, cost, tax, sector-cap, or buy/hold-buffer constraints.
+
+Config fields:
+
+```text
+margin.enabled
+margin.account_type
+margin.target_gross_leverage
+margin.max_gross_leverage
+margin.annual_borrow_rate
+margin.initial_margin_requirement
+margin.maintenance_margin_requirement
+margin.minimum_required_equity
+margin.interest_day_count
+margin.margin_call_action
+```
+
+Summary rows include:
+
+```text
+margin_enabled,margin_account_type,target_gross_leverage,effective_target_gross_leverage,max_gross_leverage_config,annual_borrow_rate,initial_margin_requirement,maintenance_margin_requirement,minimum_required_equity,margin_call_action,gross_exposure,borrowed_value,net_account_equity,gross_leverage,margin_ratio,financing_cost_period,financing_cost_cumulative,portfolio_equity_after_cost_after_financing,min_margin_ratio,margin_breach_count,first_margin_breach_date,minimum_equity_breach_count,max_margin_gross_leverage,avg_margin_gross_leverage,max_borrowed_value
+```
+
+Equity rows also include:
+
+```text
+portfolio_equity_after_cost_after_financing
+```
+
+When margin is enabled, the daily diagnostics CSV uses:
+
+```text
+date,rebalance_date,gross_exposure,borrowed_value,account_equity,gross_leverage,margin_ratio,maintenance_margin_breach,minimum_equity_breach
+```
+
+The margin summary CSV uses:
+
+```text
+start_date,end_date,account_type,target_gross_leverage,effective_target_gross_leverage,max_gross_leverage_config,annual_borrow_rate,initial_margin_requirement,maintenance_margin_requirement,minimum_required_equity,margin_call_action,min_margin_ratio,margin_breach_count,first_margin_breach_date,minimum_equity_breach_count,max_margin_gross_leverage,avg_margin_gross_leverage,max_borrowed_value,cumulative_financing_cost
+```
+
+Failure-case rows may include:
+
+```text
+margin_call_flag
+minimum_equity_breach
+financing_cost_drag
+leverage_cap_reduction
+```
+
+`margin_call_action: flag_only` reports breaches only. It is not an executable
+forced-liquidation model.
+
 ## Walk-Forward Sector Cap Outputs
 
 `run_qvm_walkforward.py` can apply a generic portfolio construction sector cap
