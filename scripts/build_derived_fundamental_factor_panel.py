@@ -56,6 +56,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="CSV/Parquet with rebalance_date or date column. Required for --panel-mode rebalance unless --rebalance-date is repeated.",
     )
     parser.add_argument("--rebalance-date", action="append", dest="rebalance_date_values", help="YYYY-MM-DD; can be repeated.")
+    parser.add_argument(
+        "--period-type",
+        action="append",
+        dest="period_type_values",
+        help="Optional normalized period type to keep, for example annual or q1. Can be repeated.",
+    )
+    parser.add_argument(
+        "--allow-mixed-period-types",
+        action="store_true",
+        help="Allow rebalance output rows for the same date to contain multiple period_type values.",
+    )
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--output-format", choices=["csv", "parquet"], default="parquet")
     parser.add_argument("--run-label", default="derived_fundamentals")
@@ -94,35 +105,64 @@ def period_end_text(row: dict[str, Any]) -> str:
 
 
 def period_type(row: dict[str, Any]) -> str:
-    return str(
+    return normalize_token(
         row.get("period_type")
         or row.get("type_of_current_period")
         or row.get("current_period_type")
         or row.get("period")
         or ""
-    ).strip()
+    )
 
 
 def statement_scope(row: dict[str, Any]) -> str:
-    return str(
+    text = normalize_token(
         row.get("statement_scope")
         or row.get("consolidated_flag")
         or row.get("consolidated")
         or row.get("financial_statement_type")
         or ""
-    ).strip()
+    )
+    if text in {"true", "1", "yes", "y"}:
+        return "consolidated"
+    if text in {"false", "0", "no", "n"}:
+        return "non_consolidated"
+    return text
+
+
+def normalize_token(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
 
 
 def disclosure_time(row: dict[str, Any]) -> str:
     return str(row.get("available_time") or row.get("disclosure_time") or "").strip()
 
 
-def disclosure_sort_key(row: dict[str, Any]) -> tuple[str, str, str, str, int, int]:
+def disclosure_number_sort_value(value: Any) -> tuple[int, int, str]:
+    text = str(value or "").strip()
+    if text.isdigit():
+        return (1, int(text), "")
+    return (0, 0, text)
+
+
+def availability_sort_key(row: dict[str, Any]) -> tuple[str, str, tuple[int, int, str], int]:
+    return (
+        available_date_text(row),
+        disclosure_time(row),
+        disclosure_number_sort_value(row.get("disclosure_number")),
+        int(row.get("_source_index", 0) or 0),
+    )
+
+
+def as_of_availability_key(value: date) -> tuple[str, str, tuple[int, int, str], int]:
+    return (value.isoformat(), "99:99:99", (1, 10**30, "~"), 10**30)
+
+
+def disclosure_sort_key(row: dict[str, Any]) -> tuple[str, str, str, tuple[int, int, str], int, int]:
     return (
         available_date_text(row),
         disclosure_time(row),
         period_end_text(row),
-        str(row.get("disclosure_number") or ""),
+        disclosure_number_sort_value(row.get("disclosure_number")),
         useful_value_count(row),
         int(row.get("_source_index", 0) or 0),
     )
@@ -139,7 +179,7 @@ def first_number(row: dict[str, Any], *fields: str) -> float | None:
 def normalized_numbers(row: dict[str, Any]) -> dict[str, float | None]:
     return {
         "sales": first_number(row, "sales", "net_sales", "revenue"),
-        "operating_profit": first_number(row, "operating_profit"),
+        "operating_profit": first_number(row, "operating_profit", "operating_income"),
         "net_profit": first_number(row, "net_profit", "profit", "profit_attributable_to_owners_of_parent"),
         "equity": first_number(row, "equity", "net_assets"),
         "total_assets": first_number(row, "total_assets", "assets"),
@@ -216,18 +256,18 @@ def build_prior_index(rows: list[dict[str, Any]]) -> dict[tuple[str, str, str, s
     return index
 
 
-def latest_prior_year(row: dict[str, Any], index: dict[tuple[str, str, str, str], list[dict[str, Any]]]) -> dict[str, Any] | None:
+def latest_prior_year(
+    row: dict[str, Any],
+    index: dict[tuple[str, str, str, str], list[dict[str, Any]]],
+    *,
+    as_of_key: tuple[str, str, tuple[int, int, str], int] | None = None,
+) -> dict[str, Any] | None:
     target_period_end = prior_year_date(period_end(row))
     if target_period_end is None:
         return None
     candidates = index.get(prior_lookup_key(row, target_period_end), [])
-    current_key = (available_date_text(row), disclosure_time(row), str(row.get("disclosure_number") or ""))
-    valid = [
-        candidate
-        for candidate in candidates
-        if (available_date_text(candidate), disclosure_time(candidate), str(candidate.get("disclosure_number") or ""))
-        <= current_key
-    ]
+    cutoff = as_of_key or availability_sort_key(row)
+    valid = [candidate for candidate in candidates if availability_sort_key(candidate) <= cutoff]
     return valid[-1] if valid else None
 
 
@@ -266,9 +306,9 @@ def derived_values(row: dict[str, Any], prior: dict[str, Any] | None) -> dict[st
             current["shares_outstanding"],
             prior_values["shares_outstanding"],
         ),
-        "profit_turn_positive": (
-            1.0 if prior_net_profit is not None and net_profit is not None and prior_net_profit < 0 < net_profit else 0.0
-        ),
+        "profit_turn_positive": None
+        if prior_net_profit is None or net_profit is None
+        else (1.0 if prior_net_profit < 0 < net_profit else 0.0),
     }
     missing = [field for field in DERIVED_FIELDS if values.get(field) is None]
     if prior is None:
@@ -277,31 +317,29 @@ def derived_values(row: dict[str, Any], prior: dict[str, Any] | None) -> dict[st
     return values
 
 
+def enrich_disclosure(row: dict[str, Any], prior: dict[str, Any] | None) -> dict[str, Any]:
+    values = derived_values(row, prior)
+    return {
+        "code": str(row.get("code") or "").strip(),
+        "available_date": available_date_text(row),
+        "available_time": disclosure_time(row),
+        "period_type": period_type(row),
+        "period_end": period_end_text(row),
+        "document_type": row.get("document_type", ""),
+        "disclosure_number": row.get("disclosure_number", ""),
+        "statement_scope": statement_scope(row),
+        "prior_year_available_date": available_date_text(prior or {}),
+        "prior_year_period_end": period_end_text(prior or {}),
+        "source_duplicate_count": row.get("_source_duplicate_count", 1),
+        "source_disclosure_count": 1,
+        **{field: fmt(values.get(field)) for field in [*RAW_OUTPUT_FIELDS, *DERIVED_FIELDS]},
+        "missing_flags": values["missing_flags"],
+    }
+
+
 def enrich_disclosures(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     prior_index = build_prior_index(rows)
-    enriched: list[dict[str, Any]] = []
-    for row in rows:
-        prior = latest_prior_year(row, prior_index)
-        values = derived_values(row, prior)
-        enriched.append(
-            {
-                "code": str(row.get("code") or "").strip(),
-                "available_date": available_date_text(row),
-                "available_time": disclosure_time(row),
-                "period_type": period_type(row),
-                "period_end": period_end_text(row),
-                "document_type": row.get("document_type", ""),
-                "disclosure_number": row.get("disclosure_number", ""),
-                "statement_scope": statement_scope(row),
-                "prior_year_available_date": available_date_text(prior or {}),
-                "prior_year_period_end": period_end_text(prior or {}),
-                "source_duplicate_count": row.get("_source_duplicate_count", 1),
-                "source_disclosure_count": 1,
-                **{field: fmt(values.get(field)) for field in [*RAW_OUTPUT_FIELDS, *DERIVED_FIELDS]},
-                "missing_flags": values["missing_flags"],
-            }
-        )
-    return enriched
+    return [enrich_disclosure(row, latest_prior_year(row, prior_index)) for row in rows]
 
 
 def event_panel_rows(enriched: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -318,7 +356,7 @@ def event_panel_rows(enriched: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 str(row.get("available_date") or ""),
                 str(row.get("available_time") or ""),
                 str(row.get("period_end") or ""),
-                str(row.get("disclosure_number") or ""),
+                disclosure_number_sort_value(row.get("disclosure_number")),
             ),
         )[-1]
         copied = dict(selected)
@@ -345,28 +383,57 @@ def load_rebalance_dates(path: Path | None, values: list[str] | None) -> list[da
     return clean
 
 
-def rebalance_panel_rows(enriched: list[dict[str, Any]], rebalance_dates: list[date]) -> list[dict[str, Any]]:
+def selected_reporting_period_key(row: dict[str, Any]) -> tuple[date, str]:
+    return (period_end(row) or date.min, period_type(row))
+
+
+def validate_rebalance_period_types(rows: list[dict[str, Any]], *, allow_mixed_period_types: bool) -> None:
+    if allow_mixed_period_types:
+        return
+    by_date: dict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        by_date[str(row.get("rebalance_date") or "")].add(str(row.get("period_type") or ""))
+    for rebalance_date, values in by_date.items():
+        if len(values) > 1:
+            display = ", ".join(sorted(value or "<blank>" for value in values))
+            raise ValueError(
+                f"Rebalance date {rebalance_date} has mixed period_type values: {display}. "
+                "Pass --period-type to build a comparable panel, or --allow-mixed-period-types for event-style review."
+            )
+
+
+def rebalance_panel_rows(
+    disclosures: list[dict[str, Any]],
+    rebalance_dates: list[date],
+    prior_index: dict[tuple[str, str, str, str], list[dict[str, Any]]],
+    *,
+    allow_mixed_period_types: bool,
+) -> list[dict[str, Any]]:
     by_code: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in enriched:
-        by_code[row["code"]].append(row)
+    for row in disclosures:
+        by_code[str(row.get("code") or "").strip()].append(row)
     for values in by_code.values():
-        values.sort(key=lambda row: (row["available_date"], row["available_time"], row["period_end"], row["disclosure_number"]))
+        values.sort(key=disclosure_sort_key)
     output: list[dict[str, Any]] = []
     for rebalance_date in rebalance_dates:
         for code in sorted(by_code):
             candidates = [
                 row
                 for row in by_code[code]
-                if parse_optional_date(row.get("available_date"), "derived.available_date") is not None
-                and parse_optional_date(row.get("available_date"), "derived.available_date") <= rebalance_date
+                if available_date(row) is not None
+                and available_date(row) <= rebalance_date
             ]
             if not candidates:
                 continue
-            selected = candidates[-1]
-            copied = dict(selected)
+            latest_period = max(selected_reporting_period_key(row) for row in candidates)
+            period_candidates = [row for row in candidates if selected_reporting_period_key(row) == latest_period]
+            selected = sorted(period_candidates, key=disclosure_sort_key)[-1]
+            prior = latest_prior_year(selected, prior_index, as_of_key=as_of_availability_key(rebalance_date))
+            copied = enrich_disclosure(selected, prior)
             copied["rebalance_date"] = rebalance_date.isoformat()
             output.append(copied)
     output.sort(key=lambda row: (row["rebalance_date"], row["code"]))
+    validate_rebalance_period_types(output, allow_mixed_period_types=allow_mixed_period_types)
     return output
 
 
@@ -376,16 +443,33 @@ def fieldnames(panel_mode: str) -> list[str]:
     return [*prefix, *metadata, *RAW_OUTPUT_FIELDS, *DERIVED_FIELDS, "missing_flags"]
 
 
+def output_date_range(rows: list[dict[str, Any]], panel_mode: str) -> str:
+    column = "rebalance_date" if panel_mode == "rebalance" else "available_date"
+    values = sorted(str(row.get(column) or "") for row in rows if row.get(column))
+    if not values:
+        return ""
+    return f"{values[0]}..{values[-1]}"
+
+
 def build_panel(
     fundamentals_rows: list[dict[str, str]],
     *,
     panel_mode: str,
     rebalance_dates: list[date] | None = None,
+    period_types: set[str] | None = None,
+    allow_mixed_period_types: bool = False,
 ) -> list[dict[str, Any]]:
-    enriched = enrich_disclosures(dedupe_disclosures(fundamentals_rows))
+    disclosures = dedupe_disclosures(fundamentals_rows)
+    if period_types:
+        disclosures = [row for row in disclosures if period_type(row) in period_types]
     if panel_mode == "event":
-        return event_panel_rows(enriched)
-    return rebalance_panel_rows(enriched, rebalance_dates or [])
+        return event_panel_rows(enrich_disclosures(disclosures))
+    return rebalance_panel_rows(
+        disclosures,
+        rebalance_dates or [],
+        build_prior_index(disclosures),
+        allow_mixed_period_types=allow_mixed_period_types,
+    )
 
 
 def main() -> int:
@@ -395,7 +479,13 @@ def main() -> int:
         if args.panel_mode == "rebalance"
         else None
     )
-    rows = build_panel(read_csv(args.fundamentals), panel_mode=args.panel_mode, rebalance_dates=rebalance_dates)
+    rows = build_panel(
+        read_csv(args.fundamentals),
+        panel_mode=args.panel_mode,
+        rebalance_dates=rebalance_dates,
+        period_types={normalize_token(value) for value in args.period_type_values or []},
+        allow_mixed_period_types=args.allow_mixed_period_types,
+    )
     write_table(rows, args.out, format=args.output_format, fieldnames=fieldnames(args.panel_mode))
     if not args.no_manifest:
         append_manifest(
@@ -404,7 +494,7 @@ def main() -> int:
             file_path=args.out,
             vendor="local",
             schema_version="derived_fundamental_factor_panel_v0_1",
-            date_range=args.run_label,
+            date_range=output_date_range(rows, args.panel_mode) or args.run_label,
             notes=f"{len(rows)} rows; panel_mode={args.panel_mode}",
         )
     print(f"Wrote {len(rows)} derived fundamental factor rows to {args.out}")

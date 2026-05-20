@@ -105,7 +105,11 @@ available_time,period_type,period_end,document_type,disclosure_number,statement_
 The script uses `available_date`/`disclosure_date` as the PIT gate and matches
 same-period prior-year rows by `code`, `period_type`, `period_end`, and
 statement scope. Missing prior-year comparisons are reported through
-`missing_flags`. Public committed outputs must be synthetic.
+`missing_flags`. Rebalance-mode output selects the latest reporting period as
+of the rebalance date, so a later restatement for an older period does not
+replace a newer period row. It rejects mixed `period_type` values for the same
+rebalance date unless explicitly allowed; use `--period-type` for ordinary
+cross-sectional scoring. Public committed outputs must be synthetic.
 
 ## External Factor Panels
 

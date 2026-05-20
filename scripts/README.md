@@ -316,6 +316,7 @@ python scripts\build_derived_fundamental_factor_panel.py `
   --fundamentals <synthetic_fundamentals.csv> `
   --panel-mode rebalance `
   --rebalance-date 2026-03-31 `
+  --period-type annual `
   --out <derived_fundamentals_202603.csv> `
   --output-format csv `
   --no-manifest
@@ -324,7 +325,10 @@ python scripts\build_derived_fundamental_factor_panel.py `
 The output includes generic fields such as `sales_yoy`,
 `operating_profit_yoy`, `operating_margin_delta_yoy`, `roe`, `roa`, and
 `profit_turn_positive`. The script uses `available_date` as the PIT gate and
-does not use future restatements before their availability date.
+does not use future restatements before their availability date. Rebalance mode
+selects the latest reporting period as of the rebalance date and rejects mixed
+`period_type` values by default, because annual and quarterly ROE/ROA should
+not be ranked together without an explicit research decision.
 
 ### Execution Diagnostics
 

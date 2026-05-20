@@ -110,6 +110,73 @@ class DerivedFundamentalFactorPanelTest(unittest.TestCase):
         self.assertAlmostEqual(0.15, float(by_date["2026-02-15"]["sales_yoy"]))
         self.assertAlmostEqual(0.3, float(by_date["2026-03-15"]["sales_yoy"]))
 
+    def test_rebalance_panel_keeps_latest_reporting_period_after_old_restatement(self) -> None:
+        rows = [
+            row(available_date="2025-02-01", period_end="2024-12-31", sales="100", disclosure_number="1"),
+            row(available_date="2026-02-01", period_end="2025-12-31", sales="120", disclosure_number="2"),
+            row(available_date="2026-03-01", period_end="2024-12-31", sales="80", disclosure_number="10"),
+        ]
+
+        panel = build_panel(rows, panel_mode="rebalance", rebalance_dates=[date(2026, 3, 31)])
+
+        self.assertEqual(1, len(panel))
+        self.assertEqual("2025-12-31", panel[0]["period_end"])
+        self.assertEqual("120", panel[0]["sales"])
+        self.assertEqual("2026-03-01", panel[0]["prior_year_available_date"])
+        self.assertAlmostEqual(0.5, float(panel[0]["sales_yoy"]))
+
+    def test_profit_turn_positive_is_missing_when_profit_inputs_are_missing(self) -> None:
+        rows = [
+            row(available_date="2025-02-01", period_end="2024-12-31", net_profit=""),
+            row(available_date="2026-02-01", period_end="2025-12-31", net_profit="5"),
+        ]
+
+        panel = build_panel(rows, panel_mode="event")
+        current = [item for item in panel if item["available_date"] == "2026-02-01"][0]
+
+        self.assertEqual("", current["profit_turn_positive"])
+        self.assertIn("profit_turn_positive", current["missing_flags"])
+
+    def test_rebalance_panel_rejects_mixed_period_types_by_default(self) -> None:
+        rows = [
+            row(code="1001", available_date="2026-02-01", period_type="annual", period_end="2025-12-31"),
+            row(code="1002", available_date="2026-02-01", period_type="q1", period_end="2025-12-31"),
+        ]
+
+        with self.assertRaisesRegex(ValueError, "mixed period_type"):
+            build_panel(rows, panel_mode="rebalance", rebalance_dates=[date(2026, 3, 31)])
+
+        panel = build_panel(
+            rows,
+            panel_mode="rebalance",
+            rebalance_dates=[date(2026, 3, 31)],
+            period_types={"annual"},
+        )
+        self.assertEqual(["1001"], [item["code"] for item in panel])
+
+    def test_scope_normalization_and_operating_income_alias(self) -> None:
+        prior = row(
+            available_date="2025-02-01",
+            period_end="2024-12-31",
+            operating_profit="",
+            consolidated_flag="True",
+        )
+        prior["operating_income"] = "10"
+        current = row(
+            available_date="2026-02-01",
+            period_end="2025-12-31",
+            operating_profit="",
+            consolidated_flag="consolidated",
+        )
+        current["operating_income"] = "15"
+
+        panel = build_panel([prior, current], panel_mode="event")
+        latest = [item for item in panel if item["available_date"] == "2026-02-01"][0]
+
+        self.assertEqual("consolidated", latest["statement_scope"])
+        self.assertEqual("15", latest["operating_profit"])
+        self.assertAlmostEqual(0.5, float(latest["operating_profit_yoy"]))
+
     def test_event_panel_is_unique_by_code_available_date(self) -> None:
         rows = [
             row(available_date="2025-02-01", period_end="2024-12-31", sales="100"),
