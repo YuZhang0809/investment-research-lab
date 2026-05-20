@@ -763,6 +763,38 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
                     engine="duckdb",
                 )
 
+            external_config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            external_path = temp / "external_factors.csv"
+            write_csv(
+                external_path,
+                [
+                    {"rebalance_date": "2026-03-31", "code": "1001", "synthetic_external_value": "1.0"},
+                ],
+                ["rebalance_date", "code", "synthetic_external_value"],
+            )
+            external_config["external_factor_panels"] = [
+                {
+                    "name": "synthetic_external",
+                    "path": str(external_path),
+                    "join_keys": ["rebalance_date", "code"],
+                    "fields": [{"name": "synthetic_external_value", "dtype": "float"}],
+                }
+            ]
+            with self.assertRaisesRegex(ValueError, "external_factor_panels"):
+                build_factor_score_panel(
+                    config=external_config,
+                    price_universe_panel_path=price_panel,
+                    prices_path=prices,
+                    fundamentals_path=fundamentals,
+                    start_date="2026-03-01",
+                    end_date="2026-03-31",
+                    frequency="monthly",
+                    strategy_version="qvm",
+                    out_path=temp / "unsupported_external.parquet",
+                    output_format="parquet",
+                    engine="duckdb",
+                )
+
     def test_legacy_factor_score_panel_keeps_group_relative_fields_and_excludes_nonincluded_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
@@ -838,13 +870,68 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
             self.assertEqual("false", excluded["included_flag"])
             self.assertEqual("", excluded["sector_relative_book_to_market_z"])
 
-            _universe_rows, _factor_rows, score_rows, _raw_factors = run_qvm_walkforward.factor_score_panel_stage_rows(
+    def test_legacy_factor_score_panel_keeps_external_factor_panel_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            external_path = temp / "external_factors.csv"
+            write_csv(
+                external_path,
+                [
+                    {"rebalance_date": "2026-03-31", "code": "1001", "synthetic_external_value": "1.5"},
+                    {"rebalance_date": "2026-03-31", "code": "1004", "synthetic_external_value": "4.5"},
+                ],
+                ["rebalance_date", "code", "synthetic_external_value"],
+            )
+            config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            config["external_factor_panels"] = [
+                {
+                    "name": "synthetic_external",
+                    "path": str(external_path),
+                    "join_keys": ["rebalance_date", "code"],
+                    "fields": [{"name": "synthetic_external_value", "dtype": "float"}],
+                }
+            ]
+            price_panel = temp / "price_panel.parquet"
+            factor_score_panel = temp / "factor_score_panel.parquet"
+            build_panel(
+                config=config,
+                listings_path=listings,
+                prices_path=prices,
+                fundamentals_path=fundamentals,
+                start_date="2026-03-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                input_format="csv",
+                out_path=price_panel,
+                output_format="parquet",
+            )
+            build_factor_score_panel(
+                config=config,
+                price_universe_panel_path=price_panel,
+                prices_path=prices,
+                fundamentals_path=fundamentals,
+                start_date="2026-03-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                strategy_version="qvm",
+                out_path=factor_score_panel,
+                output_format="parquet",
+                engine="legacy",
+            )
+
+            rows = read_csv(factor_score_panel)
+            by_code = {row["code"]: row for row in rows if row["rebalance_date"] == "2026-03-31"}
+            self.assertEqual("1.5", by_code["1001"]["synthetic_external_value"])
+            self.assertEqual("4.5", by_code["1004"]["synthetic_external_value"])
+            self.assertIn("synthetic_external_value", rows[0])
+
+            _universe_rows, factor_rows, _score_rows, _raw_factors = run_qvm_walkforward.factor_score_panel_stage_rows(
                 Namespace(factor_score_panel=factor_score_panel),
                 date(2026, 3, 31),
                 config,
             )
-            self.assertIn("sector_relative_book_to_market_z", score_rows[0])
-            self.assertIn("sector_relative_book_to_market_rank_pct", score_rows[0])
+            self.assertIn("synthetic_external_value", factor_rows[0])
 
     def test_duckdb_factor_score_panel_requires_complete_rebalance_dates(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1437,6 +1524,54 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
 
             self.assertNotEqual(fingerprints["scores"], changed["scores"])
             self.assertNotEqual(fingerprints["run"], changed["run"])
+
+    def test_cache_fingerprint_includes_external_factor_panel_checksum_and_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            external_path = temp / "external_factors.csv"
+            write_csv(
+                external_path,
+                [{"rebalance_date": "2026-03-31", "code": "1001", "synthetic_external_value": "1"}],
+                ["rebalance_date", "code", "synthetic_external_value"],
+            )
+            args = Namespace(
+                listings=listings,
+                prices=prices,
+                fundamentals=fundamentals,
+                strategy_version="qvm",
+                start_date="2026-03-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                execution_price="rebalance_close",
+                cost_scenario="base",
+                capital_jpy=5_000_000,
+                tax_rate=0.20315,
+            )
+            config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            config["external_factor_panels"] = [
+                {
+                    "name": "synthetic_external",
+                    "path": str(external_path),
+                    "join_keys": ["rebalance_date", "code"],
+                    "fields": [{"name": "synthetic_external_value", "dtype": "float"}],
+                }
+            ]
+            changed_config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            changed_config["external_factor_panels"] = [
+                {
+                    "name": "synthetic_external",
+                    "path": str(external_path),
+                    "join_keys": ["rebalance_date", "code"],
+                    "fields": [{"name": "synthetic_external_value", "dtype": "string"}],
+                }
+            ]
+
+            fingerprints = run_qvm_walkforward.compute_cache_fingerprints(args, config)
+            changed = run_qvm_walkforward.compute_cache_fingerprints(args, changed_config)
+
+            self.assertNotEqual(fingerprints["factors"], changed["factors"])
+            self.assertNotEqual(fingerprints["scores"], changed["scores"])
 
     def test_rebalance_candidate_cache_is_run_dependent_for_capital(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

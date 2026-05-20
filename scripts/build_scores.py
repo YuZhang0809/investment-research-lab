@@ -6,6 +6,7 @@ from pathlib import Path
 from statistics import mean, pstdev
 from typing import Any
 
+from external_factor_panels import external_factor_field_names
 from factor_expressions import factor_definition_names_for_group
 from research_common import append_manifest, load_yaml, month_key, parse_date, parse_float, read_csv, write_csv
 
@@ -345,12 +346,18 @@ def configured_filters(config: dict[str, Any]) -> list[dict[str, Any]]:
             "exclude_top_pct",
             "exclude_below",
             "exclude_above",
+            "exclude_above_pct",
+            "exclude_below_pct",
+            "exclude_equals",
+            "exclude_in",
+            "require_equals",
+            "require_in",
             "require_not_missing",
         }
         if rule not in allowed_rules:
             raise ValueError(f"Unsupported filter rule in strategy.filters[{index}]: {rule}")
         normalized = {"group": group, "field": field, "rule": rule}
-        if rule in {"exclude_bottom_pct", "exclude_top_pct"}:
+        if rule in {"exclude_bottom_pct", "exclude_top_pct", "exclude_above_pct", "exclude_below_pct"}:
             if "pct" not in item:
                 raise ValueError(f"strategy.filters[{index}].pct is required for {rule}.")
             pct = float((item or {}).get("pct", 0.0) or 0.0)
@@ -362,6 +369,20 @@ def configured_filters(config: dict[str, Any]) -> list[dict[str, Any]]:
             if threshold is None:
                 raise ValueError(f"strategy.filters[{index}].value must be numeric for {rule}.")
             normalized["value"] = threshold
+        if rule in {"exclude_equals", "require_equals"}:
+            if "value" not in item:
+                raise ValueError(f"strategy.filters[{index}].value is required for {rule}.")
+            normalized["value"] = item.get("value")
+        if rule in {"exclude_in", "require_in"}:
+            if "values" in item:
+                values = item.get("values")
+            elif "value" in item:
+                values = [item.get("value")]
+            else:
+                raise ValueError(f"strategy.filters[{index}].values is required for {rule}.")
+            if not isinstance(values, list) or not values:
+                raise ValueError(f"strategy.filters[{index}].values must be a non-empty list for {rule}.")
+            normalized["values"] = values
         filters.append(normalized)
     return filters
 
@@ -435,7 +456,13 @@ def filter_field(filter_config: dict[str, Any], row: dict[str, Any] | None = Non
         return GROUP_SCORE_FIELDS[group], group
     configured_field = str(filter_config.get("field", "") or "")
     rule = str(filter_config.get("rule", ""))
-    allow_z_resolution = rule in {"exclude_bottom_pct", "exclude_top_pct", "require_not_missing"}
+    allow_z_resolution = rule in {
+        "exclude_bottom_pct",
+        "exclude_top_pct",
+        "exclude_above_pct",
+        "exclude_below_pct",
+        "require_not_missing",
+    }
     if row is not None and configured_field in row:
         return configured_field, configured_field
     if row is not None and allow_z_resolution and f"{configured_field}_z" in row:
@@ -447,6 +474,27 @@ def filter_field(filter_config: dict[str, Any], row: dict[str, Any] | None = Non
 
 def numeric_filter_value(row: dict[str, Any], field: str) -> float | None:
     return parse_float(row.get(field))
+
+
+def filter_value_present(row: dict[str, Any], field: str, rule: str) -> bool:
+    if rule in {
+        "exclude_bottom_pct",
+        "exclude_top_pct",
+        "exclude_below",
+        "exclude_above",
+        "exclude_above_pct",
+        "exclude_below_pct",
+    }:
+        return numeric_filter_value(row, field) is not None
+    return row.get(field) not in (None, "")
+
+
+def equivalent_filter_value(left: Any, right: Any) -> bool:
+    left_number = parse_float(left)
+    right_number = parse_float(right)
+    if left_number is not None and right_number is not None:
+        return left_number == right_number
+    return str(left or "").strip() == str(right or "").strip()
 
 
 def mark_missing_filter_value(row: dict[str, Any], field: str) -> None:
@@ -463,10 +511,37 @@ def apply_filters(score_rows: list[dict[str, Any]], filters: list[dict[str, Any]
         field, label = filter_field(filter_config, score_rows[0] if score_rows else None)
         rule = str(filter_config["rule"])
         for row in score_rows:
-            if row.get("filter_status") == "pass" and numeric_filter_value(row, field) is None:
+            if row.get("filter_status") == "pass" and not filter_value_present(row, field, rule):
                 mark_missing_filter_value(row, field)
 
         if rule == "require_not_missing":
+            continue
+
+        if rule in {"exclude_equals", "require_equals", "exclude_in", "require_in"}:
+            targets = filter_config.get("values") if rule.endswith("_in") else [filter_config.get("value")]
+            targets = targets or []
+            for row in score_rows:
+                if row.get("filter_status") != "pass":
+                    continue
+                matches = any(equivalent_filter_value(row.get(field), target) for target in targets)
+                if rule == "exclude_equals" and matches:
+                    row["filter_status"] = "filtered"
+                    row["filter_reasons"] = append_reason(
+                        str(row.get("filter_reasons", "")),
+                        f"{label}_equals_{str(targets[0]).strip()}",
+                    )
+                elif rule == "exclude_in" and matches:
+                    row["filter_status"] = "filtered"
+                    row["filter_reasons"] = append_reason(str(row.get("filter_reasons", "")), f"{label}_in")
+                elif rule == "require_equals" and not matches:
+                    row["filter_status"] = "filtered"
+                    row["filter_reasons"] = append_reason(
+                        str(row.get("filter_reasons", "")),
+                        f"{label}_not_equals_{str(targets[0]).strip()}",
+                    )
+                elif rule == "require_in" and not matches:
+                    row["filter_status"] = "filtered"
+                    row["filter_reasons"] = append_reason(str(row.get("filter_reasons", "")), f"{label}_not_in")
             continue
 
         if rule in {"exclude_below", "exclude_above"}:
@@ -488,6 +563,34 @@ def apply_filters(score_rows: list[dict[str, Any]], filters: list[dict[str, Any]
                     row["filter_reasons"] = append_reason(
                         str(row.get("filter_reasons", "")),
                         f"{label}_above_{threshold:g}",
+                    )
+            continue
+
+        if rule in {"exclude_above_pct", "exclude_below_pct"}:
+            eligible = [
+                row
+                for row in score_rows
+                if row.get("filter_status") == "pass" and numeric_filter_value(row, field) is not None
+            ]
+            values = [numeric_filter_value(row, field) for row in eligible]
+            threshold = percentile([value for value in values if value is not None], float(filter_config["pct"]))
+            if math.isnan(threshold):
+                continue
+            for row in eligible:
+                value = numeric_filter_value(row, field)
+                if value is None:
+                    continue
+                if rule == "exclude_above_pct" and value > threshold:
+                    row["filter_status"] = "filtered"
+                    row["filter_reasons"] = append_reason(
+                        str(row.get("filter_reasons", "")),
+                        f"{label}_above_p{float(filter_config['pct']):g}",
+                    )
+                elif rule == "exclude_below_pct" and value < threshold:
+                    row["filter_status"] = "filtered"
+                    row["filter_reasons"] = append_reason(
+                        str(row.get("filter_reasons", "")),
+                        f"{label}_below_p{float(filter_config['pct']):g}",
                     )
             continue
 
@@ -598,6 +701,12 @@ def build_scores(
     factor_weighted_mode = scoring_mode == "weighted_factors"
     group_weights = configured_group_weights(config) if group_weighted_mode else {}
     filters = configured_filters(config) if scoring_mode in {"weighted_groups", "weighted_factors"} else []
+    external_fields = set(external_factor_field_names(config))
+    passthrough_filter_fields = {
+        str(filter_config.get("field", ""))
+        for filter_config in filters
+        if filter_config.get("field") and str(filter_config.get("rule", "")) in {"exclude_equals", "exclude_in", "require_equals", "require_in"}
+    }
 
     factor_config = config.get("factors", {}) or {}
     lower_pct = float((factor_config.get("winsorize", {}) or {}).get("lower_pct", 1))
@@ -676,6 +785,7 @@ def build_scores(
                 "filter_status": "pass" if composite_score is not None else "missing_required_score",
                 "filter_reasons": "",
                 "missing_score_components": ";".join(missing_score_components),
+                **{field: row.get(field, "") for field in (external_fields | passthrough_filter_fields) if field in row},
                 **{
                     score_output_field(factor, direct_fields=set(group_relative_fields)): (
                         score_components.get(factor) if factor in group_relative_fields else z.get(factor)
@@ -734,6 +844,7 @@ def main() -> int:
         "filter_status",
         "filter_reasons",
         "missing_score_components",
+        *external_factor_field_names(config),
         *[score_output_field(factor, direct_fields=score_direct_fields(config)) for factor in raw_factors],
     ]
     write_csv(output_path, [{key: fmt(value) for key, value in row.items()} for row in score_rows], fieldnames)

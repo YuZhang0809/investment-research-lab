@@ -192,6 +192,41 @@ The legacy factor/score path supports this primitive. The DuckDB factor-score
 builder currently rejects `strategy.group_relative_transforms` with a clear
 error instead of silently falling back or ignoring the transform.
 
+## External Factor Panels
+
+`external_factor_panels` joins generic point-in-time fields into factor rows
+before scoring. The join can be keyed by `rebalance_date + code` or by
+`rebalance_date + <group field>` such as `sector`. As-of mode uses
+`available_date <= rebalance_date` and never uses future rows.
+
+Joined fields can be referenced by `weighted_factors` and by field filters:
+
+```yaml
+external_factor_panels:
+  - name: synthetic_risk_flags
+    path: data/processed/external/synthetic_risk_flags.parquet
+    join_keys: [rebalance_date, code]
+    fields:
+      - name: risk_score
+        dtype: float
+      - name: risk_flag
+        dtype: string
+
+strategy:
+  scoring:
+    mode: weighted_factors
+    weights:
+      risk_score: 1.0
+  filters:
+    - field: risk_flag
+      rule: exclude_equals
+      value: blocked
+```
+
+See `docs/external_factor_panels.md` for the full contract and validation
+command. The DuckDB factor-score builder rejects external panels until that
+fast path has its own parity-tested implementation.
+
 ## Filters
 
 Filters run after score calculation and before ranking. Filtered rows remain in
@@ -226,6 +261,18 @@ strategy:
 
     - field: value_score
       rule: require_not_missing
+
+    - field: risk_flag
+      rule: exclude_equals
+      value: blocked
+
+    - field: risk_bucket
+      rule: require_in
+      values: [low, medium]
+
+    - field: risk_score
+      rule: exclude_above_pct
+      pct: 90
 ```
 
 `group` maps to `quality_score`, `value_score`, or `momentum_score`. `field`
@@ -234,6 +281,10 @@ factor name, which is resolved to that factor's z-score column because
 percentile ordering is unitless. Threshold filters such as `exclude_below` and
 `exclude_above` do not auto-resolve raw factor names; use an explicit z-score
 field such as `earnings_yield_z` when the threshold is in z-score units.
+String filters support `exclude_equals`, `exclude_in`, `require_equals`, and
+`require_in`. Numeric percentile-threshold filters support
+`exclude_above_pct` and `exclude_below_pct`, where the percentile threshold is
+computed from currently passing rows.
 
 Unknown weighted factor fields and unknown filter fields fail fast with
 `ValueError` instead of producing an empty ranked output.
@@ -270,8 +321,20 @@ forward_status
 
 `factor_quantile` follows the Alphalens convention that `1` is the lowest factor
 bucket and the highest number is the strongest factor bucket. `group` is mapped
-from `sector` so a downstream notebook can compute grouped IC or grouped
-returns without changing the public data pipeline.
+from `--group-field` when supplied, otherwise from `sector`.
+
+When `--grouped-diagnostics --group-field <field>` is supplied, the script also
+writes:
+
+```text
+factor_forward_returns_grouped_<range>_<holding>d.csv
+factor_forward_returns_grouped_<range>_<holding>d.md
+```
+
+The grouped output reports IC, rank IC, top/bottom spread, coverage, missing
+factor rate, and missing forward-return rate separately for each
+`rebalance_date + factor + group`. `--group-neutral-quantiles` optionally assigns
+factor quantiles inside each group instead of across the full cross-section.
 
 The Markdown report is still intentionally lightweight. It is closer to an
 Alphalens tear sheet than the earlier report because it now surfaces IC,

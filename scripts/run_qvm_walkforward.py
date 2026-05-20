@@ -21,6 +21,7 @@ from factor_expressions import (
 )
 from build_scores import STRATEGY_VERSION_CHOICES, build_scores, score_direct_fields, score_output_field
 from build_universe import build_universe_from_rows
+from external_factor_panels import external_factor_panel_fingerprints
 from research_common import (
     append_manifest,
     checksum,
@@ -31,6 +32,7 @@ from research_common import (
     parse_float,
     parse_int,
     read_csv,
+    median_or_none,
     write_csv,
     write_table,
 )
@@ -78,6 +80,12 @@ class AffordableLotFilterConfig:
     max_single_lot_weight: float | None = None
     min_single_lot_weight: float | None = None
     cash_buffer_weight: float = 0.0
+
+
+@dataclass
+class ExecutionDiagnosticsConfig:
+    enabled: bool = False
+    high_cash_threshold: float = 0.30
 
 
 @dataclass
@@ -729,6 +737,45 @@ def affordable_lot_filter_config(config: dict[str, Any]) -> AffordableLotFilterC
         min_single_lot_weight=min_weight,
         cash_buffer_weight=cash_buffer,
     )
+
+
+def execution_diagnostics_config(config: dict[str, Any]) -> ExecutionDiagnosticsConfig:
+    raw = ((config.get("reporting", {}) or {}).get("execution_diagnostics", {}) or {})
+    enabled = bool(parse_bool(raw.get("enabled"), default=False))
+    if not enabled:
+        return ExecutionDiagnosticsConfig()
+    threshold = parse_float(raw.get("high_cash_threshold"), default=0.30)
+    if threshold is None or threshold < 0 or threshold > 1:
+        raise ValueError("reporting.execution_diagnostics.high_cash_threshold must be in [0, 1].")
+    return ExecutionDiagnosticsConfig(enabled=True, high_cash_threshold=threshold)
+
+
+def distribution_stats(values: list[float], prefix: str) -> dict[str, Any]:
+    clean = [value for value in values if value is not None]
+    if not clean:
+        return {
+            f"{prefix}_min": "",
+            f"{prefix}_median": "",
+            f"{prefix}_max": "",
+        }
+    return {
+        f"{prefix}_min": min(clean),
+        f"{prefix}_median": median_or_none(clean),
+        f"{prefix}_max": max(clean),
+    }
+
+
+def single_lot_value_at(
+    code: str,
+    universe_by_code: dict[str, dict[str, Any]],
+    price_index: dict[str, list[PricePoint]],
+    valuation_date: date,
+) -> float | None:
+    point = price_at(price_index, code, valuation_date)
+    if point is None:
+        return None
+    lot = parse_int(universe_by_code.get(code, {}).get("lot_size"), default=100) or 100
+    return lot * point.unadjusted_close
 
 
 def targetable_equity(equity: float, affordable_filter: AffordableLotFilterConfig) -> float:
@@ -1393,6 +1440,7 @@ def compute_cache_fingerprints(args: argparse.Namespace, config: dict[str, Any])
     else:
         factor_source["build_factors.py"] = source_checksum("build_factors.py")
         factor_source["factor_expressions.py"] = source_checksum("factor_expressions.py")
+        factor_source["external_factor_panels.py"] = source_checksum("external_factor_panels.py")
     factors_fingerprint = cache_digest(
         {
             "schema_version": "walkforward_factors_cache_v0_2",
@@ -1411,6 +1459,7 @@ def compute_cache_fingerprints(args: argparse.Namespace, config: dict[str, Any])
                 validate_unknown=False,
             ),
             "factor_definition_config": ((config.get("factors", {}) or {}).get("definitions", []) or []),
+            "external_factor_panels": external_factor_panel_fingerprints(config),
             "source": factor_source,
         }
     )
@@ -2063,6 +2112,7 @@ def main() -> int:
 
     max_order_to_adv = float(config["execution"].get("max_order_to_median_trading_value", 0.005))
     tail_gap_mode, tail_gap_max_stale_days = missing_price_tail_policy(config)
+    execution_diagnostics = execution_diagnostics_config(config)
     # Holdings and tax lots are tracked in adjusted-share units so split events
     # do not mechanically distort portfolio equity. Order sizing still uses
     # actual unadjusted shares and prices.
@@ -2086,6 +2136,7 @@ def main() -> int:
     summary_rows: list[dict[str, Any]] = []
     equity_rows: list[dict[str, Any]] = []
     sector_exposure_output_rows: list[dict[str, Any]] = []
+    execution_diagnostics_rows: list[dict[str, Any]] = []
     warned_price_tail_gaps: set[tuple[str, date]] = set()
 
     for rebalance_date in dates:
@@ -2250,7 +2301,11 @@ def main() -> int:
         execution_date_not_tradable_count = 0
         execution_price_unavailable_on_execution_date_count = 0
         turnover_value = 0.0
+        buy_turnover_value = 0.0
+        sell_turnover_value = 0.0
         estimated_cost_base = 0.0
+        period_estimated_tax = 0.0
+        adv_cap_reduction_count = 0
         last_execution_date: date | None = None
         intended_execution_date = (
             rebalance_date
@@ -2364,6 +2419,7 @@ def main() -> int:
             reason = ""
             adv_cap_value = median_adv * max_order_to_adv if median_adv else None
             if adv_cap_value is not None and requested_value > adv_cap_value:
+                adv_cap_reduction_count += 1
                 filled_lots = int(adv_cap_value // (fill_price * lot)) * lot
                 filled_delta = filled_lots if desired_delta > 0 else -filled_lots
                 reason = "reduced_by_adv_cap"
@@ -2458,6 +2514,7 @@ def main() -> int:
                 if realized_gain > 0:
                     estimated_tax = realized_gain * args.tax_rate
                     cumulative_tax += estimated_tax
+                    period_estimated_tax += estimated_tax
                 cumulative_realized_gain += realized_gain
                 sell_trades += 1
             holdings[code] = current_adjusted_shares + adjusted_shares_for_trade(filled_delta, fill_point)
@@ -2466,6 +2523,10 @@ def main() -> int:
             if filled_delta != 0:
                 filled_order_count += 1
                 last_execution_date = max(last_execution_date or fill_point.date, fill_point.date)
+                if filled_delta > 0:
+                    buy_turnover_value += trade_value
+                elif filled_delta < 0:
+                    sell_turnover_value += trade_value
             turnover_value += trade_value
             for scenario, scenario_cost in scenario_costs.items():
                 cumulative_cost_by_scenario[scenario] += scenario_cost
@@ -2572,6 +2633,30 @@ def main() -> int:
 
         portfolio_return = 0.0 if previous_after_equity is None else after_equity / previous_after_equity - 1.0
         cash_pct = cash / after_equity if after_equity else 0
+        target_slots_filled_ratio = len(selected_codes) / selection.target_count if selection.target_count else 0
+        selected_but_untradeable_count = sum(
+            1
+            for code in selected_codes
+            if parse_bool(universe_by_code.get(code, {}).get("tradable_flag"), default=True) is False
+        )
+        selected_lot_values = [
+            value
+            for value in [
+                single_lot_value_at(code, universe_by_code, price_index, rebalance_date)
+                for code in selected_codes
+            ]
+            if value is not None
+        ]
+        skipped_lot_values = [
+            item.single_lot_value
+            for item in selection.affordability_excluded
+            if item.single_lot_value is not None
+        ]
+        selected_lot_stats = distribution_stats(selected_lot_values, "selected_lot_value")
+        skipped_lot_stats = distribution_stats(skipped_lot_values, "skipped_lot_value")
+        cost_drag = estimated_cost_base / pre_equity if pre_equity else 0
+        tax_drag = period_estimated_tax / pre_equity if pre_equity else 0
+        high_cash_flag = cash_pct > execution_diagnostics.high_cash_threshold
         if cash_pct > 0.2:
             failure_rows.append(
                 {
@@ -2639,6 +2724,17 @@ def main() -> int:
             ),
             "affordability_excluded": len(selection.affordability_excluded),
             "zero_lot_avoided": sum(1 for item in selection.affordability_excluded if item.reason == "zero_lot_avoided"),
+            "execution_diagnostics_enabled": execution_diagnostics.enabled,
+            "high_cash_threshold": execution_diagnostics.high_cash_threshold if execution_diagnostics.enabled else "",
+            "high_cash_flag": high_cash_flag if execution_diagnostics.enabled else "",
+            "average_cash_weight": "",
+            "max_cash_weight": "",
+            "periods_with_cash_weight_above_threshold": "",
+            "target_slots_filled_ratio": target_slots_filled_ratio,
+            "selected_but_untradeable_count": selected_but_untradeable_count,
+            "selected_but_unaffordable_count": len(selection.affordability_excluded),
+            "skipped_due_to_affordable_lot_count": len(selection.affordability_excluded),
+            "skipped_due_to_adv_cap_count": adv_cap_reduction_count,
             "universe_count": len(universe_rows),
             "selected_count": len(selected_codes),
             "zero_lot_targets": zero_lot_targets,
@@ -2659,7 +2755,11 @@ def main() -> int:
             "cash": cash,
             "cash_pct": cash_pct,
             "turnover": turnover_value / pre_equity if pre_equity else 0,
+            "buy_turnover": buy_turnover_value / pre_equity if pre_equity else 0,
+            "sell_turnover": sell_turnover_value / pre_equity if pre_equity else 0,
             "estimated_cost_base": estimated_cost_base,
+            "cost_drag": cost_drag,
+            "tax_drag": tax_drag,
             "cumulative_cost_optimistic": cumulative_cost_by_scenario["optimistic"],
             "cumulative_cost_base": cumulative_cost_by_scenario["base"],
             "cumulative_cost_pessimistic": cumulative_cost_by_scenario["pessimistic"],
@@ -2670,6 +2770,43 @@ def main() -> int:
             "skipped_orders": skipped_orders,
         }
         summary_rows.append(row)
+        if execution_diagnostics.enabled:
+            execution_diagnostics_rows.append(
+                {
+                    "rebalance_date": rebalance_date,
+                    "valuation_date": valuation_date,
+                    "execution_price": args.execution_price,
+                    "cash_weight": cash_pct,
+                    "high_cash_threshold": execution_diagnostics.high_cash_threshold,
+                    "high_cash_flag": high_cash_flag,
+                    "selected_count": len(selected_codes),
+                    "target_holdings": row["target_holdings"],
+                    "holdings_count": len(holdings),
+                    "target_slots_filled_ratio": target_slots_filled_ratio,
+                    "selected_but_untradeable_count": selected_but_untradeable_count,
+                    "selected_but_unaffordable_count": len(selection.affordability_excluded),
+                    "skipped_due_to_affordable_lot_count": len(selection.affordability_excluded),
+                    "skipped_due_to_adv_cap_count": adv_cap_reduction_count,
+                    "pending_order_count": pending_order_count,
+                    "filled_order_count": filled_order_count,
+                    "skipped_orders": skipped_orders,
+                    "buy_turnover": row["buy_turnover"],
+                    "sell_turnover": row["sell_turnover"],
+                    "turnover": row["turnover"],
+                    "estimated_cost_base": estimated_cost_base,
+                    "cost_drag": cost_drag,
+                    "tax_drag": tax_drag,
+                    "cash_drag": cash_pct,
+                    **selected_lot_stats,
+                    **skipped_lot_stats,
+                    "average_cash_weight": "",
+                    "max_cash_weight": "",
+                    "periods_with_cash_weight_above_threshold": "",
+                    "realized_holdings_count_avg": "",
+                    "realized_holdings_count_min": "",
+                    "realized_holdings_count_max": "",
+                }
+            )
         equity_rows.append(
             {
                 "date": valuation_date,
@@ -2693,6 +2830,27 @@ def main() -> int:
         previous_valuation_date = valuation_date
         previous_benchmark_codes = [row["code"] for row in universe_rows]
         previous_research_codes = research_codes
+
+    if execution_diagnostics.enabled and summary_rows:
+        cash_weights = [float(row.get("cash_pct", 0) or 0) for row in summary_rows]
+        holding_counts = [int(row.get("holdings_count", 0) or 0) for row in summary_rows]
+        average_cash_weight = sum(cash_weights) / len(cash_weights)
+        max_cash_weight = max(cash_weights)
+        high_cash_periods = sum(1 for value in cash_weights if value > execution_diagnostics.high_cash_threshold)
+        realized_holdings_count_avg = sum(holding_counts) / len(holding_counts)
+        realized_holdings_count_min = min(holding_counts)
+        realized_holdings_count_max = max(holding_counts)
+        for row in summary_rows:
+            row["average_cash_weight"] = average_cash_weight
+            row["max_cash_weight"] = max_cash_weight
+            row["periods_with_cash_weight_above_threshold"] = high_cash_periods
+        for row in execution_diagnostics_rows:
+            row["average_cash_weight"] = average_cash_weight
+            row["max_cash_weight"] = max_cash_weight
+            row["periods_with_cash_weight_above_threshold"] = high_cash_periods
+            row["realized_holdings_count_avg"] = realized_holdings_count_avg
+            row["realized_holdings_count_min"] = realized_holdings_count_min
+            row["realized_holdings_count_max"] = realized_holdings_count_max
 
     start_suffix = month_key(dates[0])
     end_suffix = month_key(dates[-1])
@@ -2727,6 +2885,7 @@ def main() -> int:
     equity_path = args.out_dir / f"qvm_walkforward_equity_{token}.csv"
     failures_path = args.out_dir / f"qvm_walkforward_failure_cases_{token}.csv"
     sector_exposure_path = args.out_dir / f"qvm_walkforward_sector_exposure_{token}.csv"
+    execution_diagnostics_path = args.out_dir / f"qvm_walkforward_execution_diagnostics_{token}.csv"
     report_path = args.report_dir / f"qvm_walkforward_{token}.md"
 
     write_csv(
@@ -2772,6 +2931,17 @@ def main() -> int:
             "cash_buffer_weight",
             "affordability_excluded",
             "zero_lot_avoided",
+            "execution_diagnostics_enabled",
+            "high_cash_threshold",
+            "high_cash_flag",
+            "average_cash_weight",
+            "max_cash_weight",
+            "periods_with_cash_weight_above_threshold",
+            "target_slots_filled_ratio",
+            "selected_but_untradeable_count",
+            "selected_but_unaffordable_count",
+            "skipped_due_to_affordable_lot_count",
+            "skipped_due_to_adv_cap_count",
             "universe_count",
             "selected_count",
             "zero_lot_targets",
@@ -2792,7 +2962,11 @@ def main() -> int:
             "cash",
             "cash_pct",
             "turnover",
+            "buy_turnover",
+            "sell_turnover",
             "estimated_cost_base",
+            "cost_drag",
+            "tax_drag",
             "cumulative_cost_optimistic",
             "cumulative_cost_base",
             "cumulative_cost_pessimistic",
@@ -2845,13 +3019,56 @@ def main() -> int:
             "market_benchmark_return",
             "cash",
         ],
-    )
+        )
     write_csv(failures_path, failure_rows, ["date", "code", "failure_type", "detail", "value"])
     if sector_exposure_output_rows:
         write_csv(
             sector_exposure_path,
             sector_exposure_output_rows,
             ["date", "group", "selected_count", "target_weight", "actual_weight", "cap_limit", "violation"],
+        )
+    if execution_diagnostics_rows:
+        write_csv(
+            execution_diagnostics_path,
+            execution_diagnostics_rows,
+            [
+                "rebalance_date",
+                "valuation_date",
+                "execution_price",
+                "cash_weight",
+                "high_cash_threshold",
+                "high_cash_flag",
+                "selected_count",
+                "target_holdings",
+                "holdings_count",
+                "target_slots_filled_ratio",
+                "selected_but_untradeable_count",
+                "selected_but_unaffordable_count",
+                "skipped_due_to_affordable_lot_count",
+                "skipped_due_to_adv_cap_count",
+                "pending_order_count",
+                "filled_order_count",
+                "skipped_orders",
+                "buy_turnover",
+                "sell_turnover",
+                "turnover",
+                "estimated_cost_base",
+                "cost_drag",
+                "tax_drag",
+                "cash_drag",
+                "selected_lot_value_min",
+                "selected_lot_value_median",
+                "selected_lot_value_max",
+                "skipped_lot_value_min",
+                "skipped_lot_value_median",
+                "skipped_lot_value_max",
+                "average_cash_weight",
+                "max_cash_weight",
+                "periods_with_cash_weight_above_threshold",
+                "realized_holdings_count_avg",
+                "realized_holdings_count_min",
+                "realized_holdings_count_max",
+            ],
         )
     write_report(report_path, summary_rows, args.capital_jpy)
 
@@ -2874,6 +3091,15 @@ def main() -> int:
                     len(sector_exposure_output_rows),
                 )
             )
+        if execution_diagnostics_rows:
+            artifacts.append(
+                (
+                    "derived_walkforward_execution_diagnostics",
+                    execution_diagnostics_path,
+                    "walkforward_execution_diagnostics_v0_1",
+                    len(execution_diagnostics_rows),
+                )
+            )
         for source, path, schema, row_count in artifacts:
             append_manifest(
                 args.manifest,
@@ -2889,6 +3115,8 @@ def main() -> int:
     print(f"Wrote walk-forward failure cases to {failures_path}")
     if sector_exposure_output_rows:
         print(f"Wrote walk-forward sector exposure to {sector_exposure_path}")
+    if execution_diagnostics_rows:
+        print(f"Wrote walk-forward execution diagnostics to {execution_diagnostics_path}")
     print(f"Wrote walk-forward report to {report_path}")
     return 0
 

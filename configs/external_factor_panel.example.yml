@@ -1,0 +1,36 @@
+experiment_id: external_factor_panel_example
+
+external_factor_panels:
+  - name: synthetic_risk_flags
+    path: data/processed/external/synthetic_risk_flags.example.csv
+    join_keys:
+      - rebalance_date
+      - code
+    fields:
+      - name: synthetic_risk_score
+        dtype: float
+      - name: synthetic_risk_flag
+        dtype: string
+    asof:
+      enabled: false
+
+strategy:
+  scoring:
+    mode: weighted_factors
+    weights:
+      synthetic_risk_score: 1.0
+  filters:
+    - field: synthetic_risk_flag
+      rule: exclude_equals
+      value: blocked
+
+factors:
+  winsorize:
+    lower_pct: 0
+    upper_pct: 100
+  quality:
+    variables: []
+  value:
+    variables: []
+  momentum:
+    variables: []

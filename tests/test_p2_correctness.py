@@ -411,6 +411,7 @@ class P2CorrectnessTest(unittest.TestCase):
             config_text = config_text.replace("max_single_lot_weight: 0.05", "max_single_lot_weight: 0.8", 1)
             config_text = config_text.replace("cash_buffer_weight: 0.02", "cash_buffer_weight: 0.1", 1)
             config_text = config_text.replace("spread_multiplier: 0.5", "spread_multiplier: 0.0", 1)
+            config_text += "\nreporting:\n  execution_diagnostics:\n    enabled: true\n    high_cash_threshold: 0.30\n"
             config_path.write_text(config_text, encoding="utf-8")
             write_csv(
                 prices,
@@ -514,12 +515,23 @@ class P2CorrectnessTest(unittest.TestCase):
                 "r", encoding="utf-8", newline=""
             ) as file:
                 trades = list(csv.DictReader(file))
+            with (out_dir / "qvm_walkforward_execution_diagnostics_affordable_lot_test_202601_202601.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as file:
+                execution_diagnostics = list(csv.DictReader(file))
 
             self.assertEqual("True", summary[-1]["affordable_lot_filter_enabled"])
             self.assertEqual("1", summary[-1]["affordability_excluded"])
             self.assertEqual("1", summary[-1]["zero_lot_avoided"])
+            self.assertEqual("True", summary[-1]["execution_diagnostics_enabled"])
+            self.assertEqual("1", summary[-1]["selected_but_unaffordable_count"])
+            self.assertEqual("1", summary[-1]["skipped_due_to_affordable_lot_count"])
             self.assertEqual("0", summary[-1]["zero_lot_targets"])
             self.assertEqual("2", summary[-1]["selected_count"])
+            self.assertEqual(1, len(execution_diagnostics))
+            self.assertEqual("1", execution_diagnostics[0]["selected_but_unaffordable_count"])
+            self.assertNotEqual("", execution_diagnostics[0]["average_cash_weight"])
+            self.assertIn("buy_turnover", execution_diagnostics[0])
             self.assertEqual({"1002", "1003"}, {row["code"] for row in trades if row["side"] == "BUY"})
             failure_types = {row["failure_type"] for row in failures}
             self.assertIn("affordability_excluded", failure_types)

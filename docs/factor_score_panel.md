@@ -40,9 +40,11 @@ The DuckDB engine is intentionally narrower than the legacy engine. It supports
 the base Q/V/M raw factors and `qvm`, `qv`, `value_only`, and `weighted_groups`
 strategy versions with group-level filters. It rejects `factors.definitions`,
 `strategy.group_relative_transforms`, `configurable` / `weighted_factors`, and
-field-level filters with a clear error. Use `--engine legacy` explicitly for
-those mechanics. There is no automatic fallback because a silent semantic change
-would make parity harder to trust.
+field-level filters with a clear error. It also rejects
+`external_factor_panels` until the DuckDB join implementation has its own
+parity tests. Use `--engine legacy` explicitly for those mechanics. There is no
+automatic fallback because a silent semantic change would make parity harder to
+trust.
 
 ## Usage
 
@@ -111,6 +113,12 @@ fields can then drive `weighted_factors` scoring or field filters. The DuckDB
 panel engine does not support this primitive yet and fails explicitly when it
 is configured.
 
+External factor panels are also factor/score rules. The legacy engine can join
+generic `external_factor_panels` into factor rows and preserve those joined
+fields in the factor-score panel. Those fields can drive `weighted_factors`
+scoring and field filters. The DuckDB engine rejects external panels until that
+fast path supports the same point-in-time join contract.
+
 ## Minimum Fields
 
 The output keeps existing factor and score field names where possible:
@@ -150,6 +158,7 @@ missing_score_components
 <raw_factor>_z
 <group_relative_output_prefix>_<field>_z
 <group_relative_output_prefix>_<field>_rank_pct
+<external_factor_panel_field>
 ```
 
 Configured factor definitions and configurable scoring modes are available in

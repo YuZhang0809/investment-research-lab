@@ -109,7 +109,9 @@ fallback implementation; the CLI default remains legacy for backward
 compatibility. DuckDB supports `qvm`, `qv`, `value_only`, and `weighted_groups`
 with group filters, and it rejects custom factor expressions,
 `strategy.group_relative_transforms`, `weighted_factors`, and field filters
-instead of falling back silently.
+instead of falling back silently. Configs with `external_factor_panels` should
+also use `--engine legacy` until the DuckDB join path is implemented and
+parity-tested.
 
 Step C consumes the factor/score panel directly:
 
@@ -268,6 +270,66 @@ The resulting panel keeps fields such as
 `sector_relative_book_to_market_rank_pct`, and
 `run_qvm_walkforward.py --factor-score-panel` can consume them through the
 normal score rows. DuckDB currently rejects this config explicitly.
+
+### External Factor Panels
+
+External panels join generic PIT fields into factor rows before scoring. They
+support exact joins such as `rebalance_date + code`, grouped exact joins such
+as `rebalance_date + sector`, and as-of joins using `available_date <=
+rebalance_date`.
+
+Validate a panel contract first:
+
+```powershell
+python scripts\validate_external_factor_panel.py `
+  --panel <synthetic_external_panel.parquet> `
+  --join-key rebalance_date `
+  --join-key code `
+  --field risk_score:float `
+  --field risk_flag:string
+```
+
+Then run the legacy factor/score path with a config that contains
+`external_factor_panels`. Joined fields can be used by `weighted_factors` and
+field filters such as `exclude_equals`, `require_in`, `exclude_above_pct`, and
+`exclude_below_pct`. Public examples must use synthetic external panels only.
+
+### Execution Diagnostics
+
+Small-account execution diagnostics are optional:
+
+```yaml
+reporting:
+  execution_diagnostics:
+    enabled: true
+    high_cash_threshold: 0.30
+```
+
+When enabled, `run_qvm_walkforward.py` writes
+`qvm_walkforward_execution_diagnostics_<token>.csv` with cash-weight, target
+slot fill ratio, affordability skips, ADV reductions, buy/sell turnover, cost
+drag, tax drag, and selected/skipped lot-value distributions.
+
+### Grouped Factor Diagnostics
+
+`analyze_factor_forward_returns.py` can report factor behavior by group:
+
+```powershell
+python scripts\analyze_factor_forward_returns.py `
+  --factors-dir <factors_dir> `
+  --prices <prices.csv> `
+  --start-date 2026-01-01 `
+  --end-date 2026-12-31 `
+  --holding-days 21 `
+  --factor book_to_market `
+  --group-field sector `
+  --grouped-diagnostics `
+  --no-manifest
+```
+
+The grouped CSV/Markdown outputs report IC, rank IC, top-bottom spread,
+coverage, and missing rates by `rebalance_date + factor + group`. Add
+`--group-neutral-quantiles` to assign quantile buckets inside each group.
 
 ## Validation Workflow
 

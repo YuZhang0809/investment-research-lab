@@ -17,6 +17,7 @@ from build_factors import build_factors  # noqa: E402
 from build_scores import STRATEGY_VERSION_CHOICES, build_scores  # noqa: E402
 from factor_expressions import factor_definition_dependency_graph, factor_definition_fingerprints  # noqa: E402
 from research_common import read_csv, read_table, write_table  # noqa: E402
+from validate_external_factor_panel import validate_panel, parse_field_contracts  # noqa: E402
 
 
 class TableIODuckDBTest(unittest.TestCase):
@@ -781,6 +782,177 @@ class TableIODuckDBTest(unittest.TestCase):
                 strategy_version="configurable",
             )
 
+    def test_external_factor_panel_exact_join_fields_can_score_and_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            external_path = temp / "external.csv"
+            write_table(
+                [
+                    {"rebalance_date": "2026-03-31", "code": "1001", "margin_long_to_volume": "1", "risk_flag": "ok"},
+                    {"rebalance_date": "2026-03-31", "code": "1002", "margin_long_to_volume": "3", "risk_flag": "blocked"},
+                    {"rebalance_date": "2026-03-31", "code": "1003", "margin_long_to_volume": "2", "risk_flag": "ok"},
+                ],
+                external_path,
+                format="csv",
+                fieldnames=["rebalance_date", "code", "margin_long_to_volume", "risk_flag"],
+            )
+            config = external_panel_config(
+                external_path,
+                fields=[
+                    {"name": "margin_long_to_volume", "dtype": "float"},
+                    {"name": "risk_flag", "dtype": "string"},
+                ],
+            )
+            factor_rows = build_external_factor_rows(config)
+
+            self.assertEqual(1.0, factor_rows[0]["margin_long_to_volume"])
+            self.assertNotIn("risk_flag", str(factor_rows[0]["missing_flags"]))
+            scores, raw_factors = build_scores(
+                config={
+                    **config,
+                    "strategy": {
+                        "scoring": {"mode": "weighted_factors", "weights": {"margin_long_to_volume": 1.0}},
+                        "filters": [{"field": "risk_flag", "rule": "exclude_equals", "value": "blocked"}],
+                    },
+                    "factors": {
+                        "winsorize": {"lower_pct": 0, "upper_pct": 100},
+                        "quality": {"variables": []},
+                        "value": {"variables": []},
+                        "momentum": {"variables": []},
+                    },
+                },
+                factor_rows=factor_rows,
+                strategy_version="configurable",
+            )
+
+            self.assertIn("margin_long_to_volume", raw_factors)
+            by_code = {row["code"]: row for row in scores}
+            self.assertEqual("filtered", by_code["1002"]["filter_status"])
+            self.assertEqual("risk_flag_equals_blocked", by_code["1002"]["filter_reasons"])
+            ranked = sorted([row for row in scores if row["rank"]], key=lambda row: int(row["rank"]))
+            self.assertEqual(["1003", "1001"], [row["code"] for row in ranked])
+
+    def test_external_factor_panel_sector_join_and_duplicate_fail_fast(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            external_path = temp / "sector_external.csv"
+            write_table(
+                [
+                    {"rebalance_date": "2026-03-31", "sector": "Sector A", "sector_short_selling_ratio": "0.2"},
+                    {"rebalance_date": "2026-03-31", "sector": "Sector B", "sector_short_selling_ratio": "0.8"},
+                ],
+                external_path,
+                format="csv",
+                fieldnames=["rebalance_date", "sector", "sector_short_selling_ratio"],
+            )
+            config = external_panel_config(
+                external_path,
+                join_keys=["rebalance_date", "sector"],
+                fields=[{"name": "sector_short_selling_ratio", "dtype": "float"}],
+            )
+            rows = build_external_factor_rows(config)
+
+            by_code = {row["code"]: row for row in rows}
+            self.assertEqual(0.2, by_code["1001"]["sector_short_selling_ratio"])
+            self.assertEqual(0.8, by_code["1003"]["sector_short_selling_ratio"])
+
+            write_table(
+                [
+                    {"rebalance_date": "2026-03-31", "sector": "Sector A", "sector_short_selling_ratio": "0.2"},
+                    {"rebalance_date": "2026-03-31", "sector": "Sector A", "sector_short_selling_ratio": "0.3"},
+                ],
+                external_path,
+                format="csv",
+                fieldnames=["rebalance_date", "sector", "sector_short_selling_ratio"],
+            )
+            with self.assertRaisesRegex(ValueError, "Duplicate external factor panel"):
+                build_external_factor_rows(config)
+
+    def test_external_factor_panel_asof_does_not_use_future_and_respects_max_lag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            external_path = temp / "asof_external.csv"
+            write_table(
+                [
+                    {"code": "1001", "available_date": "2026-02-15", "margin_long_to_volume": "1"},
+                    {"code": "1001", "available_date": "2026-04-01", "margin_long_to_volume": "9"},
+                ],
+                external_path,
+                format="csv",
+                fieldnames=["code", "available_date", "margin_long_to_volume"],
+            )
+            config = external_panel_config(
+                external_path,
+                fields=[{"name": "margin_long_to_volume", "dtype": "float"}],
+                asof={"enabled": True, "date_field": "available_date", "max_lag_days": 60},
+            )
+            rows = build_external_factor_rows(config)
+            self.assertEqual(1.0, {row["code"]: row for row in rows}["1001"]["margin_long_to_volume"])
+
+            stale_config = external_panel_config(
+                external_path,
+                fields=[{"name": "margin_long_to_volume", "dtype": "float"}],
+                asof={"enabled": True, "date_field": "available_date", "max_lag_days": 10},
+            )
+            stale = {row["code"]: row for row in build_external_factor_rows(stale_config)}["1001"]
+            self.assertIsNone(stale["margin_long_to_volume"])
+            self.assertIn("margin_long_to_volume", stale["missing_flags"])
+
+    def test_new_generic_filter_primitives_handle_strings_and_percentile_thresholds(self) -> None:
+        config = {
+            "strategy": {
+                "scoring": {"mode": "weighted_factors", "weights": {"custom_value": 1.0}},
+                "filters": [
+                    {"field": "risk_flag", "rule": "require_in", "values": ["ok", "watch"]},
+                    {"field": "custom_value", "rule": "exclude_above_pct", "pct": 75},
+                ],
+            },
+            "factors": {
+                "winsorize": {"lower_pct": 0, "upper_pct": 100},
+                "quality": {"variables": []},
+                "value": {"variables": []},
+                "momentum": {"variables": []},
+            },
+        }
+        factors = [
+            {"rebalance_date": "2026-03-31", "code": "1001", "custom_value": "1", "risk_flag": "ok"},
+            {"rebalance_date": "2026-03-31", "code": "1002", "custom_value": "2", "risk_flag": "watch"},
+            {"rebalance_date": "2026-03-31", "code": "1003", "custom_value": "3", "risk_flag": "blocked"},
+            {"rebalance_date": "2026-03-31", "code": "1004", "custom_value": "4", "risk_flag": "ok"},
+        ]
+
+        scores, _raw_factors = build_scores(config=config, factor_rows=factors, strategy_version="configurable")
+
+        by_code = {row["code"]: row for row in scores}
+        self.assertEqual("filtered", by_code["1003"]["filter_status"])
+        self.assertEqual("risk_flag_not_in", by_code["1003"]["filter_reasons"])
+        self.assertEqual("filtered", by_code["1004"]["filter_status"])
+        self.assertIn("custom_value_above_p75", by_code["1004"]["filter_reasons"])
+        ranked = sorted([row for row in scores if row["rank"]], key=lambda row: int(row["rank"]))
+        self.assertEqual(["1002", "1001"], [row["code"] for row in ranked])
+
+    def test_external_factor_panel_validator_rejects_duplicate_contract_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            panel = temp / "external.csv"
+            write_table(
+                [
+                    {"rebalance_date": "2026-03-31", "code": "1001", "risk_score": "1.0"},
+                    {"rebalance_date": "2026-03-31", "code": "1001", "risk_score": "2.0"},
+                ],
+                panel,
+                format="csv",
+                fieldnames=["rebalance_date", "code", "risk_score"],
+            )
+
+            with self.assertRaisesRegex(ValueError, "Duplicate external factor panel rows"):
+                validate_panel(
+                    panel=panel,
+                    join_keys=["rebalance_date", "code"],
+                    fields=parse_field_contracts(["risk_score:float"]),
+                    asof_date_field=None,
+                )
+
 
 def factor_row(code: str, value: float) -> dict[str, str]:
     return {
@@ -880,6 +1052,61 @@ def relative_factor_row(code: str, sector: str, book_to_market: float | None) ->
         "latest_unadjusted_close": "1000",
         "book_to_market": "" if book_to_market is None else str(book_to_market),
     }
+
+
+def external_panel_config(
+    path: Path,
+    *,
+    join_keys: list[str] | None = None,
+    fields: list[dict[str, str]],
+    asof: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "external_factor_panels": [
+            {
+                "name": "synthetic_external",
+                "path": str(path),
+                "join_keys": join_keys or ["rebalance_date", "code"],
+                "fields": fields,
+                "asof": asof or {"enabled": False},
+            }
+        ],
+        "factors": {
+            "winsorize": {"lower_pct": 0, "upper_pct": 100},
+            "quality": {"variables": []},
+            "value": {"variables": []},
+            "momentum": {"variables": []},
+        },
+    }
+
+
+def build_external_factor_rows(config: dict[str, object]) -> list[dict[str, object]]:
+    return build_factors(
+        config=config,
+        rebalance_date=date(2026, 3, 31),
+        universe_rows=[
+            {"code": "1001", "name": "Synthetic 1001", "market": "Prime", "sector": "Sector A", "latest_unadjusted_close": "100"},
+            {"code": "1002", "name": "Synthetic 1002", "market": "Prime", "sector": "Sector A", "latest_unadjusted_close": "100"},
+            {"code": "1003", "name": "Synthetic 1003", "market": "Standard", "sector": "Sector B", "latest_unadjusted_close": "100"},
+        ],
+        price_rows=[
+            {"date": "2026-03-31", "code": "1001", "adjusted_close": "100", "unadjusted_close": "100"},
+            {"date": "2026-03-31", "code": "1002", "adjusted_close": "100", "unadjusted_close": "100"},
+            {"date": "2026-03-31", "code": "1003", "adjusted_close": "100", "unadjusted_close": "100"},
+        ],
+        fundamental_rows=[
+            {
+                "code": code,
+                "available_date": "2026-03-01",
+                "operating_profit": str(100 + index),
+                "net_profit": str(50 + index),
+                "equity": str(500 + index),
+                "total_assets": "1000",
+                "shares_outstanding": "10",
+            }
+            for index, code in enumerate(["1001", "1002", "1003"], start=1)
+        ],
+    )
 
 
 if __name__ == "__main__":

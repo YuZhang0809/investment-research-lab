@@ -46,6 +46,7 @@ class FactorObservation:
     code: str
     name: str
     sector: str
+    group: str
     factor_value: float
     forward_return: float
     factor_quantile: int | None = None
@@ -61,6 +62,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--factor", action="append", dest="factors", help="Factor column to analyze. Can be repeated.")
     parser.add_argument("--top-frac", type=float, default=0.2)
     parser.add_argument("--quantiles", type=int, default=5)
+    parser.add_argument("--group-field", default="sector", help="Factor-row field used for grouped diagnostics.")
+    parser.add_argument("--grouped-diagnostics", action="store_true", help="Write grouped factor diagnostics by --group-field.")
+    parser.add_argument(
+        "--group-neutral-quantiles",
+        action="store_true",
+        help="Assign Alphalens-style quantiles within each group instead of across the full cross-section.",
+    )
     parser.add_argument("--out-dir", type=Path, default=Path("data/processed/factor_analysis"))
     parser.add_argument("--alphalens-out", type=Path, default=None)
     parser.add_argument("--report-dir", type=Path, default=Path("reports/factor_analysis"))
@@ -183,6 +191,18 @@ def assign_quantiles(observations: list[FactorObservation], requested_quantiles:
     for index, item in enumerate(ordered):
         item.factor_quantile = min(quantile_count, int(index * quantile_count / len(ordered)) + 1)
     return quantile_count
+
+
+def assign_quantiles_by_group(observations: list[FactorObservation], requested_quantiles: int) -> int:
+    if requested_quantiles < 2:
+        raise ValueError("quantiles must be at least 2.")
+    grouped: dict[str, list[FactorObservation]] = defaultdict(list)
+    for item in observations:
+        grouped[item.group].append(item)
+    max_quantile_count = 0
+    for values in grouped.values():
+        max_quantile_count = max(max_quantile_count, assign_quantiles(values, requested_quantiles))
+    return max_quantile_count
 
 
 def factor_rank_map(observations: list[FactorObservation]) -> dict[str, float]:
@@ -310,6 +330,164 @@ def write_report(path: Path, rows: list[dict[str, Any]], holding_days: int, quan
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def clone_observations(observations: list[FactorObservation]) -> list[FactorObservation]:
+    return [
+        FactorObservation(
+            code=item.code,
+            name=item.name,
+            sector=item.sector,
+            group=item.group,
+            factor_value=item.factor_value,
+            forward_return=item.forward_return,
+            factor_quantile=item.factor_quantile,
+        )
+        for item in observations
+    ]
+
+
+def diagnostic_row(
+    *,
+    rebalance_date: date,
+    factor: str,
+    observations: list[FactorObservation],
+    total_rows: int,
+    missing_factor: int,
+    missing_forward: int,
+    top_frac: float,
+    quantiles: int,
+    previous_top_assets: set[str] | None = None,
+    previous_ranks: dict[str, float] | None = None,
+    group: str = "",
+) -> tuple[dict[str, Any], set[str], dict[str, float]]:
+    observations.sort(key=lambda item: item.factor_value, reverse=True)
+    bucket_size = max(1, int(math.ceil(len(observations) * top_frac))) if observations else 0
+    bucket_status = "ok"
+    if not bucket_size or len(observations) < bucket_size * 2:
+        bucket_status = "insufficient_non_overlapping_observations"
+        top: list[FactorObservation] = []
+        bottom: list[FactorObservation] = []
+    else:
+        top = observations[:bucket_size]
+        bottom = observations[-bucket_size:]
+    top_return = average([item.forward_return for item in top])
+    bottom_return = average([item.forward_return for item in bottom])
+    factor_values = [item.factor_value for item in observations]
+    forward_values = [item.forward_return for item in observations]
+    quantile_count = assign_quantiles(observations, quantiles)
+    quantile_returns = {
+        index: average([item.forward_return for item in observations if item.factor_quantile == index])
+        for index in range(1, quantile_count + 1)
+    }
+    bottom_quantile_return = quantile_returns.get(1)
+    top_quantile_return = quantile_returns.get(quantile_count)
+    top_bottom_quantile_spread = (
+        top_quantile_return - bottom_quantile_return
+        if top_quantile_return is not None and bottom_quantile_return is not None
+        else None
+    )
+    top_quantile_assets = {
+        item.code
+        for item in observations
+        if quantile_count and item.factor_quantile == quantile_count
+    }
+    top_quantile_turnover = None
+    if previous_top_assets is not None and top_quantile_assets:
+        top_quantile_turnover = 1.0 - len(top_quantile_assets & previous_top_assets) / len(top_quantile_assets)
+    current_ranks = factor_rank_map(observations)
+    rank_autocorr = None
+    if previous_ranks is not None:
+        overlap = sorted(set(previous_ranks) & set(current_ranks))
+        if len(overlap) >= 2:
+            rank_autocorr = pearson(
+                [previous_ranks[code] for code in overlap],
+                [current_ranks[code] for code in overlap],
+            )
+    row = {
+        "rebalance_date": rebalance_date,
+        "factor": factor,
+        "rows": total_rows,
+        "observations": len(observations),
+        "coverage": len(observations) / total_rows if total_rows else 0,
+        "pearson_ic": pearson(factor_values, forward_values),
+        "rank_ic": rank_ic(factor_values, forward_values),
+        "top_count": len(top),
+        "bottom_count": len(bottom),
+        "bucket_status": bucket_status,
+        "top_return": top_return,
+        "bottom_return": bottom_return,
+        "top_bottom_spread": top_return - bottom_return if top_return is not None and bottom_return is not None else None,
+        "quantile_count": quantile_count,
+        "quantile_status": "ok" if quantile_count >= 2 else "insufficient_quantile_observations",
+        "top_quantile_return": top_quantile_return,
+        "bottom_quantile_return": bottom_quantile_return,
+        "top_bottom_quantile_spread": top_bottom_quantile_spread,
+        "top_quantile_turnover": top_quantile_turnover,
+        "rank_autocorr": rank_autocorr,
+        **{f"quantile_{index}_return": quantile_returns.get(index) for index in range(1, quantiles + 1)},
+        "missing_factor": missing_factor,
+        "missing_forward_return": missing_forward,
+        "missing_factor_rate": missing_factor / total_rows if total_rows else 0,
+        "missing_forward_return_rate": missing_forward / total_rows if total_rows else 0,
+    }
+    if group:
+        row["group"] = group
+    return row, top_quantile_assets, current_ranks
+
+
+def grouped_diagnostic_rows(
+    *,
+    rebalance_date: date,
+    factor: str,
+    observations: list[FactorObservation],
+    group_totals: dict[str, int],
+    group_missing_factor: dict[str, int],
+    group_missing_forward: dict[str, int],
+    top_frac: float,
+    quantiles: int,
+) -> list[dict[str, Any]]:
+    observations_by_group: dict[str, list[FactorObservation]] = defaultdict(list)
+    for item in clone_observations(observations):
+        observations_by_group[item.group].append(item)
+    rows: list[dict[str, Any]] = []
+    for group in sorted(group_totals):
+        row, _assets, _ranks = diagnostic_row(
+            rebalance_date=rebalance_date,
+            factor=factor,
+            observations=observations_by_group.get(group, []),
+            total_rows=group_totals[group],
+            missing_factor=group_missing_factor.get(group, 0),
+            missing_forward=group_missing_forward.get(group, 0),
+            top_frac=top_frac,
+            quantiles=quantiles,
+            group=group,
+        )
+        rows.append(row)
+    return rows
+
+
+def write_grouped_report(path: Path, rows: list[dict[str, Any]], holding_days: int, quantiles: int, group_field: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Grouped Factor Forward Return Report",
+        "",
+        f"- holding days: {holding_days}",
+        f"- quantiles: {quantiles}",
+        f"- group field: {group_field}",
+        f"- rows: {len(rows)}",
+        "",
+        "| date | factor | group | observations | coverage | rank IC | top-bottom | missing factor | missing forward |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in sorted(rows, key=lambda item: (str(item["factor"]), str(item["rebalance_date"]), str(item["group"]))):
+        lines.append(
+            f"| {row['rebalance_date']} | {row['factor']} | {row['group']} | {row['observations']} | "
+            f"{pct(row.get('coverage'))} | {number(row.get('rank_ic'))} | "
+            f"{pct(row.get('top_bottom_spread'))} | {pct(row.get('missing_factor_rate'))} | "
+            f"{pct(row.get('missing_forward_return_rate'))} |"
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def main() -> int:
     args = build_parser().parse_args()
     start_date = parse_date(args.start_date, field_name="start_date")
@@ -324,6 +502,7 @@ def main() -> int:
     calendar = trading_calendar_from_rows(price_rows)
 
     output_rows: list[dict[str, Any]] = []
+    grouped_output_rows: list[dict[str, Any]] = []
     factor_data_rows: list[dict[str, Any]] = []
     previous_top_assets: dict[str, set[str]] = {}
     previous_factor_ranks: dict[str, dict[str, float]] = {}
@@ -338,6 +517,9 @@ def main() -> int:
             observations: list[FactorObservation] = []
             total_rows = 0
             missing_factor = 0
+            group_totals: dict[str, int] = defaultdict(int)
+            group_missing_factor: dict[str, int] = defaultdict(int)
+            group_missing_forward: dict[str, int] = defaultdict(int)
             missing_price_history = 0
             missing_start_price = 0
             missing_exit_price = 0
@@ -346,10 +528,13 @@ def main() -> int:
             price_tail_gap = 0
             for row in factor_rows:
                 total_rows += 1
+                group_value = str(row.get(args.group_field, "") or "").strip() or "UNKNOWN"
+                group_totals[group_value] += 1
                 factor_value = parse_float(row.get(factor))
                 code = row.get("code", "")
                 if factor_value is None:
                     missing_factor += 1
+                    group_missing_factor[group_value] += 1
                     continue
                 forward = future_return(price_index.get(code, []), calendar, rebalance_date, args.holding_days)
                 if forward.status == "ok" and forward.value is not None:
@@ -358,22 +543,29 @@ def main() -> int:
                             code=code,
                             name=row.get("name", ""),
                             sector=row.get("sector", ""),
+                            group=group_value,
                             factor_value=factor_value,
                             forward_return=forward.value,
                         )
                     )
                 elif forward.status == "price_tail_gap":
                     price_tail_gap += 1
+                    group_missing_forward[group_value] += 1
                 elif forward.status == "missing_price_history":
                     missing_price_history += 1
+                    group_missing_forward[group_value] += 1
                 elif forward.status == "missing_start_price":
                     missing_start_price += 1
+                    group_missing_forward[group_value] += 1
                 elif forward.status == "missing_exit_price":
                     missing_exit_price += 1
+                    group_missing_forward[group_value] += 1
                 elif forward.status == "insufficient_forward_window":
                     insufficient_forward_window += 1
+                    group_missing_forward[group_value] += 1
                 elif forward.status == "invalid_start_price":
                     invalid_start_price += 1
+                    group_missing_forward[group_value] += 1
             observations.sort(key=lambda item: item.factor_value, reverse=True)
             bucket_size = max(1, int(math.ceil(len(observations) * args.top_frac))) if observations else 0
             bucket_status = "ok"
@@ -388,7 +580,11 @@ def main() -> int:
             bottom_return = average([item.forward_return for item in bottom])
             factor_values = [item.factor_value for item in observations]
             forward_values = [item.forward_return for item in observations]
-            quantile_count = assign_quantiles(observations, args.quantiles)
+            quantile_count = (
+                assign_quantiles_by_group(observations, args.quantiles)
+                if args.group_neutral_quantiles
+                else assign_quantiles(observations, args.quantiles)
+            )
             quantile_returns = {
                 index: average([item.forward_return for item in observations if item.factor_quantile == index])
                 for index in range(1, quantile_count + 1)
@@ -429,6 +625,19 @@ def main() -> int:
                 + insufficient_forward_window
                 + invalid_start_price
             )
+            if args.grouped_diagnostics:
+                grouped_output_rows.extend(
+                    grouped_diagnostic_rows(
+                        rebalance_date=rebalance_date,
+                        factor=factor,
+                        observations=observations,
+                        group_totals=group_totals,
+                        group_missing_factor=group_missing_factor,
+                        group_missing_forward=group_missing_forward,
+                        top_frac=args.top_frac,
+                        quantiles=args.quantiles,
+                    )
+                )
             output_rows.append(
                 {
                     "rebalance_date": rebalance_date,
@@ -454,6 +663,8 @@ def main() -> int:
                     **{f"quantile_{index}_return": quantile_returns.get(index) for index in range(1, args.quantiles + 1)},
                     "missing_factor": missing_factor,
                     "missing_forward_return": missing_forward,
+                    "missing_factor_rate": missing_factor / total_rows if total_rows else 0,
+                    "missing_forward_return_rate": missing_forward / total_rows if total_rows else 0,
                     "missing_price_history": missing_price_history,
                     "missing_start_price": missing_start_price,
                     "missing_exit_price": missing_exit_price,
@@ -472,7 +683,7 @@ def main() -> int:
                         "factor_value": item.factor_value,
                         forward_column: item.forward_return,
                         "factor_quantile": item.factor_quantile,
-                        "group": item.sector,
+                        "group": item.group,
                         "sector": item.sector,
                         "name": item.name,
                         "forward_status": "ok",
@@ -483,7 +694,9 @@ def main() -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     output_path = args.out_dir / f"factor_forward_returns_{token}.csv"
     alphalens_path = args.alphalens_out or args.out_dir / f"alphalens_factor_data_{token}.csv"
+    grouped_path = args.out_dir / f"factor_forward_returns_grouped_{token}.csv"
     report_path = args.report_dir / f"factor_forward_returns_{token}.md"
+    grouped_report_path = args.report_dir / f"factor_forward_returns_grouped_{token}.md"
     fields = [
         "rebalance_date",
         "factor",
@@ -508,6 +721,8 @@ def main() -> int:
         *[f"quantile_{index}_return" for index in range(1, args.quantiles + 1)],
         "missing_factor",
         "missing_forward_return",
+        "missing_factor_rate",
+        "missing_forward_return_rate",
         "missing_price_history",
         "missing_start_price",
         "missing_exit_price",
@@ -516,6 +731,38 @@ def main() -> int:
         "invalid_start_price",
     ]
     write_csv(output_path, [{key: fmt(value) for key, value in row.items()} for row in output_rows], fields)
+    grouped_fields = [
+        "rebalance_date",
+        "factor",
+        "group",
+        "rows",
+        "observations",
+        "coverage",
+        "pearson_ic",
+        "rank_ic",
+        "top_count",
+        "bottom_count",
+        "bucket_status",
+        "top_return",
+        "bottom_return",
+        "top_bottom_spread",
+        "quantile_count",
+        "quantile_status",
+        "top_quantile_return",
+        "bottom_quantile_return",
+        "top_bottom_quantile_spread",
+        *[f"quantile_{index}_return" for index in range(1, args.quantiles + 1)],
+        "missing_factor",
+        "missing_forward_return",
+        "missing_factor_rate",
+        "missing_forward_return_rate",
+    ]
+    if args.grouped_diagnostics:
+        write_csv(
+            grouped_path,
+            [{key: fmt(value) for key, value in row.items()} for row in grouped_output_rows],
+            grouped_fields,
+        )
     factor_data_fields = [
         "date",
         "asset",
@@ -530,6 +777,8 @@ def main() -> int:
     ]
     write_csv(alphalens_path, [{key: fmt(value) for key, value in row.items()} for row in factor_data_rows], factor_data_fields)
     write_report(report_path, output_rows, args.holding_days, args.quantiles)
+    if args.grouped_diagnostics:
+        write_grouped_report(grouped_report_path, grouped_output_rows, args.holding_days, args.quantiles, args.group_field)
     if not args.no_manifest:
         append_manifest(
             args.manifest,
@@ -558,9 +807,32 @@ def main() -> int:
             date_range=f"{start_date.isoformat()}..{end_date.isoformat()}",
             notes=f"holding_days={args.holding_days}",
         )
+        if args.grouped_diagnostics:
+            append_manifest(
+                args.manifest,
+                source="derived_factor_forward_returns_grouped",
+                file_path=grouped_path,
+                vendor="local",
+                schema_version="factor_forward_returns_grouped_v0_1",
+                date_range=f"{start_date.isoformat()}..{end_date.isoformat()}",
+                notes=f"{len(grouped_output_rows)} rows; group_field={args.group_field}; holding_days={args.holding_days}",
+            )
+            append_manifest(
+                args.manifest,
+                source="derived_factor_forward_returns_grouped_report",
+                file_path=grouped_report_path,
+                vendor="local",
+                schema_version="factor_forward_returns_grouped_report_v0_1",
+                date_range=f"{start_date.isoformat()}..{end_date.isoformat()}",
+                notes=f"group_field={args.group_field}; holding_days={args.holding_days}",
+            )
     print(f"Wrote factor forward returns to {output_path}")
+    if args.grouped_diagnostics:
+        print(f"Wrote grouped factor forward returns to {grouped_path}")
     print(f"Wrote Alphalens-style factor data to {alphalens_path}")
     print(f"Wrote factor forward return report to {report_path}")
+    if args.grouped_diagnostics:
+        print(f"Wrote grouped factor forward return report to {grouped_report_path}")
     return 0
 
 

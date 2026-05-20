@@ -91,6 +91,9 @@ class FactorDiagnosticsTest(unittest.TestCase):
                     "custom_factor",
                     "--quantiles",
                     "2",
+                    "--grouped-diagnostics",
+                    "--group-field",
+                    "sector",
                     "--out-dir",
                     str(out_dir),
                     "--report-dir",
@@ -102,10 +105,13 @@ class FactorDiagnosticsTest(unittest.TestCase):
                 sys.argv = original_argv
 
             summary_rows = read_csv(out_dir / "factor_forward_returns_202601_202602_1d.csv")
+            grouped_rows = read_csv(out_dir / "factor_forward_returns_grouped_202601_202602_1d.csv")
             factor_data_rows = read_csv(out_dir / "alphalens_factor_data_202601_202602_1d.csv")
             report_text = (report_dir / "factor_forward_returns_202601_202602_1d.md").read_text(encoding="utf-8")
+            grouped_report_text = (report_dir / "factor_forward_returns_grouped_202601_202602_1d.md").read_text(encoding="utf-8")
 
             self.assertEqual(2, len(summary_rows))
+            self.assertEqual(4, len(grouped_rows))
             self.assertEqual("2", summary_rows[0]["quantile_count"])
             self.assertIn("quantile_1_return", summary_rows[0])
             self.assertIn("top_quantile_turnover", summary_rows[1])
@@ -117,8 +123,16 @@ class FactorDiagnosticsTest(unittest.TestCase):
             ][0]
             self.assertEqual("2", top_january["factor_quantile"])
             self.assertEqual("0.04", top_january["forward_return_1d"])
+            tech_january = [
+                row for row in grouped_rows
+                if row["rebalance_date"] == "2026-01-01" and row["group"] == "Tech"
+            ][0]
+            self.assertEqual("2", tech_january["observations"])
+            self.assertEqual("1", tech_january["coverage"])
+            self.assertEqual("1", tech_january["rank_ic"])
             self.assertIn("## Quantile Returns", report_text)
             self.assertIn("rank autocorrelation", report_text)
+            self.assertIn("group field: sector", grouped_report_text)
 
     def test_report_quantile_averages_ignore_insufficient_quantile_months(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

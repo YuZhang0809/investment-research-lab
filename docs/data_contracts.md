@@ -81,6 +81,29 @@ and comparison periods in one disclosure. When present, `period_end` and
 latest usable accounting row by disclosure timestamp, period end, and disclosure
 number, ignoring rows that do not contain factor inputs when a usable row exists.
 
+## External Factor Panels
+
+Optional external factor panels can be joined by the legacy factor stage through
+`external_factor_panels` config. Supported file formats are CSV and Parquet.
+Exact joins require the configured join keys, such as:
+
+```text
+rebalance_date,code,<external_field_1>,<external_field_2>
+rebalance_date,sector,<external_field_1>,<external_field_2>
+```
+
+As-of joins use a configured availability column:
+
+```text
+code,available_date,<external_field_1>,<external_field_2>
+sector,available_date,<external_field_1>,<external_field_2>
+```
+
+Supported external field dtypes are `float`, `int`, `string`, and `bool`.
+Duplicate contract keys fail by default. Joined fields are preserved in factor
+outputs and factor-score panels and may be used by configurable scoring and
+filters. Public committed panels must be synthetic.
+
 ## Manifest
 
 ```text
@@ -136,7 +159,9 @@ reuses the existing `build_factors.py` and `build_scores.py` semantics. The
 optional `duckdb` engine is a narrower optimized path for base Q/V/M factors and
 group-filter scoring; unsupported custom expressions and field-level filters
 must use the legacy engine. Group-relative transforms are also legacy-only until
-the DuckDB factor/score builder implements the same contract.
+the DuckDB factor/score builder implements the same contract. External factor
+panels are legacy-only until the DuckDB factor/score builder implements the same
+point-in-time join contract.
 
 Minimum output contract:
 
@@ -150,6 +175,7 @@ emits dynamic fields:
 ```text
 <output_prefix>_<field>_z
 <output_prefix>_<field>_rank_pct
+<external_factor_panel_field>
 ```
 
 Excluded rows may be present for auditability, but only `included_flag=true`
@@ -211,6 +237,19 @@ execution_price_unavailable_on_execution_date
 
 The broad `missing_execution_price_count` summary field remains as an aggregate
 for backward-compatible monitoring.
+
+When `reporting.execution_diagnostics.enabled` is true, summary rows also
+include:
+
+```text
+execution_diagnostics_enabled,high_cash_threshold,high_cash_flag,average_cash_weight,max_cash_weight,periods_with_cash_weight_above_threshold,target_slots_filled_ratio,selected_but_untradeable_count,selected_but_unaffordable_count,skipped_due_to_affordable_lot_count,skipped_due_to_adv_cap_count,buy_turnover,sell_turnover,cost_drag,tax_drag
+```
+
+The optional execution diagnostics CSV uses:
+
+```text
+rebalance_date,valuation_date,execution_price,cash_weight,high_cash_threshold,high_cash_flag,selected_count,target_holdings,holdings_count,target_slots_filled_ratio,selected_but_untradeable_count,selected_but_unaffordable_count,skipped_due_to_affordable_lot_count,skipped_due_to_adv_cap_count,pending_order_count,filled_order_count,skipped_orders,buy_turnover,sell_turnover,turnover,estimated_cost_base,cost_drag,tax_drag,cash_drag,selected_lot_value_min,selected_lot_value_median,selected_lot_value_max,skipped_lot_value_min,skipped_lot_value_median,skipped_lot_value_max,average_cash_weight,max_cash_weight,periods_with_cash_weight_above_threshold,realized_holdings_count_avg,realized_holdings_count_min,realized_holdings_count_max
+```
 
 ## Walk-Forward Sector Cap Outputs
 
@@ -277,6 +316,32 @@ cash_drag
 
 `cash_buffer_weight` reduces the targetable equity used for target sizing. It
 does not create synthetic fills or change research basket membership.
+
+## Factor Forward Return Diagnostics
+
+`analyze_factor_forward_returns.py` writes:
+
+```text
+factor_forward_returns_<range>_<holding>d.csv
+alphalens_factor_data_<range>_<holding>d.csv
+factor_forward_returns_<range>_<holding>d.md
+```
+
+When `--grouped-diagnostics` is enabled it also writes:
+
+```text
+factor_forward_returns_grouped_<range>_<holding>d.csv
+factor_forward_returns_grouped_<range>_<holding>d.md
+```
+
+Grouped rows use this core contract:
+
+```text
+rebalance_date,factor,group,rows,observations,coverage,pearson_ic,rank_ic,top_count,bottom_count,bucket_status,top_return,bottom_return,top_bottom_spread,quantile_count,quantile_status,top_quantile_return,bottom_quantile_return,top_bottom_quantile_spread,missing_factor,missing_forward_return,missing_factor_rate,missing_forward_return_rate
+```
+
+`group` is taken from `--group-field` and blank groups are reported as
+`UNKNOWN`. Public fixtures must remain synthetic.
 
 ## Run Ledger
 

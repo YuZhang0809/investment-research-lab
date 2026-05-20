@@ -11,6 +11,7 @@ from factor_expressions import (
     factor_definition_names,
     ordered_factor_definitions,
 )
+from external_factor_panels import external_factor_field_names, join_external_factor_panels
 from research_common import (
     append_manifest,
     load_yaml,
@@ -259,10 +260,12 @@ def fmt(value: Any) -> Any:
 
 def factor_output_fields(config: dict[str, Any] | None = None) -> list[str]:
     custom_fields = factor_definition_names(config)
+    external_fields = external_factor_field_names(config)
     return [
         *FACTOR_METADATA_FIELDS,
         *BASE_FACTOR_FIELDS,
         *[field for field in custom_fields if field not in BASE_FACTOR_FIELDS],
+        *external_fields,
         "missing_flags",
     ]
 
@@ -272,6 +275,14 @@ def validate_custom_factor_names(config: dict[str, Any] | None) -> None:
     duplicates = sorted(set(factor_definition_names(config)) & reserved)
     if duplicates:
         raise ValueError(f"Configured factor definitions duplicate reserved factor fields: {', '.join(duplicates)}")
+    external_duplicates = sorted(set(external_factor_field_names(config)) & reserved)
+    if external_duplicates:
+        raise ValueError(f"External factor panel fields duplicate reserved factor fields: {', '.join(external_duplicates)}")
+    custom_external_duplicates = sorted(set(factor_definition_names(config)) & set(external_factor_field_names(config)))
+    if custom_external_duplicates:
+        raise ValueError(
+            f"External factor panel fields duplicate configured factor definitions: {', '.join(custom_external_duplicates)}"
+        )
 
 
 def build_factors(
@@ -388,7 +399,7 @@ def build_factors(
                 "missing_flags": ";".join(missing_flags),
             }
         )
-    return factor_rows
+    return join_external_factor_panels(factor_rows, config)
 
 
 def main() -> int:
