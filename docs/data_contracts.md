@@ -135,12 +135,21 @@ from a validated rebalance price/universe panel. The default `legacy` engine
 reuses the existing `build_factors.py` and `build_scores.py` semantics. The
 optional `duckdb` engine is a narrower optimized path for base Q/V/M factors and
 group-filter scoring; unsupported custom expressions and field-level filters
-must use the legacy engine.
+must use the legacy engine. Group-relative transforms are also legacy-only until
+the DuckDB factor/score builder implements the same contract.
 
 Minimum output contract:
 
 ```text
 rebalance_date,code,included_flag,exclusion_reason,latest_price_date,latest_unadjusted_close,adjusted_close,median_60d_trading_value,return_12_1,return_6_1,has_fundamentals,fundamentals_available_date,fundamentals_available_time,period_end,document_type,operating_profit_to_total_assets,equity_to_assets,earnings_yield,book_to_market,quality_score,value_score,momentum_score,composite_score,qvm_score,rank_score,rank,candidate_rank,filter_status,filter_reasons,missing_flags,missing_score_components,<raw_factor>_z
+```
+
+When `strategy.group_relative_transforms` is configured, the legacy engine also
+emits dynamic fields:
+
+```text
+<output_prefix>_<field>_z
+<output_prefix>_<field>_rank_pct
 ```
 
 Excluded rows may be present for auditability, but only `included_flag=true`

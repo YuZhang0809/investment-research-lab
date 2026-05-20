@@ -19,7 +19,7 @@ from factor_expressions import (
     factor_definition_fingerprints,
     factor_definition_names,
 )
-from build_scores import STRATEGY_VERSION_CHOICES, build_scores
+from build_scores import STRATEGY_VERSION_CHOICES, build_scores, score_output_field
 from build_universe import build_universe_from_rows
 from research_common import (
     append_manifest,
@@ -1287,7 +1287,7 @@ def score_cache_fields(raw_factors: list[str]) -> list[str]:
         "filter_status",
         "filter_reasons",
         "missing_score_components",
-        *[f"{factor}_z" for factor in raw_factors],
+        *[score_output_field(factor) for factor in raw_factors],
     ]
 
 
@@ -1600,7 +1600,9 @@ def panel_zscore_factors(rows: list[dict[str, str]]) -> list[str]:
     factors: list[str] = []
     for row in rows:
         for field in row:
-            if field.endswith("_z") and field[:-2] not in factors:
+            if field.endswith("_rank_pct") and field not in factors:
+                factors.append(field)
+            elif field.endswith("_z") and field[:-2] not in factors:
                 factors.append(field[:-2])
     return factors
 

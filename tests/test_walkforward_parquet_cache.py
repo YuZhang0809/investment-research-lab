@@ -738,6 +738,114 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
                     engine="duckdb",
                 )
 
+            group_relative_config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            group_relative_config["strategy"]["group_relative_transforms"] = [
+                {
+                    "group_field": "sector",
+                    "fields": ["book_to_market"],
+                    "methods": ["zscore", "rank_pct"],
+                    "min_group_size": 3,
+                    "output_prefix": "sector_relative",
+                }
+            ]
+            with self.assertRaisesRegex(ValueError, "group_relative_transforms"):
+                build_factor_score_panel(
+                    config=group_relative_config,
+                    price_universe_panel_path=price_panel,
+                    prices_path=prices,
+                    fundamentals_path=fundamentals,
+                    start_date="2026-01-01",
+                    end_date="2026-03-31",
+                    frequency="monthly",
+                    strategy_version="qvm",
+                    out_path=temp / "unsupported_group_relative.parquet",
+                    output_format="parquet",
+                    engine="duckdb",
+                )
+
+    def test_legacy_factor_score_panel_keeps_group_relative_fields_and_excludes_nonincluded_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            fundamental_rows = read_csv(fundamentals)
+            for row in fundamental_rows:
+                if row["code"] == "1003":
+                    row["equity"] = "999999999999"
+            write_csv(fundamentals, fundamental_rows, list(fundamental_rows[0].keys()))
+
+            config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            config["strategy"]["group_relative_transforms"] = [
+                {
+                    "group_field": "sector",
+                    "fields": ["book_to_market"],
+                    "methods": ["zscore", "rank_pct"],
+                    "min_group_size": 3,
+                    "output_prefix": "sector_relative",
+                }
+            ]
+            config["strategy"]["scoring"] = {
+                "mode": "weighted_factors",
+                "weights": {"sector_relative_book_to_market_z": 1.0},
+            }
+            config["strategy"]["filters"] = []
+            for group in ["quality", "value", "momentum"]:
+                config.setdefault("factors", {}).setdefault(group, {})["variables"] = []
+
+            price_panel = temp / "price_panel.parquet"
+            factor_score_panel = temp / "factor_score_panel.parquet"
+            build_panel(
+                config=config,
+                listings_path=listings,
+                prices_path=prices,
+                fundamentals_path=fundamentals,
+                start_date="2026-03-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                input_format="csv",
+                out_path=price_panel,
+                output_format="parquet",
+            )
+            build_factor_score_panel(
+                config=config,
+                price_universe_panel_path=price_panel,
+                prices_path=prices,
+                fundamentals_path=fundamentals,
+                start_date="2026-03-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                strategy_version="configurable",
+                out_path=factor_score_panel,
+                output_format="parquet",
+                engine="legacy",
+            )
+
+            rows = read_csv(factor_score_panel)
+            self.assertIn("sector_relative_book_to_market_z", rows[0])
+            self.assertIn("sector_relative_book_to_market_rank_pct", rows[0])
+            included_zscores = [
+                parse_float(row["sector_relative_book_to_market_z"])
+                for row in rows
+                if row["rebalance_date"] == "2026-03-31" and row["included_flag"] == "true"
+            ]
+            included_zscores = [value for value in included_zscores if value is not None]
+            self.assertEqual(3, len(included_zscores))
+            self.assertAlmostEqual(0.0, sum(included_zscores), places=9)
+            excluded = [
+                row
+                for row in rows
+                if row["rebalance_date"] == "2026-03-31" and row["code"] == "1003"
+            ][0]
+            self.assertEqual("false", excluded["included_flag"])
+            self.assertEqual("", excluded["sector_relative_book_to_market_z"])
+
+            _universe_rows, _factor_rows, score_rows, _raw_factors = run_qvm_walkforward.factor_score_panel_stage_rows(
+                Namespace(factor_score_panel=factor_score_panel),
+                date(2026, 3, 31),
+                config,
+            )
+            self.assertIn("sector_relative_book_to_market_z", score_rows[0])
+            self.assertIn("sector_relative_book_to_market_rank_pct", score_rows[0])
+
     def test_duckdb_factor_score_panel_requires_complete_rebalance_dates(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
@@ -1278,6 +1386,55 @@ class WalkForwardParquetCacheTest(unittest.TestCase):
             self.assertEqual(fingerprints["inputs"], changed["inputs"])
             self.assertNotEqual(fingerprints["universe"], changed["universe"])
             self.assertNotEqual(fingerprints["factors"], changed["factors"])
+            self.assertNotEqual(fingerprints["scores"], changed["scores"])
+            self.assertNotEqual(fingerprints["run"], changed["run"])
+
+    def test_cache_fingerprint_includes_group_relative_transform_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            listings, prices, fundamentals = write_synthetic_walkforward_fixture(temp)
+            args = Namespace(
+                listings=listings,
+                prices=prices,
+                fundamentals=fundamentals,
+                strategy_version="configurable",
+                start_date="2026-03-01",
+                end_date="2026-03-31",
+                frequency="monthly",
+                execution_price="rebalance_close",
+                cost_scenario="base",
+                capital_jpy=5_000_000,
+                tax_rate=0.20315,
+            )
+            config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            config["strategy"]["group_relative_transforms"] = [
+                {
+                    "group_field": "sector",
+                    "fields": ["book_to_market"],
+                    "methods": ["zscore"],
+                    "min_group_size": 3,
+                    "output_prefix": "sector_relative",
+                }
+            ]
+            config["strategy"]["scoring"] = {
+                "mode": "weighted_factors",
+                "weights": {"sector_relative_book_to_market_z": 1.0},
+            }
+            changed_config = load_yaml(ROOT / "configs" / "qvm_v0_1.example.yml")
+            changed_config["strategy"]["group_relative_transforms"] = [
+                {
+                    "group_field": "sector",
+                    "fields": ["book_to_market"],
+                    "methods": ["zscore"],
+                    "min_group_size": 5,
+                    "output_prefix": "sector_relative",
+                }
+            ]
+            changed_config["strategy"]["scoring"] = config["strategy"]["scoring"]
+
+            fingerprints = run_qvm_walkforward.compute_cache_fingerprints(args, config)
+            changed = run_qvm_walkforward.compute_cache_fingerprints(args, changed_config)
+
             self.assertNotEqual(fingerprints["scores"], changed["scores"])
             self.assertNotEqual(fingerprints["run"], changed["run"])
 

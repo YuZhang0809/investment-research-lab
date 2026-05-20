@@ -158,6 +158,11 @@ def included_universe_rows(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
 def supported_duckdb_raw_factors(config: dict[str, Any], strategy_version: str) -> list[str]:
     if (config.get("factors", {}) or {}).get("definitions"):
         raise ValueError("DuckDB factor/score panel does not support factors.definitions yet. Use --engine legacy.")
+    if (config.get("strategy", {}) or {}).get("group_relative_transforms"):
+        raise ValueError(
+            "DuckDB factor/score panel does not support strategy.group_relative_transforms yet. "
+            "Use --engine legacy."
+        )
     if strategy_version not in {"qvm", "qv", "value_only", "weighted_groups"}:
         raise ValueError(f"DuckDB factor/score panel does not support strategy-version {strategy_version!r}.")
     quality_factors, value_factors, momentum_factors = strategy_factor_groups(config, strategy_version)

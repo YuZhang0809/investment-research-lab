@@ -130,6 +130,68 @@ strategy:
 synthetic research experiments and generic public engine mechanics. Real
 winning factor weights belong in a private workspace.
 
+## Group-Relative Transforms
+
+`strategy.group_relative_transforms` adds generic within-group factor
+standardization before filters and ranking. This is different from
+`portfolio.sector_cap`: sector caps constrain portfolio construction after
+ranks are read, while group-relative transforms change the score inputs.
+
+Example:
+
+```yaml
+strategy:
+  group_relative_transforms:
+    - group_field: sector
+      fields:
+        - book_to_market
+        - earnings_yield
+      methods:
+        - zscore
+        - rank_pct
+      min_group_size: 5
+      output_prefix: sector_relative
+  scoring:
+    mode: weighted_factors
+    weights:
+      sector_relative_book_to_market_z: 1.0
+```
+
+The transform groups rows by `rebalance_date + group_field` and only sees rows
+that are already included in the universe stage. Excluded panel rows are kept
+for auditability but do not affect group means, standard deviations, or ranks.
+Blank group values are treated as `UNKNOWN`.
+
+Output fields follow this pattern:
+
+```text
+<output_prefix>_<field>_z
+<output_prefix>_<field>_rank_pct
+```
+
+`zscore` uses the group's population standard deviation. If the group has fewer
+than `min_group_size` valid values, the field is missing. If the group's
+standard deviation is zero, the z-score is missing. `rank_pct` is in `[0, 1]`,
+where higher source factor values receive higher percentiles.
+
+Group-relative output fields can be referenced by `weighted_factors` and by
+field filters:
+
+```yaml
+strategy:
+  filters:
+    - field: sector_relative_book_to_market_rank_pct
+      rule: exclude_bottom_pct
+      pct: 20
+```
+
+`group_field` is not hard-coded to `sector`; it may be any discrete field that
+exists in the factor rows, such as `market`, `sector`, or a generic
+classification column. Missing group fields or missing source fields fail fast.
+The legacy factor/score path supports this primitive. The DuckDB factor-score
+builder currently rejects `strategy.group_relative_transforms` with a clear
+error instead of silently falling back or ignoring the transform.
+
 ## Filters
 
 Filters run after score calculation and before ranking. Filtered rows remain in

@@ -19,6 +19,7 @@ GROUP_SCORE_FIELDS = {
     "value": "value_score",
     "momentum": "momentum_score",
 }
+GROUP_RELATIVE_METHODS = {"zscore", "rank_pct"}
 STRATEGY_VERSION_CHOICES = [
     "value_only",
     "qv",
@@ -154,6 +155,159 @@ def configured_factor_weights(config: dict[str, Any]) -> dict[str, float]:
     return weights
 
 
+def direct_score_field(field: str) -> bool:
+    return field.endswith("_z") or field.endswith("_rank_pct")
+
+
+def score_output_field(factor: str) -> str:
+    return factor if direct_score_field(factor) else f"{factor}_z"
+
+
+def list_config_values(value: Any, *, field_name: str) -> list[str]:
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, list):
+        values = value
+    else:
+        raise ValueError(f"{field_name} must be a list.")
+    normalized = [str(item).strip() for item in values if str(item).strip()]
+    if not normalized:
+        raise ValueError(f"{field_name} must contain at least one value.")
+    return normalized
+
+
+def configured_group_relative_transforms(config: dict[str, Any]) -> list[dict[str, Any]]:
+    values = (config.get("strategy", {}) or {}).get("group_relative_transforms", []) or []
+    if not isinstance(values, list):
+        raise ValueError("strategy.group_relative_transforms must be a list.")
+    transforms: list[dict[str, Any]] = []
+    for index, item in enumerate(values, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"strategy.group_relative_transforms[{index}] must be a mapping.")
+        group_field = str(item.get("group_field", "") or "").strip()
+        if not group_field:
+            raise ValueError(f"strategy.group_relative_transforms[{index}].group_field is required.")
+        fields = list_config_values(item.get("fields"), field_name=f"strategy.group_relative_transforms[{index}].fields")
+        methods = list_config_values(item.get("methods"), field_name=f"strategy.group_relative_transforms[{index}].methods")
+        unknown_methods = sorted(set(methods) - GROUP_RELATIVE_METHODS)
+        if unknown_methods:
+            raise ValueError(
+                f"Unsupported group_relative_transforms method(s): {', '.join(unknown_methods)}"
+            )
+        min_group_size = int(item.get("min_group_size", 2) or 2)
+        if min_group_size < 1:
+            raise ValueError(f"strategy.group_relative_transforms[{index}].min_group_size must be at least 1.")
+        output_prefix = str(item.get("output_prefix", "group_relative") or "").strip()
+        if not output_prefix:
+            raise ValueError(f"strategy.group_relative_transforms[{index}].output_prefix is required.")
+        transforms.append(
+            {
+                "group_field": group_field,
+                "fields": fields,
+                "methods": methods,
+                "min_group_size": min_group_size,
+                "output_prefix": output_prefix,
+            }
+        )
+    return transforms
+
+
+def group_relative_output_field(output_prefix: str, field: str, method: str) -> str:
+    suffix = "z" if method == "zscore" else "rank_pct"
+    return f"{output_prefix}_{field}_{suffix}"
+
+
+def group_relative_output_fields(transforms: list[dict[str, Any]]) -> list[str]:
+    fields: list[str] = []
+    for transform in transforms:
+        output_prefix = str(transform["output_prefix"])
+        for field in transform["fields"]:
+            for method in transform["methods"]:
+                output_field = group_relative_output_field(output_prefix, field, method)
+                if output_field not in fields:
+                    fields.append(output_field)
+    return fields
+
+
+def validate_group_relative_transforms(transforms: list[dict[str, Any]], rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    columns = available_columns(rows)
+    missing: list[str] = []
+    for transform in transforms:
+        group_field = str(transform["group_field"])
+        if group_field not in columns:
+            missing.append(group_field)
+        for field in transform["fields"]:
+            if field not in columns:
+                missing.append(field)
+    if missing:
+        raise ValueError(f"Unknown group_relative_transforms field(s): {', '.join(sorted(set(missing)))}")
+
+
+def normalized_group_value(row: dict[str, Any], field: str) -> str:
+    value = str(row.get(field, "") or "").strip()
+    return value or "UNKNOWN"
+
+
+def rank_percentiles(values: list[tuple[dict[str, Any], float]]) -> dict[str, float]:
+    ordered = sorted(values, key=lambda item: (item[1], str(item[0].get("code", ""))))
+    if len(ordered) == 1:
+        return {str(ordered[0][0].get("code", "")): 1.0}
+    ranks: dict[str, float] = {}
+    index = 0
+    while index < len(ordered):
+        value = ordered[index][1]
+        end = index + 1
+        while end < len(ordered) and ordered[end][1] == value:
+            end += 1
+        average_position = (index + end - 1) / 2.0
+        percentile_value = average_position / (len(ordered) - 1)
+        for item_index in range(index, end):
+            ranks[str(ordered[item_index][0].get("code", ""))] = percentile_value
+        index = end
+    return ranks
+
+
+def compute_group_relative_values(
+    rows: list[dict[str, Any]],
+    transforms: list[dict[str, Any]],
+) -> dict[str, dict[str, float | None]]:
+    values_by_code: dict[str, dict[str, float | None]] = {str(row["code"]): {} for row in rows}
+    for transform in transforms:
+        group_field = str(transform["group_field"])
+        output_prefix = str(transform["output_prefix"])
+        min_group_size = int(transform["min_group_size"])
+        for field in transform["fields"]:
+            grouped: dict[tuple[str, str], list[tuple[dict[str, Any], float]]] = {}
+            for row in rows:
+                value = parse_float(row.get(field))
+                if value is None:
+                    continue
+                key = (str(row.get("rebalance_date", "")), normalized_group_value(row, group_field))
+                grouped.setdefault(key, []).append((row, value))
+            for _key, group_values in grouped.items():
+                if len(group_values) < min_group_size:
+                    continue
+                clean = [value for _row, value in group_values]
+                if "zscore" in transform["methods"]:
+                    output_field = group_relative_output_field(output_prefix, field, "zscore")
+                    center = mean(clean)
+                    scale = pstdev(clean) if len(clean) > 1 else 0.0
+                    if scale:
+                        for row, value in group_values:
+                            values_by_code[str(row["code"])][output_field] = (value - center) / scale
+                if "rank_pct" in transform["methods"]:
+                    output_field = group_relative_output_field(output_prefix, field, "rank_pct")
+                    for code, rank_value in rank_percentiles(group_values).items():
+                        values_by_code[code][output_field] = rank_value
+    for row in rows:
+        code = str(row["code"])
+        for output_field in group_relative_output_fields(transforms):
+            values_by_code[code].setdefault(output_field, None)
+    return values_by_code
+
+
 def configured_filters(config: dict[str, Any]) -> list[dict[str, Any]]:
     values = config.get("strategy", {}).get("filters", []) or []
     filters: list[dict[str, Any]] = []
@@ -222,9 +376,12 @@ def weighted_group_score(
 def weighted_factor_score(
     zscores: dict[str, float | None],
     weights: dict[str, float],
+    *,
+    direct_fields: set[str] | None = None,
 ) -> tuple[float | None, list[str]]:
+    direct_fields = direct_fields or set()
     missing = [
-        f"{factor}_z"
+        factor if factor in direct_fields else f"{factor}_z"
         for factor, weight in weights.items()
         if weight > 0 and zscores.get(factor) is None
     ]
@@ -241,10 +398,15 @@ def available_columns(rows: list[dict[str, Any]]) -> set[str]:
     return columns
 
 
-def validate_weighted_factor_fields(weights: dict[str, float], rows: list[dict[str, Any]]) -> None:
+def validate_weighted_factor_fields(
+    weights: dict[str, float],
+    rows: list[dict[str, Any]],
+    *,
+    extra_fields: set[str] | None = None,
+) -> None:
     if not rows:
         return
-    columns = available_columns(rows)
+    columns = available_columns(rows) | (extra_fields or set())
     unknown = sorted(factor for factor in weights if factor not in columns)
     if unknown:
         raise ValueError(f"Unknown weighted_factors field(s): {', '.join(unknown)}")
@@ -399,9 +561,22 @@ def build_scores(
     quality_factors, value_factors, momentum_factors = strategy_factor_groups(config, strategy_version)
     rows = factor_rows
     scoring_mode = configured_scoring_mode(config, strategy_version)
+    group_relative_transforms = configured_group_relative_transforms(config)
+    validate_group_relative_transforms(group_relative_transforms, rows)
+    group_relative_fields = group_relative_output_fields(group_relative_transforms)
     factor_weights = configured_factor_weights(config) if scoring_mode == "weighted_factors" else {}
-    validate_weighted_factor_fields(factor_weights, rows)
-    raw_factors = list(dict.fromkeys([*quality_factors, *value_factors, *momentum_factors, *factor_weights.keys()]))
+    validate_weighted_factor_fields(factor_weights, rows, extra_fields=set(group_relative_fields))
+    base_raw_factors = list(
+        dict.fromkeys(
+            [
+                *quality_factors,
+                *value_factors,
+                *momentum_factors,
+                *[factor for factor in factor_weights if factor not in group_relative_fields],
+            ]
+        )
+    )
+    raw_factors = list(dict.fromkeys([*base_raw_factors, *group_relative_fields]))
     group_weighted_mode = scoring_mode == "weighted_groups"
     factor_weighted_mode = scoring_mode == "weighted_factors"
     group_weights = configured_group_weights(config) if group_weighted_mode else {}
@@ -413,7 +588,7 @@ def build_scores(
     factor_stats: dict[str, dict[str, float]] = {}
     zscores_by_code: dict[str, dict[str, float | None]] = {row["code"]: {} for row in rows}
 
-    for factor in raw_factors:
+    for factor in base_raw_factors:
         values = [parse_float(row.get(factor)) for row in rows]
         clean = [value for value in values if value is not None]
         lower = percentile(clean, lower_pct) if clean else math.nan
@@ -430,6 +605,7 @@ def build_scores(
                 zscores_by_code[row["code"]][factor] = 0.0
             else:
                 zscores_by_code[row["code"]][factor] = (value - center) / scale
+    group_relative_by_code = compute_group_relative_values(rows, group_relative_transforms)
 
     quality_weight = float((factor_config.get("quality", {}) or {}).get("weight", 0.4))
     value_weight = float((factor_config.get("value", {}) or {}).get("weight", 0.4))
@@ -439,6 +615,8 @@ def build_scores(
     for row in rows:
         code = row["code"]
         z = zscores_by_code[code]
+        direct_scores = group_relative_by_code.get(code, {})
+        score_components = {**z, **direct_scores}
         quality = average_available([z.get(factor) for factor in quality_factors])
         value = average_available([z.get(factor) for factor in value_factors])
         momentum = average_available([z.get(factor) for factor in momentum_factors])
@@ -449,7 +627,11 @@ def build_scores(
             )
             qvm_score = composite_score
         elif factor_weighted_mode:
-            composite_score, missing_score_components = weighted_factor_score(z, factor_weights)
+            composite_score, missing_score_components = weighted_factor_score(
+                score_components,
+                factor_weights,
+                direct_fields=set(group_relative_fields),
+            )
             qvm_score = composite_score
         else:
             qvm_score, missing_score_components = strategy_score(
@@ -477,7 +659,12 @@ def build_scores(
                 "filter_status": "pass" if composite_score is not None else "missing_required_score",
                 "filter_reasons": "",
                 "missing_score_components": ";".join(missing_score_components),
-                **{f"{factor}_z": z.get(factor) for factor in raw_factors},
+                **{
+                    score_output_field(factor): (
+                        score_components.get(factor) if factor in group_relative_fields else z.get(factor)
+                    )
+                    for factor in raw_factors
+                },
             }
         )
 
@@ -530,7 +717,7 @@ def main() -> int:
         "filter_status",
         "filter_reasons",
         "missing_score_components",
-        *[f"{factor}_z" for factor in raw_factors],
+        *[score_output_field(factor) for factor in raw_factors],
     ]
     write_csv(output_path, [{key: fmt(value) for key, value in row.items()} for row in score_rows], fieldnames)
     if not args.no_manifest:

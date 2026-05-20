@@ -644,6 +644,90 @@ class TableIODuckDBTest(unittest.TestCase):
                 strategy_version="configurable",
             )
 
+    def test_group_relative_transform_computes_zscore_and_rank_within_groups(self) -> None:
+        config = group_relative_config(
+            weights={"sector_relative_book_to_market_z": 1.0},
+            filters=[],
+            min_group_size=3,
+        )
+        factors = [
+            relative_factor_row("1001", "Sector A", 1),
+            relative_factor_row("1002", "Sector A", 2),
+            relative_factor_row("1003", "Sector A", 3),
+            relative_factor_row("2001", "Sector B", 10),
+            relative_factor_row("2002", "Sector B", 20),
+            relative_factor_row("2003", "Sector B", 30),
+            relative_factor_row("3001", "Sector C", 100),
+            relative_factor_row("3002", "Sector C", 200),
+        ]
+
+        scores, raw_factors = build_scores(
+            config=config,
+            factor_rows=factors,
+            strategy_version="configurable",
+        )
+
+        self.assertIn("sector_relative_book_to_market_z", raw_factors)
+        self.assertIn("sector_relative_book_to_market_rank_pct", raw_factors)
+        by_code = {row["code"]: row for row in scores}
+        self.assertAlmostEqual(-1.224744871, by_code["1001"]["sector_relative_book_to_market_z"])
+        self.assertAlmostEqual(0.0, by_code["1002"]["sector_relative_book_to_market_z"])
+        self.assertAlmostEqual(1.224744871, by_code["1003"]["sector_relative_book_to_market_z"])
+        self.assertAlmostEqual(-1.224744871, by_code["2001"]["sector_relative_book_to_market_z"])
+        self.assertEqual(0.0, by_code["1001"]["sector_relative_book_to_market_rank_pct"])
+        self.assertEqual(0.5, by_code["1002"]["sector_relative_book_to_market_rank_pct"])
+        self.assertEqual(1.0, by_code["1003"]["sector_relative_book_to_market_rank_pct"])
+        self.assertIsNone(by_code["3001"]["sector_relative_book_to_market_z"])
+        self.assertIsNone(by_code["3001"]["sector_relative_book_to_market_rank_pct"])
+        self.assertEqual("sector_relative_book_to_market_z", by_code["3001"]["missing_score_components"])
+        ranked = sorted([row for row in scores if row["rank"]], key=lambda row: int(row["rank"]))
+        self.assertEqual(["1003", "2003", "1002", "2002", "1001", "2001"], [row["code"] for row in ranked])
+
+    def test_group_relative_outputs_can_drive_field_filters(self) -> None:
+        config = group_relative_config(
+            weights={"sector_relative_book_to_market_rank_pct": 1.0},
+            filters=[
+                {
+                    "field": "sector_relative_book_to_market_rank_pct",
+                    "rule": "exclude_below",
+                    "value": 0.5,
+                }
+            ],
+            min_group_size=3,
+        )
+        factors = [
+            relative_factor_row("1001", "Sector A", 1),
+            relative_factor_row("1002", "Sector A", 2),
+            relative_factor_row("1003", "Sector A", 3),
+            relative_factor_row("2001", "Sector B", 10),
+            relative_factor_row("2002", "Sector B", 20),
+            relative_factor_row("2003", "Sector B", 30),
+        ]
+
+        scores, _raw_factors = build_scores(
+            config=config,
+            factor_rows=factors,
+            strategy_version="configurable",
+        )
+
+        by_code = {row["code"]: row for row in scores}
+        self.assertEqual("filtered", by_code["1001"]["filter_status"])
+        self.assertEqual("sector_relative_book_to_market_rank_pct_below_0.5", by_code["1001"]["filter_reasons"])
+        ranked = sorted([row for row in scores if row["rank"]], key=lambda row: int(row["rank"]))
+        self.assertEqual(["1003", "2003", "1002", "2002"], [row["code"] for row in ranked])
+
+    def test_group_relative_transform_rejects_missing_group_or_factor_field(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unknown group_relative_transforms field"):
+            build_scores(
+                config=group_relative_config(
+                    weights={"sector_relative_book_to_market_z": 1.0},
+                    filters=[],
+                    group_field="missing_group",
+                ),
+                factor_rows=[relative_factor_row("1001", "Sector A", 1)],
+                strategy_version="configurable",
+            )
+
 
 def factor_row(code: str, value: float) -> dict[str, str]:
     return {
@@ -701,6 +785,47 @@ def grouped_factor_row(
         "book_to_market": text(value),
         "return_12_1": text(momentum),
         "return_6_1": text(momentum),
+    }
+
+
+def group_relative_config(
+    *,
+    weights: dict[str, float],
+    filters: list[dict[str, object]],
+    group_field: str = "sector",
+    min_group_size: int = 3,
+) -> dict[str, object]:
+    return {
+        "strategy": {
+            "group_relative_transforms": [
+                {
+                    "group_field": group_field,
+                    "fields": ["book_to_market"],
+                    "methods": ["zscore", "rank_pct"],
+                    "min_group_size": min_group_size,
+                    "output_prefix": "sector_relative",
+                }
+            ],
+            "scoring": {"mode": "weighted_factors", "weights": weights},
+            "filters": filters,
+        },
+        "factors": {
+            "winsorize": {"lower_pct": 0, "upper_pct": 100},
+            "quality": {"variables": []},
+            "value": {"variables": []},
+            "momentum": {"variables": []},
+        },
+    }
+
+
+def relative_factor_row(code: str, sector: str, book_to_market: float | None) -> dict[str, str]:
+    return {
+        "rebalance_date": "2026-03-31",
+        "code": code,
+        "name": f"Synthetic {code}",
+        "sector": sector,
+        "latest_unadjusted_close": "1000",
+        "book_to_market": "" if book_to_market is None else str(book_to_market),
     }
 
 

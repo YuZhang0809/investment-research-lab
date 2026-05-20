@@ -39,9 +39,10 @@ legacy: reference, validation, and fallback path; reuses build_factors.py and
 The DuckDB engine is intentionally narrower than the legacy engine. It supports
 the base Q/V/M raw factors and `qvm`, `qv`, `value_only`, and `weighted_groups`
 strategy versions with group-level filters. It rejects `factors.definitions`,
-`configurable` / `weighted_factors`, and field-level filters with a clear error.
-Use `--engine legacy` explicitly for those mechanics. There is no automatic
-fallback because a silent semantic change would make parity harder to trust.
+`strategy.group_relative_transforms`, `configurable` / `weighted_factors`, and
+field-level filters with a clear error. Use `--engine legacy` explicitly for
+those mechanics. There is no automatic fallback because a silent semantic change
+would make parity harder to trust.
 
 ## Usage
 
@@ -101,6 +102,15 @@ Affordable-lot filtering follows the same boundary. Use
 executable target allocation, then continue to the next ranked candidate. Do not
 rewrite factor-score panel ranks to remove expensive names.
 
+Group-relative factor transforms are factor/score rules, not portfolio
+construction rules. The legacy panel engine supports
+`strategy.group_relative_transforms` and writes fields such as
+`sector_relative_book_to_market_z` and
+`sector_relative_book_to_market_rank_pct` into the factor-score panel. These
+fields can then drive `weighted_factors` scoring or field filters. The DuckDB
+panel engine does not support this primitive yet and fails explicitly when it
+is configured.
+
 ## Minimum Fields
 
 The output keeps existing factor and score field names where possible:
@@ -138,6 +148,8 @@ filter_reasons
 missing_flags
 missing_score_components
 <raw_factor>_z
+<group_relative_output_prefix>_<field>_z
+<group_relative_output_prefix>_<field>_rank_pct
 ```
 
 Configured factor definitions and configurable scoring modes are available in

@@ -108,7 +108,8 @@ factor/score panels. `--engine legacy` is the reference, validation, and
 fallback implementation; the CLI default remains legacy for backward
 compatibility. DuckDB supports `qvm`, `qv`, `value_only`, and `weighted_groups`
 with group filters, and it rejects custom factor expressions,
-`weighted_factors`, and field filters instead of falling back silently.
+`strategy.group_relative_transforms`, `weighted_factors`, and field filters
+instead of falling back silently.
 
 Step C consumes the factor/score panel directly:
 
@@ -218,6 +219,55 @@ optional. `cash_buffer_weight` reserves part of equity before equal-weight targe
 sizing. Excluded names are reported through `affordability_excluded` and
 `zero_lot_avoided`; normal cash diagnostics still report `cash_drag` when cash
 is high after executable targets and fills.
+
+### Group-Relative Scoring
+
+Group-relative transforms are generic factor/score mechanics. They run before
+ranking and can express within-group comparisons such as "high value relative to
+the same sector". They are not a substitute for `portfolio.sector_cap`, which is
+a later portfolio construction constraint.
+
+Config example:
+
+```yaml
+strategy:
+  group_relative_transforms:
+    - group_field: sector
+      fields:
+        - book_to_market
+      methods:
+        - zscore
+        - rank_pct
+      min_group_size: 5
+      output_prefix: sector_relative
+  scoring:
+    mode: weighted_factors
+    weights:
+      sector_relative_book_to_market_z: 1.0
+```
+
+For now this primitive is supported by the legacy factor/score path:
+
+```powershell
+python scripts\build_rebalance_factor_score_panel.py `
+  --config configs\group_relative_transform.example.yml `
+  --price-universe-panel <rebalance_price_universe_panel.parquet> `
+  --prices <prices.csv> `
+  --fundamentals <fundamentals.csv> `
+  --start-date 2026-01-01 `
+  --end-date 2026-12-31 `
+  --frequency monthly `
+  --strategy-version configurable `
+  --engine legacy `
+  --out <rebalance_factor_score_panel.parquet> `
+  --output-format parquet
+```
+
+The resulting panel keeps fields such as
+`sector_relative_book_to_market_z` and
+`sector_relative_book_to_market_rank_pct`, and
+`run_qvm_walkforward.py --factor-score-panel` can consume them through the
+normal score rows. DuckDB currently rejects this config explicitly.
 
 ## Validation Workflow
 
