@@ -190,6 +190,80 @@ class P2CorrectnessTest(unittest.TestCase):
         self.assertEqual({}, {item.code: item.group for item in result.blocked_candidates})
         self.assertEqual({"Prime": 1, "Standard": 1}, result.selected_group_counts)
 
+    def test_affordable_lot_filter_skips_expensive_top_ranked_candidate_and_backfills(self) -> None:
+        scores = [
+            {"code": "1001", "rank": "1", "latest_unadjusted_close": "700"},
+            {"code": "1002", "rank": "2", "latest_unadjusted_close": "400"},
+            {"code": "1003", "rank": "3", "latest_unadjusted_close": "300"},
+        ]
+        universe_by_code = {
+            code: {"code": code, "lot_size": "100"}
+            for code in ["1001", "1002", "1003"]
+        }
+        config = {
+            "portfolio": {
+                "executable_portfolio": {"target_holdings_min": 2, "target_holdings_max": 2, "lot_size": 100},
+                "buy_rule": {"rank_top_pct": 100, "rank_top_n": 100},
+                "hold_rule": {"rank_top_pct": 100, "rank_top_n": 100},
+                "affordable_lot_filter": {
+                    "enabled": True,
+                    "max_single_lot_weight": 0.8,
+                    "cash_buffer_weight": 0.0,
+                },
+            }
+        }
+
+        result = select_codes_detailed(
+            scores,
+            holdings={},
+            config=config,
+            universe_by_code=universe_by_code,
+            equity=100_000,
+        )
+
+        self.assertEqual(["1002", "1003"], result.selected_codes)
+        self.assertEqual(["1001", "1002"], result.research_codes)
+        self.assertEqual(["1001"], [item.code for item in result.affordability_excluded])
+        self.assertEqual("zero_lot_avoided", result.affordability_excluded[0].reason)
+
+    def test_affordable_lot_filter_applies_single_lot_weight_bounds(self) -> None:
+        scores = [
+            {"code": "1001", "rank": "1", "latest_unadjusted_close": "900"},
+            {"code": "1002", "rank": "2", "latest_unadjusted_close": "50"},
+            {"code": "1003", "rank": "3", "latest_unadjusted_close": "300"},
+        ]
+        universe_by_code = {
+            code: {"code": code, "lot_size": "100"}
+            for code in ["1001", "1002", "1003"]
+        }
+        config = {
+            "portfolio": {
+                "executable_portfolio": {"target_holdings_min": 1, "target_holdings_max": 1, "lot_size": 100},
+                "buy_rule": {"rank_top_pct": 100, "rank_top_n": 100},
+                "hold_rule": {"rank_top_pct": 100, "rank_top_n": 100},
+                "affordable_lot_filter": {
+                    "enabled": True,
+                    "max_single_lot_weight": 0.8,
+                    "min_single_lot_weight": 0.1,
+                    "cash_buffer_weight": 0.0,
+                },
+            }
+        }
+
+        result = select_codes_detailed(
+            scores,
+            holdings={},
+            config=config,
+            universe_by_code=universe_by_code,
+            equity=100_000,
+        )
+
+        self.assertEqual(["1003"], result.selected_codes)
+        self.assertEqual(
+            ["above_max_single_lot_weight", "below_min_single_lot_weight"],
+            [item.reason for item in result.affordability_excluded],
+        )
+
     def test_walkforward_writes_sector_cap_failures_and_exposure(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
@@ -322,6 +396,136 @@ class P2CorrectnessTest(unittest.TestCase):
             self.assertEqual("Tech", exposures[0]["group"])
             self.assertEqual("1", exposures[0]["selected_count"])
 
+    def test_walkforward_affordable_lot_filter_reports_and_avoids_zero_lot_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            prices = temp / "prices.csv"
+            listings = temp / "listings.csv"
+            fundamentals = temp / "fundamentals.csv"
+            config_path = temp / "affordable_lot.yml"
+            out_dir = temp / "out"
+            report_dir = temp / "reports"
+
+            config_text = (ROOT / "configs" / "qvm_v0_1.example.yml").read_text(encoding="utf-8")
+            config_text = config_text.replace("  affordable_lot_filter:\n    enabled: false", "  affordable_lot_filter:\n    enabled: true", 1)
+            config_text = config_text.replace("max_single_lot_weight: 0.05", "max_single_lot_weight: 0.8", 1)
+            config_text = config_text.replace("cash_buffer_weight: 0.02", "cash_buffer_weight: 0.1", 1)
+            config_text = config_text.replace("spread_multiplier: 0.5", "spread_multiplier: 0.0", 1)
+            config_path.write_text(config_text, encoding="utf-8")
+            write_csv(
+                prices,
+                [
+                    {"date": "2026-01-31", "code": "1001", "unadjusted_open": 460, "unadjusted_close": 460, "adjusted_close": 460, "trading_value": 10_000_000, "price_limit_flag": "false"},
+                    {"date": "2026-01-31", "code": "1002", "unadjusted_open": 400, "unadjusted_close": 400, "adjusted_close": 400, "trading_value": 10_000_000, "price_limit_flag": "false"},
+                    {"date": "2026-01-31", "code": "1003", "unadjusted_open": 300, "unadjusted_close": 300, "adjusted_close": 300, "trading_value": 10_000_000, "price_limit_flag": "false"},
+                ],
+                ["date", "code", "unadjusted_open", "unadjusted_close", "adjusted_close", "trading_value", "price_limit_flag"],
+            )
+            write_csv(
+                listings,
+                [
+                    {"code": code, "listed_date": "2020-01-01", "delisted_date": ""}
+                    for code in ["1001", "1002", "1003"]
+                ],
+                ["code", "listed_date", "delisted_date"],
+            )
+            write_csv(fundamentals, [], ["code"])
+
+            original_argv = sys.argv[:]
+            original_run_stages = run_qvm_walkforward.run_stages
+
+            def fake_run_stages(args, rebalance_date):
+                suffix = rebalance_date.strftime("%Y%m%d")
+                stage = temp / "stage"
+                universe = stage / f"universe_{suffix}.csv"
+                factors = stage / f"factors_{suffix}.csv"
+                scores = stage / f"scores_{suffix}.csv"
+                write_csv(
+                    universe,
+                    [
+                        {"code": "1001", "lot_size": "100", "median_60d_trading_value": "10000000"},
+                        {"code": "1002", "lot_size": "100", "median_60d_trading_value": "10000000"},
+                        {"code": "1003", "lot_size": "100", "median_60d_trading_value": "10000000"},
+                    ],
+                    ["code", "lot_size", "median_60d_trading_value"],
+                )
+                write_csv(factors, [{"code": "1001"}, {"code": "1002"}, {"code": "1003"}], ["code"])
+                write_csv(
+                    scores,
+                    [
+                        {"code": "1001", "rank": "1", "latest_unadjusted_close": "460"},
+                        {"code": "1002", "rank": "2", "latest_unadjusted_close": "400"},
+                        {"code": "1003", "rank": "3", "latest_unadjusted_close": "300"},
+                    ],
+                    ["code", "rank", "latest_unadjusted_close"],
+                )
+                return universe, factors, scores
+
+            try:
+                run_qvm_walkforward.run_stages = fake_run_stages
+                sys.argv = [
+                    "run_qvm_walkforward.py",
+                    "--config",
+                    str(config_path),
+                    "--listings",
+                    str(listings),
+                    "--prices",
+                    str(prices),
+                    "--fundamentals",
+                    str(fundamentals),
+                    "--start-date",
+                    "2026-01-31",
+                    "--end-date",
+                    "2026-01-31",
+                    "--frequency",
+                    "monthly",
+                    "--execution-price",
+                    "rebalance_close",
+                    "--cost-scenario",
+                    "optimistic",
+                    "--capital-jpy",
+                    "100000",
+                    "--target-holdings",
+                    "2",
+                    "--out-dir",
+                    str(out_dir),
+                    "--report-dir",
+                    str(report_dir),
+                    "--no-manifest",
+                    "--skip-stage-manifest",
+                    "--run-label",
+                    "affordable_lot_test",
+                ]
+
+                self.assertEqual(0, run_qvm_walkforward.main())
+            finally:
+                run_qvm_walkforward.run_stages = original_run_stages
+                sys.argv = original_argv
+
+            with (out_dir / "qvm_walkforward_summary_affordable_lot_test_202601_202601.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as file:
+                summary = list(csv.DictReader(file))
+            with (out_dir / "qvm_walkforward_failure_cases_affordable_lot_test_202601_202601.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as file:
+                failures = list(csv.DictReader(file))
+            with (out_dir / "qvm_walkforward_trades_affordable_lot_test_202601_202601.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as file:
+                trades = list(csv.DictReader(file))
+
+            self.assertEqual("True", summary[-1]["affordable_lot_filter_enabled"])
+            self.assertEqual("1", summary[-1]["affordability_excluded"])
+            self.assertEqual("1", summary[-1]["zero_lot_avoided"])
+            self.assertEqual("0", summary[-1]["zero_lot_targets"])
+            self.assertEqual("2", summary[-1]["selected_count"])
+            self.assertEqual({"1002", "1003"}, {row["code"] for row in trades if row["side"] == "BUY"})
+            failure_types = {row["failure_type"] for row in failures}
+            self.assertIn("affordability_excluded", failure_types)
+            self.assertIn("zero_lot_avoided", failure_types)
+            self.assertIn("cash_drag", failure_types)
+
     def test_sector_exposure_actual_violation_uses_signal_date(self) -> None:
         result = run_qvm_walkforward.SelectionResult(
             selected_codes=["1001"],
@@ -333,7 +537,9 @@ class P2CorrectnessTest(unittest.TestCase):
                 group_field="sector",
                 max_names_per_group=1,
             ),
+            affordable_lot_filter=run_qvm_walkforward.AffordableLotFilterConfig(),
             blocked_candidates=[],
+            affordability_excluded=[],
             unfilled_slots=0,
             selected_group_counts={"Tech": 1},
         )

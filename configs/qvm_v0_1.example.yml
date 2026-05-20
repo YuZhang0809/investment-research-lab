@@ -93,6 +93,11 @@ portfolio:
     group_field: sector
     mode: name_count
     max_names_per_group: 9
+  affordable_lot_filter:
+    enabled: false
+    max_single_lot_weight: 0.05
+    min_single_lot_weight: null
+    cash_buffer_weight: 0.02
   max_single_name_weight: 0.1
   report_sector_exposure: true
 

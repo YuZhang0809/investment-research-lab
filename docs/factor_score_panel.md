@@ -96,6 +96,11 @@ buffer and changes turnover, cost, and tax behavior. The research basket remains
 the uncapped top-ranked basket unless a future explicit research-basket cap is
 added.
 
+Affordable-lot filtering follows the same boundary. Use
+`portfolio.affordable_lot_filter` to skip names whose minimum lot cannot fit the
+executable target allocation, then continue to the next ranked candidate. Do not
+rewrite factor-score panel ranks to remove expensive names.
+
 ## Minimum Fields
 
 The output keeps existing factor and score field names where possible:

@@ -195,6 +195,30 @@ below-target portfolio when the cap is too strict, and writes sector-cap fields
 to summary/failure-case outputs. `target_weight` is reserved for a later
 implementation and currently fails clearly instead of applying partial logic.
 
+### Affordable Lot Filter
+
+The affordable-lot filter is a generic portfolio construction control. It runs
+after ranks are loaded and before target construction, so expensive high-ranked
+names do not consume executable selected slots when one lot cannot fit the
+target allocation.
+
+Config example:
+
+```yaml
+portfolio:
+  affordable_lot_filter:
+    enabled: true
+    max_single_lot_weight: 0.05
+    min_single_lot_weight: null
+    cash_buffer_weight: 0.02
+```
+
+`max_single_lot_weight` is required when enabled. `min_single_lot_weight` is
+optional. `cash_buffer_weight` reserves part of equity before equal-weight target
+sizing. Excluded names are reported through `affordability_excluded` and
+`zero_lot_avoided`; normal cash diagnostics still report `cash_drag` when cash
+is high after executable targets and fills.
+
 ## Validation Workflow
 
 Legacy remains the reference path for audit and fallback. Use sampled windows

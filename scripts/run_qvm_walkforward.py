@@ -73,11 +73,32 @@ class SectorCapConfig:
 
 
 @dataclass
+class AffordableLotFilterConfig:
+    enabled: bool = False
+    max_single_lot_weight: float | None = None
+    min_single_lot_weight: float | None = None
+    cash_buffer_weight: float = 0.0
+
+
+@dataclass
 class SectorCapBlockedCandidate:
     code: str
     group: str
     rank: int
     phase: str
+
+
+@dataclass
+class AffordabilityExcludedCandidate:
+    code: str
+    rank: int
+    phase: str
+    reason: str
+    lot_size: int | None
+    price: float | None
+    single_lot_value: float | None
+    single_lot_weight: float | None
+    target_value: float | None
 
 
 EXECUTION_PRICE_FAILURE_TYPES = {
@@ -95,7 +116,9 @@ class SelectionResult:
     research_codes: list[str]
     target_count: int
     sector_cap: SectorCapConfig
+    affordable_lot_filter: AffordableLotFilterConfig
     blocked_candidates: list[SectorCapBlockedCandidate]
+    affordability_excluded: list[AffordabilityExcludedCandidate]
     unfilled_slots: int
     selected_group_counts: dict[str, int]
 
@@ -682,6 +705,51 @@ def sector_cap_limit_value(cap: SectorCapConfig) -> str:
     return ""
 
 
+def affordable_lot_filter_config(config: dict[str, Any]) -> AffordableLotFilterConfig:
+    raw = (config.get("portfolio", {}) or {}).get("affordable_lot_filter", {}) or {}
+    enabled = bool(parse_bool(raw.get("enabled"), default=False))
+    if not enabled:
+        return AffordableLotFilterConfig()
+    max_weight = parse_float(raw.get("max_single_lot_weight"))
+    if max_weight is None or max_weight <= 0 or max_weight > 1:
+        raise ValueError("portfolio.affordable_lot_filter.max_single_lot_weight must be in (0, 1].")
+    min_weight = parse_float(raw.get("min_single_lot_weight"))
+    if min_weight is not None and (min_weight < 0 or min_weight > 1):
+        raise ValueError("portfolio.affordable_lot_filter.min_single_lot_weight must be in [0, 1].")
+    if min_weight is not None and min_weight > max_weight:
+        raise ValueError(
+            "portfolio.affordable_lot_filter.min_single_lot_weight cannot exceed max_single_lot_weight."
+        )
+    cash_buffer = parse_float(raw.get("cash_buffer_weight"), default=0.0) or 0.0
+    if cash_buffer < 0 or cash_buffer >= 1:
+        raise ValueError("portfolio.affordable_lot_filter.cash_buffer_weight must be in [0, 1).")
+    return AffordableLotFilterConfig(
+        enabled=True,
+        max_single_lot_weight=max_weight,
+        min_single_lot_weight=min_weight,
+        cash_buffer_weight=cash_buffer,
+    )
+
+
+def targetable_equity(equity: float, affordable_filter: AffordableLotFilterConfig) -> float:
+    buffer_weight = affordable_filter.cash_buffer_weight if affordable_filter.enabled else 0.0
+    return max(equity * (1.0 - buffer_weight), 0.0)
+
+
+def candidate_rebalance_price(
+    code: str,
+    row: dict[str, Any],
+    universe: dict[str, Any],
+    price_index: dict[str, list[PricePoint]] | None,
+    rebalance_date: date | None,
+) -> float | None:
+    if price_index is not None and rebalance_date is not None:
+        point = price_on_date(price_index, code, rebalance_date)
+        if point is not None:
+            return point.unadjusted_close
+    return parse_float(row.get("latest_unadjusted_close")) or parse_float(universe.get("latest_unadjusted_close"))
+
+
 def security_group(row: dict[str, Any] | None, group_field: str) -> str:
     value = (row or {}).get(group_field, "")
     text = str(value or "").strip()
@@ -706,6 +774,9 @@ def select_codes_detailed(
     holdings: dict[str, float],
     config: dict[str, Any],
     universe_by_code: dict[str, dict[str, Any]] | None = None,
+    price_index: dict[str, list[PricePoint]] | None = None,
+    rebalance_date: date | None = None,
+    equity: float | None = None,
 ) -> SelectionResult:
     ranked = sorted(
         [row for row in scores if parse_int(row.get("rank")) is not None],
@@ -715,12 +786,20 @@ def select_codes_detailed(
     row_by_code = {row["code"]: row for row in ranked}
     universe_count = len(ranked)
     cap = sector_cap_config(config)
+    affordable_filter = affordable_lot_filter_config(config)
     if not ranked:
-        return SelectionResult([], [], 0, cap, [], 0, {})
+        return SelectionResult([], [], 0, cap, affordable_filter, [], [], 0, {})
 
     executable_config = config["portfolio"].get("executable_portfolio", {})
     target_count = min(int(executable_config.get("target_holdings_max", 30)), universe_count)
     target_count = max(min(int(executable_config.get("target_holdings_min", 1)), universe_count), target_count)
+    if affordable_filter.enabled and equity is None:
+        raise ValueError("portfolio.affordable_lot_filter requires portfolio equity for selection.")
+    target_value = (
+        targetable_equity(float(equity or 0.0), affordable_filter) / target_count
+        if affordable_filter.enabled and target_count
+        else None
+    )
 
     buy_rule = config["portfolio"].get("buy_rule", {})
     hold_rule = config["portfolio"].get("hold_rule", {})
@@ -730,12 +809,82 @@ def select_codes_detailed(
     research_codes = [row["code"] for row in ranked[:target_count]]
     kept = [code for code, shares in holdings.items() if shares > 0 and rank_by_code.get(code, 999999) <= hold_limit]
     kept.sort(key=lambda code: rank_by_code.get(code, 999999))
+    universe_by_code = universe_by_code or {}
+    affordability_excluded: list[AffordabilityExcludedCandidate] = []
+
+    def affordable_exclusion(code: str, phase: str) -> AffordabilityExcludedCandidate | None:
+        if not affordable_filter.enabled:
+            return None
+        universe = universe_by_code.get(code, {})
+        row = row_by_code.get(code, {})
+        lot = parse_int(universe.get("lot_size"), default=parse_int(executable_config.get("lot_size"), default=100))
+        price = candidate_rebalance_price(code, row, universe, price_index, rebalance_date)
+        if lot is None or lot <= 0 or price is None or price <= 0:
+            return AffordabilityExcludedCandidate(
+                code=code,
+                rank=rank_by_code.get(code, 999999),
+                phase=phase,
+                reason="missing_lot_or_price",
+                lot_size=lot,
+                price=price,
+                single_lot_value=None,
+                single_lot_weight=None,
+                target_value=target_value,
+            )
+        single_lot_value = lot * price
+        single_lot_weight = single_lot_value / float(equity or 0.0) if equity and equity > 0 else None
+        reason = ""
+        if single_lot_weight is not None and affordable_filter.max_single_lot_weight is not None:
+            if single_lot_weight > affordable_filter.max_single_lot_weight:
+                reason = "above_max_single_lot_weight"
+        if (
+            not reason
+            and single_lot_weight is not None
+            and affordable_filter.min_single_lot_weight is not None
+            and single_lot_weight < affordable_filter.min_single_lot_weight
+        ):
+            reason = "below_min_single_lot_weight"
+        if not reason and target_value is not None and single_lot_value > target_value:
+            reason = "zero_lot_avoided"
+        if not reason:
+            return None
+        return AffordabilityExcludedCandidate(
+            code=code,
+            rank=rank_by_code.get(code, 999999),
+            phase=phase,
+            reason=reason,
+            lot_size=lot,
+            price=price,
+            single_lot_value=single_lot_value,
+            single_lot_weight=single_lot_weight,
+            target_value=target_value,
+        )
+
+    def is_affordable(code: str, phase: str) -> bool:
+        exclusion = affordable_exclusion(code, phase)
+        if exclusion is None:
+            return True
+        affordability_excluded.append(exclusion)
+        return False
+
     if not cap.enabled:
-        selected = list(kept[:target_count])
+        selected: list[str] = []
+        dropped_held_codes: set[str] = set()
+        for code in kept:
+            if len(selected) >= target_count:
+                break
+            if not is_affordable(code, "hold"):
+                dropped_held_codes.add(code)
+                continue
+            selected.append(code)
         selected_set = set(selected)
         for row in ranked[:buy_limit]:
             code = row["code"]
+            if code in dropped_held_codes:
+                continue
             if code in selected_set:
+                continue
+            if not is_affordable(code, "buy"):
                 continue
             selected.append(code)
             selected_set.add(code)
@@ -746,8 +895,10 @@ def select_codes_detailed(
             research_codes=research_codes,
             target_count=target_count,
             sector_cap=cap,
+            affordable_lot_filter=affordable_filter,
             blocked_candidates=[],
-            unfilled_slots=0,
+            affordability_excluded=affordability_excluded,
+            unfilled_slots=max(target_count - len(selected), 0) if affordability_excluded else 0,
             selected_group_counts={},
         )
 
@@ -756,7 +907,6 @@ def select_codes_detailed(
     group_counts: dict[str, int] = defaultdict(int)
     blocked: list[SectorCapBlockedCandidate] = []
     dropped_held_codes: set[str] = set()
-    universe_by_code = universe_by_code or {}
 
     def can_add(code: str) -> tuple[bool, str]:
         group = security_group_for_code(
@@ -777,6 +927,9 @@ def select_codes_detailed(
     for code in kept:
         if len(selected) >= target_count:
             break
+        if not is_affordable(code, "hold"):
+            dropped_held_codes.add(code)
+            continue
         allowed, group = can_add(code)
         if allowed:
             add_code(code, group)
@@ -792,6 +945,8 @@ def select_codes_detailed(
             continue
         if len(selected) >= target_count:
             break
+        if not is_affordable(code, "buy"):
+            continue
         allowed, group = can_add(code)
         if not allowed:
             blocked.append(SectorCapBlockedCandidate(code, group, rank_by_code.get(code, 999999), "buy"))
@@ -800,13 +955,15 @@ def select_codes_detailed(
         if len(selected) >= target_count:
             break
 
-    unfilled_slots = max(target_count - len(selected), 0) if blocked else 0
+    unfilled_slots = max(target_count - len(selected), 0) if blocked or affordability_excluded else 0
     return SelectionResult(
         selected_codes=selected,
         research_codes=research_codes,
         target_count=target_count,
         sector_cap=cap,
+        affordable_lot_filter=affordable_filter,
         blocked_candidates=blocked,
+        affordability_excluded=affordability_excluded,
         unfilled_slots=unfilled_slots,
         selected_group_counts=dict(group_counts),
     )
@@ -817,8 +974,19 @@ def select_codes(
     holdings: dict[str, float],
     config: dict[str, Any],
     universe_by_code: dict[str, dict[str, Any]] | None = None,
+    price_index: dict[str, list[PricePoint]] | None = None,
+    rebalance_date: date | None = None,
+    equity: float | None = None,
 ) -> tuple[list[str], list[str]]:
-    result = select_codes_detailed(scores, holdings, config, universe_by_code)
+    result = select_codes_detailed(
+        scores,
+        holdings,
+        config,
+        universe_by_code,
+        price_index=price_index,
+        rebalance_date=rebalance_date,
+        equity=equity,
+    )
     return result.selected_codes, result.research_codes
 
 
@@ -840,10 +1008,12 @@ def build_targets(
     price_index: dict[str, list[PricePoint]],
     rebalance_date: date,
     equity: float,
+    affordable_filter: AffordableLotFilterConfig | None = None,
 ) -> dict[str, int]:
     if not selected_codes:
         return {}
-    target_value = equity / len(selected_codes)
+    target_equity = targetable_equity(equity, affordable_filter or AffordableLotFilterConfig())
+    target_value = target_equity / len(selected_codes)
     targets: dict[str, int] = {}
     for code in selected_codes:
         universe = universe_by_code.get(code, {})
@@ -883,6 +1053,62 @@ def sector_cap_failure_rows(rebalance_date: date, result: SelectionResult) -> li
                 "detail": (
                     f"target_count={result.target_count};selected_count={len(result.selected_codes)};"
                     f"unfilled_slots={result.unfilled_slots};limit={sector_cap_limit_value(result.sector_cap)}"
+                ),
+                "value": result.unfilled_slots,
+            }
+        )
+    return rows
+
+
+def affordability_failure_detail(item: AffordabilityExcludedCandidate, result: SelectionResult) -> str:
+    config = result.affordable_lot_filter
+    return (
+        f"reason={item.reason};rank={item.rank};phase={item.phase};"
+        f"lot_size={item.lot_size if item.lot_size is not None else ''};"
+        f"price={item.price if item.price is not None else ''};"
+        f"single_lot_value={item.single_lot_value if item.single_lot_value is not None else ''};"
+        f"single_lot_weight={item.single_lot_weight if item.single_lot_weight is not None else ''};"
+        f"target_value={item.target_value if item.target_value is not None else ''};"
+        f"max_single_lot_weight={config.max_single_lot_weight if config.max_single_lot_weight is not None else ''};"
+        f"min_single_lot_weight={config.min_single_lot_weight if config.min_single_lot_weight is not None else ''};"
+        f"cash_buffer_weight={config.cash_buffer_weight}"
+    )
+
+
+def affordable_lot_failure_rows(rebalance_date: date, result: SelectionResult) -> list[dict[str, Any]]:
+    if not result.affordable_lot_filter.enabled:
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in result.affordability_excluded:
+        rows.append(
+            {
+                "date": rebalance_date,
+                "code": item.code,
+                "failure_type": "affordability_excluded",
+                "detail": affordability_failure_detail(item, result),
+                "value": item.single_lot_value if item.single_lot_value is not None else "",
+            }
+        )
+        if item.reason == "zero_lot_avoided":
+            rows.append(
+                {
+                    "date": rebalance_date,
+                    "code": item.code,
+                    "failure_type": "zero_lot_avoided",
+                    "detail": affordability_failure_detail(item, result),
+                    "value": item.single_lot_value if item.single_lot_value is not None else "",
+                }
+            )
+    if result.unfilled_slots and result.affordability_excluded:
+        rows.append(
+            {
+                "date": rebalance_date,
+                "code": "",
+                "failure_type": "affordability_unfilled_target",
+                "detail": (
+                    f"target_count={result.target_count};selected_count={len(result.selected_codes)};"
+                    f"unfilled_slots={result.unfilled_slots};"
+                    f"cash_buffer_weight={result.affordable_lot_filter.cash_buffer_weight}"
                 ),
                 "value": result.unfilled_slots,
             }
@@ -1700,6 +1926,9 @@ def write_report(path: Path, summary_rows: list[dict[str, Any]], initial_capital
             f"| sector cap mode | {first.get('sector_cap_mode', '')} |",
             f"| sector cap group field | {first.get('sector_cap_group_field', '')} |",
             f"| sector cap limit | {first.get('sector_cap_limit', '')} |",
+            f"| affordable lot filter enabled | {first.get('affordable_lot_filter_enabled', '')} |",
+            f"| max single lot weight | {first.get('max_single_lot_weight', '')} |",
+            f"| cash buffer weight | {first.get('cash_buffer_weight', '')} |",
             f"| market benchmark | {first.get('market_benchmark_id', '')} |",
             "",
         ]
@@ -1757,6 +1986,8 @@ def write_report(path: Path, summary_rows: list[dict[str, Any]], initial_capital
         f"| max selected sector weight | {pct(parse_float(final.get('max_sector_weight_selected'), default=0) or 0)} |",
         f"| max actual sector weight | {pct(parse_float(final.get('max_sector_weight_actual'), default=0) or 0)} |",
         f"| sector cap violations | {final.get('sector_cap_violation_count', '')} |",
+        f"| affordability excluded | {final.get('affordability_excluded', '')} |",
+        f"| zero-lot avoided | {final.get('zero_lot_avoided', '')} |",
         f"| zero-lot targets | {final['zero_lot_targets']} |",
         f"| holdings count | {final['holdings_count']} |",
         f"| cash | {money(float(final['cash']))} |",
@@ -1957,11 +2188,27 @@ def main() -> int:
             holdings_value += position_value(adjusted_shares, point)
         pre_equity = cash + holdings_value
 
-        selection = select_codes_detailed(scores, holdings, config, universe_by_code)
+        selection = select_codes_detailed(
+            scores,
+            holdings,
+            config,
+            universe_by_code,
+            price_index=price_index,
+            rebalance_date=rebalance_date,
+            equity=pre_equity,
+        )
         selected_codes = selection.selected_codes
         research_codes = selection.research_codes
         failure_rows.extend(sector_cap_failure_rows(rebalance_date, selection))
-        targets = build_targets(selected_codes, universe_by_code, price_index, rebalance_date, pre_equity)
+        failure_rows.extend(affordable_lot_failure_rows(rebalance_date, selection))
+        targets = build_targets(
+            selected_codes,
+            universe_by_code,
+            price_index,
+            rebalance_date,
+            pre_equity,
+            selection.affordable_lot_filter,
+        )
         write_rebalance_candidates_cache(
             args,
             rebalance_date=rebalance_date,
@@ -2365,6 +2612,25 @@ def main() -> int:
             "max_sector_weight_selected": max_sector_weight_selected,
             "max_sector_weight_actual": max_sector_weight_actual,
             "sector_cap_violation_count": sector_cap_violation_count,
+            "affordable_lot_filter_enabled": selection.affordable_lot_filter.enabled,
+            "max_single_lot_weight": (
+                selection.affordable_lot_filter.max_single_lot_weight
+                if selection.affordable_lot_filter.enabled
+                else ""
+            ),
+            "min_single_lot_weight": (
+                selection.affordable_lot_filter.min_single_lot_weight
+                if selection.affordable_lot_filter.enabled
+                and selection.affordable_lot_filter.min_single_lot_weight is not None
+                else ""
+            ),
+            "cash_buffer_weight": (
+                selection.affordable_lot_filter.cash_buffer_weight
+                if selection.affordable_lot_filter.enabled
+                else ""
+            ),
+            "affordability_excluded": len(selection.affordability_excluded),
+            "zero_lot_avoided": sum(1 for item in selection.affordability_excluded if item.reason == "zero_lot_avoided"),
             "universe_count": len(universe_rows),
             "selected_count": len(selected_codes),
             "zero_lot_targets": zero_lot_targets,
@@ -2432,6 +2698,11 @@ def main() -> int:
         parameter_label.append(
             f"sectorcap{label_sector_cap.group_field}{label_sector_cap.max_names_per_group}"
         )
+    label_affordable_filter = affordable_lot_filter_config(config)
+    if label_affordable_filter.enabled:
+        parameter_label.append(
+            f"afflot{str(label_affordable_filter.max_single_lot_weight).replace('.', 'p')}"
+        )
     default_label_parts = [
         args.strategy_version,
         args.frequency,
@@ -2487,6 +2758,12 @@ def main() -> int:
             "max_sector_weight_selected",
             "max_sector_weight_actual",
             "sector_cap_violation_count",
+            "affordable_lot_filter_enabled",
+            "max_single_lot_weight",
+            "min_single_lot_weight",
+            "cash_buffer_weight",
+            "affordability_excluded",
+            "zero_lot_avoided",
             "universe_count",
             "selected_count",
             "zero_lot_targets",

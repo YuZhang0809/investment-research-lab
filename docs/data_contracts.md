@@ -234,6 +234,41 @@ These fields are generic portfolio-construction diagnostics. Public examples
 must remain synthetic and must not encode private sector-cap parameter
 conclusions.
 
+## Walk-Forward Affordable Lot Filter
+
+`run_qvm_walkforward.py` can apply a generic affordable-lot filter during
+portfolio selection. It is disabled by default and does not mutate score ranks
+or factor-score panels. When enabled, top-ranked names whose minimum lot cannot
+fit the executable target allocation are excluded from `selected_codes`, and the
+selector continues to lower-ranked affordable candidates.
+
+Config fields:
+
+```text
+portfolio.affordable_lot_filter.enabled
+portfolio.affordable_lot_filter.max_single_lot_weight
+portfolio.affordable_lot_filter.min_single_lot_weight
+portfolio.affordable_lot_filter.cash_buffer_weight
+```
+
+Summary rows include:
+
+```text
+affordable_lot_filter_enabled,max_single_lot_weight,min_single_lot_weight,cash_buffer_weight,affordability_excluded,zero_lot_avoided
+```
+
+Failure-case rows may include:
+
+```text
+affordability_excluded
+zero_lot_avoided
+affordability_unfilled_target
+cash_drag
+```
+
+`cash_buffer_weight` reduces the targetable equity used for target sizing. It
+does not create synthetic fills or change research basket membership.
+
 ## Run Ledger
 
 Public-safe template:
