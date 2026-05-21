@@ -540,6 +540,48 @@ Allowed decisions are `EXPLORATORY`, `REVIEW`, `REJECT`, and `PAPER_TEST`.
 These tools create research notes only. They do not implement approvals,
 permissions, immutable logs, compliance reports, dashboards, or schedulers.
 
+## Event Account Simulation
+
+Build a generic event panel from J-Quants-style statements rows using only
+Standard-compatible disclosure fields:
+
+```powershell
+python scripts\build_jquants_statement_event_panel.py `
+  --statements <synthetic_statements.csv> `
+  --document-type-contains FinancialStatements `
+  --document-type-contains EarnForecastRevision `
+  --document-type-contains DividendForecastRevision `
+  --out <statement_events.parquet> `
+  --output-format parquet `
+  --no-manifest
+```
+
+Run a daily-bar event account simulation:
+
+```powershell
+python scripts\run_event_account_simulator.py `
+  --events <statement_events.parquet> `
+  --prices <synthetic_daily_prices.csv> `
+  --entry-lag-trading-days 1 `
+  --entry-price-mode next_open `
+  --holding-trading-days 20 `
+  --exit-price-mode close `
+  --initial-capital 1000000 `
+  --target-event-weight 0.10 `
+  --max-concurrent-positions 10 `
+  --lot-size 100 `
+  --out-dir data\processed\events `
+  --run-label statement_drift_proxy `
+  --no-manifest
+```
+
+The simulator is long-only v0.1. It tracks cash, event positions, daily equity,
+trades, estimated realized-gain tax, and skipped-event failures. It requires
+T+1 or later entry because Standard daily bars cannot prove same-day
+post-announcement intraday execution. Statement-derived event signals should be
+named financial-statement or forecast-revision drift proxies, not strict
+earnings surprise, unless an external expectation dataset is supplied.
+
 ## Generic Diagnostics
 
 These scripts provide strategy-agnostic diagnostics for QVM, event studies, and

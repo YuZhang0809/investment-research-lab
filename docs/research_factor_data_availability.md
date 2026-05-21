@@ -51,6 +51,12 @@ data with event timing. When only realized fundamentals or broad forecast rows
 are available, public docs should call the result a fundamental improvement
 drift proxy, not true earnings surprise.
 
+Event account simulation is feasible inside the Standard daily-bar boundary
+when entry is T+1 or later. The public simulator uses daily open/close prices,
+statement disclosure dates/times, fixed trading-day holding windows, cash,
+positions, costs, and estimated tax. It intentionally does not model same-day
+post-announcement intraday fills.
+
 ## Source Links
 
 - J-Quants API index: https://jpx.gitbook.io/j-quants-ja/api-reference

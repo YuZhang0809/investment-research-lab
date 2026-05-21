@@ -28,6 +28,7 @@ Initial commit:
 - QVM research pipeline scripts
 - J-Quants adapter scripts
 - TDnet event-observation scaffolding
+- Generic Standard-compatible event account simulation tooling
 - PIT derived fundamental factor panel tooling for public-safe event and factor research
 - Price defensive and crowding factor panel tooling for synthetic/public-safe factor research
 - Example configs ending in `.example.yml`

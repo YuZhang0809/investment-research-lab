@@ -164,7 +164,10 @@ All new workflows should produce public-safe diagnostics:
 
 1. Implement the PIT derived fundamental factor panel. Completed by
    `build_derived_fundamental_factor_panel.py`.
-2. Add event-driven entry and holding-window simulation primitives.
+2. Add event-driven entry and holding-window simulation primitives. Initial
+   Standard-compatible daily-bar account simulator:
+   `run_event_account_simulator.py`, with statement event panel builder
+   `build_jquants_statement_event_panel.py`.
 3. Add matched-control event benchmarks.
 4. Add defensive price factor panel generation. Initial generic builder:
    `build_price_defensive_factor_panel.py`.

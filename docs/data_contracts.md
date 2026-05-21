@@ -580,3 +580,40 @@ The richer TDnet event contract may also include company name, document type,
 title, URL/document ID, parse flag, confidence, and notes. The drift output adds
 `entry_date`, `tradable_timestamp`, event overlap/duplicate counts, and
 `next_<window>d_return/status` columns for configured trading-day windows.
+
+## Event Account Simulation
+
+`build_jquants_statement_event_panel.py` converts J-Quants-style statement rows
+into a generic event panel using Standard-compatible fields:
+
+```text
+event_id,announcement_datetime,code,company_name,document_type,event_label,title,url_or_doc_id,parsed_flag,parse_confidence,notes,period_type,period_end,disclosure_number,forecast_eps,forecast_dividend_per_share,result_dividend_per_share
+```
+
+The event labels are generic:
+
+```text
+financial_statement
+company_forecast_revision
+dividend_forecast_revision
+other_statement_event
+```
+
+`run_event_account_simulator.py` consumes `event_id,announcement_datetime,code`
+plus daily OHLC rows. It defaults to T+1 daily-bar entry and rejects same-day
+entry lag because daily bars cannot prove post-announcement intraday
+tradability. Outputs:
+
+```text
+event_account_summary_<label>.<format>
+event_account_trades_<label>.<format>
+event_account_positions_<label>.<format>
+event_account_equity_<label>.<format>
+event_account_failure_cases_<label>.<format>
+```
+
+The account simulator tracks cash, daily equity, event positions, commissions,
+estimated realized-gain tax, and explicit skipped-event failure cases. It does
+not infer strict earnings surprise or analyst consensus; statement-derived
+signals should be documented as statement/forecast-revision drift proxy inputs
+unless an external expectation dataset is supplied.
