@@ -154,6 +154,22 @@ class PriceVolumeFactorPanelTest(unittest.TestCase):
             self.assertNotEqual("", row["wq_alpha_033_proxy"])
             self.assertNotEqual("", row["wq_alpha_034_proxy"])
 
+    def test_fallback_flag_propagates_when_return_uses_prior_fallback_close(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            prices = temp / "prices.csv"
+            rows = synthetic_prices(30)
+            for row in rows:
+                if row["code"] == "1001" and row["date"] == "2026-01-02":
+                    row["adjusted_close"] = ""
+            write_rows(prices, rows)
+
+            panel, _fields = build_panel(prices, rebalance_date_values=["2026-01-03"], input_format="csv")
+            row = panel[panel["code"] == "1001"].iloc[0]
+
+            self.assertEqual("", row["effective_close_flag"])
+            self.assertIn("adjusted_close_fallback_used", row["coverage_flags"])
+
     def test_ts_rank_operator_uses_only_rolling_window(self) -> None:
         pd = __import__("pandas")
         frame = pd.DataFrame(
@@ -261,20 +277,56 @@ class PriceVolumeFactorPanelTest(unittest.TestCase):
             self.assertEqual("Tech", by_code["1001"]["sector"])
             self.assertEqual("Utility", by_code["1002"]["sector"])
 
-    def test_trim_price_history_limits_universe_codes_and_lookback_window(self) -> None:
+    def test_trim_price_history_limits_universe_codes_and_keeps_observation_window(self) -> None:
         pd = __import__("pandas")
+        dates = [date(2024, 1, 1) + timedelta(days=7 * offset) for offset in range(100)]
         prices = pd.DataFrame(
             {
-                "code": ["1001", "1001", "1001", "1002"],
-                "date": [date(2025, 5, 1), date(2025, 8, 1), date(2026, 1, 31), date(2026, 1, 31)],
+                "code": ["1001"] * 100 + ["1002"],
+                "date": [*dates, dates[-1]],
             }
         )
-        universe = pd.DataFrame({"rebalance_date": [date(2026, 1, 31)], "code": ["1001"]})
+        universe = pd.DataFrame({"rebalance_date": [dates[-1]], "code": ["1001"]})
 
-        trimmed = trim_price_history(prices, [date(2026, 1, 31)], universe)
+        trimmed = trim_price_history(prices, [dates[-1]], universe)
 
-        self.assertEqual(["1001", "1001"], trimmed["code"].tolist())
-        self.assertEqual([date(2025, 8, 1), date(2026, 1, 31)], trimmed["date"].tolist())
+        self.assertEqual({"1001"}, set(trimmed["code"].tolist()))
+        self.assertEqual(80, len(trimmed))
+        self.assertEqual(dates[-80], trimmed.iloc[0]["date"])
+        self.assertEqual(dates[-1], trimmed.iloc[-1]["date"])
+
+    def test_sparse_history_trim_preserves_valid_row_based_adv60(self) -> None:
+        pd = __import__("pandas")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            prices = temp / "prices.csv"
+            rows: list[dict[str, str]] = []
+            start = date(2024, 1, 1)
+            for offset in range(65):
+                current = start + timedelta(days=7 * offset)
+                close = 100 + offset
+                volume = 1000 + offset
+                rows.append(
+                    {
+                        "date": current.isoformat(),
+                        "code": "1001",
+                        "unadjusted_open": str(close),
+                        "unadjusted_high": str(close + 2),
+                        "unadjusted_low": str(close - 2),
+                        "unadjusted_close": str(close),
+                        "adjusted_close": str(close),
+                        "volume": str(volume),
+                        "trading_value": str(volume * close),
+                        "price_limit_flag": "false",
+                    }
+                )
+            write_rows(prices, rows)
+
+            panel, _fields = build_panel(prices, rebalance_date_values=[rows[-1]["date"]], input_format="csv")
+            row = panel.iloc[0]
+
+            self.assertTrue(pd.notna(row["adv60"]))
+            self.assertNotIn("insufficient_adv60", row["coverage_flags"])
 
     def test_universe_group_field_takes_precedence_over_price_group_field(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

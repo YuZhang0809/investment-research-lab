@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +9,8 @@ from research_common import append_manifest, parse_date, read_table, require_pan
 
 
 OPERATOR_VERSION = "price_volume_proxy_v0_1"
-PRICE_VOLUME_LOOKBACK_CALENDAR_DAYS = 220
+PRICE_VOLUME_LOOKBACK_ROWS = 80
+EFFECTIVE_CLOSE_FALLBACK_LOOKBACK_ROWS = 21
 ALPHA_FIELDS = [
     "wq_alpha_005_proxy",
     "wq_alpha_011_proxy",
@@ -207,15 +208,30 @@ def active_rebalance_dates(rebalance_dates: list[date], universe_panel: Any | No
 
 
 def trim_price_history(prices: Any, rebalance_dates: list[date], universe_panel: Any | None = None):
+    pd = require_pandas()
     if not rebalance_dates:
         return prices
     trimmed = prices
     if universe_panel is not None:
         codes = set(universe_panel["code"].dropna().astype(str))
         trimmed = trimmed[trimmed["code"].isin(codes)].copy()
-    start = min(rebalance_dates) - timedelta(days=PRICE_VOLUME_LOOKBACK_CALENDAR_DAYS)
-    end = max(rebalance_dates)
-    return trimmed[(trimmed["date"] >= start) & (trimmed["date"] <= end)].copy()
+    if trimmed.empty:
+        return trimmed.copy()
+    trimmed = trimmed[trimmed["date"] <= max(rebalance_dates)].sort_values(["code", "date"]).copy()
+    if trimmed.empty:
+        return trimmed
+
+    rebalance_values = pd.to_datetime(sorted(rebalance_dates)).to_numpy(dtype="datetime64[ns]")
+    keep = pd.Series(False, index=trimmed.index)
+    for _code, group in trimmed.groupby("code", sort=False):
+        dates = pd.to_datetime(group["date"]).to_numpy(dtype="datetime64[ns]")
+        for rebalance_value in rebalance_values:
+            position = dates.searchsorted(rebalance_value, side="right") - 1
+            if position < 0:
+                continue
+            start = max(0, position - PRICE_VOLUME_LOOKBACK_ROWS + 1)
+            keep.loc[group.index[start : position + 1]] = True
+    return trimmed[keep].copy()
 
 
 def delay(frame: Any, field: str, periods: int):
@@ -338,6 +354,14 @@ def decay_linear(frame: Any, field: str, window: int):
 def add_daily_features(frame: Any):
     pd = require_pandas()
     frame = frame.copy()
+    fallback_used = frame["effective_close_flag"].fillna("").eq("adjusted_close_fallback_used").astype(int)
+    frame["effective_close_fallback_lookback_count"] = (
+        frame.assign(_effective_close_fallback_used=fallback_used)
+        .groupby("code", sort=False)["_effective_close_fallback_used"]
+        .rolling(EFFECTIVE_CLOSE_FALLBACK_LOOKBACK_ROWS, min_periods=1)
+        .sum()
+        .reset_index(level=0, drop=True)
+    )
     frame["returns"] = safe_divide(frame["effective_close"], delay(frame, "effective_close", 1)) - 1
     frame["dollar_volume"] = frame["trading_value"].where(frame["trading_value"].notna(), frame["close"] * frame["volume"])
     frame["adv20"] = rolling(frame, "dollar_volume", 20, "mean", min_periods=20)
@@ -478,6 +502,7 @@ def add_flags(frame: Any):
     effective_close_missing = frame["effective_close"].isna()
     frame.loc[effective_close_missing & frame["effective_close_flag"].fillna("").eq(""), "effective_close_flag"] = "effective_close_missing"
     effective_close_flags = frame["effective_close_flag"].fillna("").astype(str)
+    effective_close_fallback_lookback = frame["effective_close_fallback_lookback_count"].fillna(0)
     vwap_flags = frame["vwap_proxy_flag"].fillna("").astype(str)
     alpha_missing = frame[ALPHA_FIELDS].isna()
     price_limit_values = frame["price_limit_flag"].fillna("").astype(str).str.lower()
@@ -505,8 +530,8 @@ def add_flags(frame: Any):
             coverage.append("insufficient_adv20")
         if bool(adv60_missing.iloc[index]):
             coverage.append("insufficient_adv60")
-        if effective_close_flag == "adjusted_close_fallback_used":
-            coverage.append(effective_close_flag)
+        if effective_close_flag == "adjusted_close_fallback_used" or effective_close_fallback_lookback.iloc[index] > 0:
+            coverage.append("adjusted_close_fallback_used")
         missing_flags.append(";".join(dict.fromkeys(missing)))
         coverage_flags.append(";".join(dict.fromkeys(coverage)))
     frame["missing_flags"] = missing_flags

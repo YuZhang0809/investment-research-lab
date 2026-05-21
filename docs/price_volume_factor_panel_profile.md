@@ -70,8 +70,9 @@ basename, not the full local path.
 - Prefer `--universe-panel` so output rows are limited to
   `rebalance_date x included codes`.
 - With a universe panel, the builder trims daily prices to the requested codes
-  and the required lookback window before rolling feature calculation. This is
-  the preferred path for full-market validation.
+  and the required per-code observation lookback before rolling feature
+  calculation. This preserves row-based rolling semantics for sparse/gappy
+  histories and is the preferred path for full-market validation.
 - Do not rely on the builder default of all price dates for full-market runs.
 - For long histories, shard validation by year or rebalance block first, then
   concatenate compatible panels outside the public repo if needed.

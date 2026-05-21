@@ -391,9 +391,10 @@ python scripts\profile_price_volume_factor_panel.py `
 ```
 
 For full-market runs, use explicit rebalance dates plus a universe panel. That
-lets the builder trim price history to requested codes and the required lookback
-window before rolling feature calculation. For long histories, validate year or
-rebalance-block shards before attempting a one-shot run.
+lets the builder trim price history to requested codes and the required
+per-code observation lookback before rolling feature calculation. For long
+histories, validate year or rebalance-block shards before attempting a one-shot
+run.
 
 Run Alphalens-style diagnostics directly from a generated panel:
 

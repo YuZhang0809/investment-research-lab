@@ -35,8 +35,9 @@ Close inputs are coalesced row-by-row for price-volume research. The builder
 uses `adjusted_close` / `AdjustmentClose` first, then falls back to `close` /
 `Close` / `unadjusted_close` when the adjusted close column exists but a row is
 blank. Fallback rows are marked with `effective_close_source` and
-`adjusted_close_fallback_used`; rows with no usable close are marked
-`effective_close_missing`.
+`adjusted_close_fallback_used`; panel rows whose return/rolling return window
+depends on a fallback close also carry `adjusted_close_fallback_used` in
+`coverage_flags`. Rows with no usable close are marked `effective_close_missing`.
 
 Optional:
 
@@ -119,7 +120,7 @@ memory on synthetic or local inputs. See
 For full-market private runs, pass explicit rebalance dates and a universe panel
 so output rows are bounded by `rebalance_date x included codes`. The builder
 also trims daily price history to universe-panel codes and the required
-lookback window before computing rolling features.
+per-code observation lookback before computing rolling features.
 
 ## Diagnostics
 
