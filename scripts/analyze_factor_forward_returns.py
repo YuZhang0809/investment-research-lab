@@ -55,6 +55,13 @@ class FactorObservation:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Analyze simple factor forward returns from QVM factor files.")
     parser.add_argument("--factors-dir", type=Path, default=Path("data/processed/factors"))
+    parser.add_argument(
+        "--factor-file",
+        action="append",
+        dest="factor_files",
+        type=Path,
+        help="Explicit factor panel file to analyze. Can be repeated; bypasses --factors-dir month-name discovery.",
+    )
     parser.add_argument("--prices", required=True, type=Path)
     parser.add_argument("--start-date", required=True)
     parser.add_argument("--end-date", required=True)
@@ -145,6 +152,26 @@ def factor_files(path: Path, start: date, end: date) -> list[Path]:
             if existing is None or file_path.suffix.lower() == ".parquet":
                 by_month[suffix] = file_path
     return [by_month[key] for key in sorted(by_month)]
+
+
+def selected_factor_files(path: Path, start: date, end: date, explicit_files: list[Path] | None = None) -> list[Path]:
+    if explicit_files:
+        return explicit_files
+    return factor_files(path, start, end)
+
+
+def factor_rows_by_rebalance_date(
+    rows: list[dict[str, str]],
+    start: date,
+    end: date,
+) -> list[tuple[date, list[dict[str, str]]]]:
+    grouped: dict[date, list[dict[str, str]]] = defaultdict(list)
+    for row in rows:
+        rebalance_date = parse_date(row.get("rebalance_date"), field_name="factors.rebalance_date")
+        if rebalance_date is None or rebalance_date < start or rebalance_date > end:
+            continue
+        grouped[rebalance_date].append(row)
+    return [(rebalance_date, grouped[rebalance_date]) for rebalance_date in sorted(grouped)]
 
 
 def pearson(xs: list[float], ys: list[float]) -> float | None:
@@ -506,12 +533,12 @@ def main() -> int:
     factor_data_rows: list[dict[str, Any]] = []
     previous_top_assets: dict[str, set[str]] = {}
     previous_factor_ranks: dict[str, dict[str, float]] = {}
-    for file_path in factor_files(args.factors_dir, start_date, end_date):
-        factor_rows = read_csv(file_path)
+    factor_row_groups: list[tuple[date, list[dict[str, str]]]] = []
+    for file_path in selected_factor_files(args.factors_dir, start_date, end_date, args.factor_files):
+        all_factor_rows = read_csv(file_path)
+        factor_row_groups.extend(factor_rows_by_rebalance_date(all_factor_rows, start_date, end_date))
+    for rebalance_date, factor_rows in sorted(factor_row_groups, key=lambda item: item[0]):
         if not factor_rows:
-            continue
-        rebalance_date = parse_date(factor_rows[0].get("rebalance_date"), field_name="factors.rebalance_date")
-        if rebalance_date is None:
             continue
         for factor in factors:
             observations: list[FactorObservation] = []

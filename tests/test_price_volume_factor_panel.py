@@ -16,7 +16,11 @@ from build_price_volume_factor_panel import (  # noqa: E402
     ALPHA_FIELDS,
     build_panel,
     cross_sectional_rank_pct,
+    decay_linear,
     normalize_prices,
+    rolling_arg,
+    rolling_cov,
+    safe_divide,
     ts_rank,
 )
 from external_factor_panels import join_external_factor_panels  # noqa: E402
@@ -151,6 +155,29 @@ class PriceVolumeFactorPanelTest(unittest.TestCase):
         )
 
         self.assertEqual([1.0, 0.0, 0.5], [float(value) for value in ranks])
+
+    def test_operator_layer_covariance_arg_and_decay_are_deterministic(self) -> None:
+        pd = __import__("pandas")
+        frame = pd.DataFrame(
+            {
+                "code": ["1001", "1001", "1001"],
+                "x": [1.0, 2.0, 3.0],
+                "y": [2.0, 4.0, 6.0],
+            }
+        )
+
+        cov = rolling_cov(frame, "x", "y", 3)
+        argmax = rolling_arg(frame, "x", 3, which="max")
+        argmin = rolling_arg(frame, "x", 3, which="min")
+        decay = decay_linear(frame, "x", 3)
+        divided = safe_divide(pd.Series([1.0, 2.0]), pd.Series([0.0, 4.0]))
+
+        self.assertAlmostEqual(2.0, float(cov.iloc[-1]))
+        self.assertAlmostEqual(3.0, float(argmax.iloc[-1]))
+        self.assertAlmostEqual(1.0, float(argmin.iloc[-1]))
+        self.assertAlmostEqual(14.0 / 6.0, float(decay.iloc[-1]))
+        self.assertTrue(pd.isna(divided.iloc[0]))
+        self.assertAlmostEqual(0.5, float(divided.iloc[1]))
 
     def test_single_code_input_does_not_crash_rolling_correlation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

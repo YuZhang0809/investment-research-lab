@@ -325,6 +325,11 @@ forward_status
 bucket and the highest number is the strongest factor bucket. `group` is mapped
 from `--group-field` when supplied, otherwise from `sector`.
 
+Use `--factor-file <panel.csv|panel.parquet>` to analyze an explicit generated
+panel such as `build_price_volume_factor_panel.py` output. Explicit factor files
+may contain multiple `rebalance_date` values and do not need to follow the
+`factors_YYYYMM.*` naming convention.
+
 When `--grouped-diagnostics --group-field <field>` is supplied, the script also
 writes:
 

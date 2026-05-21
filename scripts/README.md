@@ -376,6 +376,35 @@ The output is keyed by `rebalance_date + code` and can be joined through
 `wq_alpha_*_proxy` fields intended for filters, diagnostics, weak score inputs,
 or execution-timing experiments.
 
+Profile scale and memory behavior before larger runs:
+
+```powershell
+python scripts\profile_price_volume_factor_panel.py `
+  --synthetic-codes 400 `
+  --synthetic-days 756 `
+  --synthetic-rebalances 36 `
+  --summary-out reports\engineering\price_volume_factor_panel_profile.csv `
+  --report reports\engineering\price_volume_factor_panel_profile.md `
+  --no-manifest
+```
+
+Run Alphalens-style diagnostics directly from a generated panel:
+
+```powershell
+python scripts\analyze_factor_forward_returns.py `
+  --factor-file <price_volume_factors.parquet> `
+  --prices <synthetic_daily_ohlcv.csv> `
+  --start-date 2026-02-15 `
+  --end-date 2026-02-28 `
+  --holding-days 5 `
+  --factor wq_alpha_005_proxy `
+  --factor wq_alpha_011_proxy `
+  --factor wq_alpha_101_proxy `
+  --grouped-diagnostics `
+  --group-field sector `
+  --no-manifest
+```
+
 ### Optional Factor Contracts And Crowding Panels
 
 Validate optional dividend, balance-sheet, or crowding inputs before joining or

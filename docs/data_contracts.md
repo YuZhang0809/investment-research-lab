@@ -150,6 +150,15 @@ replications and not standalone strategy conclusions. `vwap_proxy` is
 `trading_value / volume`; missing or zero-volume rows keep blank proxy values
 and explicit flags.
 
+`profile_price_volume_factor_panel.py` writes an engineering profile:
+
+```text
+run_label,synthetic,price_rows,universe_panel_rows,rebalance_count,output_rows,runtime_seconds,panel_write_seconds,peak_python_memory_mb,panel_memory_mb,missing_row_count,missing_row_rate,coverage_issue_row_count,coverage_issue_row_rate,coverage_clean_rate,vwap_proxy_ok_count,vwap_proxy_flagged_count,missing_volume_count,zero_volume_count,missing_trading_value_count,panel_output_path
+```
+
+The profile is for scale and memory validation only. It is not a strategy
+performance artifact.
+
 ## Crowding Factor Panels
 
 `build_crowding_factor_panel.py` consumes a generic local issuer-level panel with `code`,

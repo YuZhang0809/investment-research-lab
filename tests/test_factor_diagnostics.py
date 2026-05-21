@@ -4,6 +4,7 @@ import csv
 import sys
 import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 
 
@@ -11,6 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from analyze_factor_forward_returns import main as analyze_factor_forward_returns_main, write_report  # noqa: E402
+from build_price_volume_factor_panel import build_panel  # noqa: E402
+from research_common import write_table  # noqa: E402
 
 
 def write_csv(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) -> None:
@@ -260,6 +263,105 @@ class FactorDiagnosticsTest(unittest.TestCase):
             summary_rows = read_csv(out_dir / "factor_forward_returns_202601_202601_1d.csv")
             self.assertEqual("0.125", summary_rows[0]["top_quantile_return"])
             self.assertEqual("0.055", summary_rows[0]["bottom_quantile_return"])
+
+    def test_price_volume_panel_can_feed_factor_diagnostics_directly(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            prices_path = temp / "prices.csv"
+            panel_path = temp / "price_volume_panel.parquet"
+            out_dir = temp / "out"
+            report_dir = temp / "reports"
+            price_rows = []
+            start = date(2026, 1, 1)
+            for code_index, code in enumerate(["A", "B", "C", "D"], start=1):
+                sector = "Tech" if code in {"A", "B"} else "Health"
+                for day in range(1, 75):
+                    current = start + timedelta(days=day - 1)
+                    base = 50 + code_index * 5 + day * code_index * 0.1
+                    close = base + (day % 3 - 1) * 0.2
+                    price_rows.append(
+                        {
+                            "date": current.isoformat(),
+                            "code": code,
+                            "sector": sector,
+                            "unadjusted_open": f"{base:.4f}",
+                            "unadjusted_high": f"{base + 1:.4f}",
+                            "unadjusted_low": f"{base - 1:.4f}",
+                            "unadjusted_close": f"{close:.4f}",
+                            "adjusted_close": f"{close:.4f}",
+                            "volume": str(1000 + day * 10 + code_index),
+                            "trading_value": f"{close * (1000 + day * 10 + code_index):.4f}",
+                            "price_limit_flag": "false",
+                        }
+                    )
+            write_csv(
+                prices_path,
+                price_rows,
+                [
+                    "date",
+                    "code",
+                    "sector",
+                    "unadjusted_open",
+                    "unadjusted_high",
+                    "unadjusted_low",
+                    "unadjusted_close",
+                    "adjusted_close",
+                    "volume",
+                    "trading_value",
+                    "price_limit_flag",
+                ],
+            )
+            panel, fields = build_panel(
+                prices_path,
+                rebalance_date_values=["2026-02-15", "2026-02-28"],
+                group_field="sector",
+                input_format="csv",
+            )
+            write_table(panel, panel_path, format="parquet", fieldnames=fields)
+
+            original_argv = sys.argv[:]
+            try:
+                sys.argv = [
+                    "analyze_factor_forward_returns.py",
+                    "--factor-file",
+                    str(panel_path),
+                    "--prices",
+                    str(prices_path),
+                    "--start-date",
+                    "2026-02-15",
+                    "--end-date",
+                    "2026-02-28",
+                    "--holding-days",
+                    "1",
+                    "--factor",
+                    "wq_alpha_005_proxy",
+                    "--factor",
+                    "wq_alpha_011_proxy",
+                    "--factor",
+                    "wq_alpha_101_proxy",
+                    "--quantiles",
+                    "2",
+                    "--grouped-diagnostics",
+                    "--group-field",
+                    "sector",
+                    "--out-dir",
+                    str(out_dir),
+                    "--report-dir",
+                    str(report_dir),
+                    "--no-manifest",
+                ]
+                self.assertEqual(0, analyze_factor_forward_returns_main())
+            finally:
+                sys.argv = original_argv
+
+            summary_rows = read_csv(out_dir / "factor_forward_returns_202602_202602_1d.csv")
+            grouped_rows = read_csv(out_dir / "factor_forward_returns_grouped_202602_202602_1d.csv")
+            factor_data_rows = read_csv(out_dir / "alphalens_factor_data_202602_202602_1d.csv")
+            factors = {row["factor"] for row in summary_rows}
+
+            self.assertEqual({"wq_alpha_005_proxy", "wq_alpha_011_proxy", "wq_alpha_101_proxy"}, factors)
+            self.assertTrue(grouped_rows)
+            self.assertTrue(factor_data_rows)
 
 
 if __name__ == "__main__":

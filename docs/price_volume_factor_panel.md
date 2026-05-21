@@ -94,6 +94,23 @@ operator_version
 the field is blank and the issue is surfaced in `vwap_proxy_flag` and
 `missing_flags`.
 
+## Engineering Profile
+
+Use `scripts/profile_price_volume_factor_panel.py` before large runs. It reports
+runtime, output rows, missing/coverage rates, VWAP proxy flags, and Python peak
+memory on synthetic or local inputs. See
+`docs/price_volume_factor_panel_profile.md`.
+
+For full-market private runs, pass explicit rebalance dates and a universe panel
+so output rows are bounded by `rebalance_date x included codes`.
+
+## Diagnostics
+
+Generated panels can be analyzed directly with
+`scripts/analyze_factor_forward_returns.py --factor-file <panel>`. This supports
+multiple `--factor` values and grouped diagnostics by `sector`, `market`, or
+another preserved group field. See `docs/price_volume_factor_diagnostics.md`.
+
 ## Usage
 
 ```powershell
