@@ -14,7 +14,6 @@ from research_common import (
     parse_date,
     parse_float,
     read_csv,
-    trading_calendar_from_rows,
     trading_day_offset,
     write_table,
 )
@@ -118,7 +117,7 @@ class PlannedEvent:
     row: dict[str, str]
 
 
-@dataclass
+@dataclass(frozen=True)
 class Position:
     event_id: str
     code: str
@@ -224,13 +223,18 @@ def build_price_index(rows: list[dict[str, str]]) -> dict[str, dict[date, PriceP
     return output
 
 
+def price_calendar_from_rows(rows: list[dict[str, str]]) -> list[date]:
+    values = {value for row in rows if (value := price_date(row)) is not None}
+    return sorted(values)
+
+
 def parse_event_datetime(value: str) -> datetime | None:
     text = (value or "").strip()
     if not text:
         return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+    for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
-            return datetime.strptime(text, fmt)
+            return datetime.strptime(text, pattern)
         except ValueError:
             continue
     raise ValueError(f"Invalid announcement_datetime: {value!r}")
@@ -269,11 +273,16 @@ def plan_events(
     holding_trading_days: int,
 ) -> list[PlannedEvent]:
     planned: list[PlannedEvent] = []
+    seen_event_ids: set[str] = set()
     for index, row in enumerate(rows, start=1):
         announcement = event_datetime(row)
         code = first_text(row, "code", "Code", "LocalCode")
         if announcement is None or not code:
             continue
+        planned_event_id = event_id(row, index)
+        if planned_event_id in seen_event_ids:
+            raise ValueError(f"Duplicate event_id in event panel: {planned_event_id}")
+        seen_event_ids.add(planned_event_id)
         entry_date = trading_day_offset(
             calendar,
             announcement.date(),
@@ -287,7 +296,7 @@ def plan_events(
         )
         planned.append(
             PlannedEvent(
-                event_id=event_id(row, index),
+                event_id=planned_event_id,
                 code=code,
                 announcement=announcement,
                 event_label=first_text(row, "event_label"),
@@ -362,7 +371,9 @@ def run_simulation(
         raise ValueError("--tax-rate cannot be negative.")
 
     prices = build_price_index(price_rows)
-    calendar = trading_calendar_from_rows(price_rows)
+    calendar = price_calendar_from_rows(price_rows)
+    if price_rows and not calendar:
+        raise ValueError("prices has rows but no valid date/Date values for the trading calendar.")
     events = plan_events(
         event_rows,
         calendar,
@@ -395,7 +406,7 @@ def run_simulation(
     for event in events:
         if event.entry_date is None:
             failure_rows.append(failure_row(event, None, "missing_entry_date", "No trading day after announcement."))
-        if event.exit_date is None:
+        elif event.exit_date is None:
             failure_rows.append(failure_row(event, event.entry_date, "insufficient_exit_window", "No exit date for holding window."))
 
     for current_date in simulation_calendar:
@@ -598,6 +609,13 @@ def write_outputs(rows_by_name: dict[str, list[dict[str, str]]], args: argparse.
     return outputs
 
 
+def output_date_range(rows_by_name: dict[str, list[dict[str, str]]], run_label: str) -> str:
+    dates = [row["date"] for row in rows_by_name.get("equity", []) if row.get("date")]
+    if not dates:
+        return run_label
+    return f"{min(dates)}..{max(dates)}"
+
+
 def main() -> int:
     args = build_parser().parse_args()
     rows = run_simulation(
@@ -617,6 +635,7 @@ def main() -> int:
     )
     outputs = write_outputs(rows, args)
     if not args.no_manifest:
+        date_range = output_date_range(rows, args.run_label)
         for name, path in outputs.items():
             append_manifest(
                 args.manifest,
@@ -624,7 +643,7 @@ def main() -> int:
                 file_path=path,
                 vendor="local",
                 schema_version=f"event_account_{name}_v0_1",
-                date_range=args.run_label,
+                date_range=date_range,
                 notes=(
                     f"Standard daily-bar event account simulation; entry_lag={args.entry_lag_trading_days}; "
                     f"entry={args.entry_price_mode}; holding_days={args.holding_trading_days}"

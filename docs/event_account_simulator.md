@@ -33,6 +33,9 @@ Minimum input fields:
 event_id,announcement_datetime,code,event_label
 ```
 
+`event_id` must be unique. The simulator fails fast on duplicates because
+trade, position, and failure rows use it as the audit key.
+
 Optional audit fields include:
 
 ```text
@@ -87,7 +90,9 @@ event_account_failure_cases_<label>.csv
 
 The simulator processes exits before entries on the same date, buys only when
 the intended daily price is present and tradable, and does not forward-fill or
-roll missing entry prices. It tracks cash, event positions, commissions,
+roll missing entry prices. Entry modes are `next_open` and `next_close`; exit
+mode can be `open` or `close`. The summary `trade_count` is a trade-leg count,
+not a closed-position count. It tracks cash, event positions, commissions,
 estimated realized-gain tax, daily equity, closed-position returns, and skipped
 event failure reasons.
 
