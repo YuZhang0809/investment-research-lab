@@ -35,7 +35,8 @@ Optional:
 
 - `--rebalance-date` / `--rebalance-dates`; defaults to all price dates
 - `--universe-panel` with `rebalance_date + code` to restrict output rows
-- `--group-field` to preserve a discrete group column when present; no
+- `--group-field` to preserve a discrete group column from the universe panel
+  or price rows when present; universe-panel values take precedence and no
   neutralization is performed in v0.1
 
 Duplicate `(code, date)` price rows fail fast.
@@ -46,6 +47,7 @@ Base derived fields:
 
 ```text
 returns
+price_staleness_calendar_days
 dollar_volume
 adv20
 adv60

@@ -32,6 +32,7 @@ BASE_OUTPUT_FIELDS = [
     "rebalance_date",
     "code",
     "latest_price_date",
+    "price_staleness_calendar_days",
     "returns",
     "dollar_volume",
     "adv20",
@@ -81,27 +82,27 @@ def numeric_series(frame: Any, aliases: list[str]):
     return pd.to_numeric(values, errors="coerce")
 
 
-def normalize_prices(path: Path, input_format: str = "auto"):
+def normalize_prices(path: Path, input_format: str = "auto", group_field: str | None = None):
     pd = require_pandas()
     frame = read_table(path, format=input_format)
     code_col = first_column(frame, ["code", "Code", "LocalCode"], required=True)
     date_col = first_column(frame, ["date", "Date", "price_date"], required=True)
-    output = pd.DataFrame(
-        {
-            "code": frame[code_col].astype(str).str.strip(),
-            "date": pd.to_datetime(frame[date_col], errors="coerce").dt.date,
-            "open": numeric_series(frame, ["unadjusted_open", "open", "Open", "AdjustmentOpen", "adjusted_open"]),
-            "high": numeric_series(frame, ["unadjusted_high", "high", "High", "AdjustmentHigh", "adjusted_high"]),
-            "low": numeric_series(frame, ["unadjusted_low", "low", "Low", "AdjustmentLow", "adjusted_low"]),
-            "close": numeric_series(frame, ["unadjusted_close", "close", "Close", "AdjustmentClose", "adjusted_close"]),
-            "adjusted_close": numeric_series(frame, ["adjusted_close", "AdjustmentClose", "close", "Close", "unadjusted_close"]),
-            "volume": numeric_series(frame, ["volume", "Volume", "AdjustmentVolume"]),
-            "trading_value": numeric_series(frame, ["trading_value", "TradingValue", "TurnoverValue", "turnover_value"]),
-            "price_limit_flag": frame[first_column(frame, ["price_limit_flag", "PriceLimitFlag"])].astype(str).str.lower()
-            if first_column(frame, ["price_limit_flag", "PriceLimitFlag"]) is not None
-            else "",
-        }
-    )
+    price_limit_col = first_column(frame, ["price_limit_flag", "PriceLimitFlag"])
+    output_values: dict[str, Any] = {
+        "code": frame[code_col].astype(str).str.strip(),
+        "date": pd.to_datetime(frame[date_col], errors="coerce").dt.date,
+        "open": numeric_series(frame, ["unadjusted_open", "open", "Open", "AdjustmentOpen", "adjusted_open"]),
+        "high": numeric_series(frame, ["unadjusted_high", "high", "High", "AdjustmentHigh", "adjusted_high"]),
+        "low": numeric_series(frame, ["unadjusted_low", "low", "Low", "AdjustmentLow", "adjusted_low"]),
+        "close": numeric_series(frame, ["unadjusted_close", "close", "Close", "AdjustmentClose", "adjusted_close"]),
+        "adjusted_close": numeric_series(frame, ["adjusted_close", "AdjustmentClose", "close", "Close", "unadjusted_close"]),
+        "volume": numeric_series(frame, ["volume", "Volume", "AdjustmentVolume"]),
+        "trading_value": numeric_series(frame, ["trading_value", "TradingValue", "TurnoverValue", "turnover_value"]),
+        "price_limit_flag": frame[price_limit_col].astype(str).str.lower() if price_limit_col is not None else "",
+    }
+    if group_field and group_field in frame.columns:
+        output_values[group_field] = frame[group_field].astype(str)
+    output = pd.DataFrame(output_values)
     output = output[(output["code"] != "") & output["date"].notna()].copy()
     duplicates = output.duplicated(["code", "date"], keep=False)
     if duplicates.any():
@@ -157,9 +158,7 @@ def normalize_universe_panel(path: Path, group_field: str | None, input_format: 
     if "included_flag" in frame.columns:
         included = frame["included_flag"].astype(str).str.lower().isin({"1", "true", "yes", "y"})
         output = output[included].copy()
-    if group_field:
-        if group_field not in frame.columns:
-            raise ValueError(f"--group-field {group_field!r} is not present in --universe-panel.")
+    if group_field and group_field in frame.columns:
         output[group_field] = frame[group_field].astype(str)
     duplicates = output.duplicated(["rebalance_date", "code"], keep=False)
     if duplicates.any():
@@ -236,19 +235,19 @@ def cross_sectional_rank_pct(series: Any, dates: Any):
 
 
 def rolling_corr(frame: Any, left: str, right: str, window: int):
-    result = (
-        frame.groupby("code", sort=False, group_keys=False)[["code", left, right]]
-        .apply(lambda group: group[left].rolling(window, min_periods=window).corr(group[right]))
-    )
-    return result.reindex(frame.index)
+    pd = require_pandas()
+    result = pd.Series(pd.NA, index=frame.index, dtype="Float64")
+    for _code, group in frame.groupby("code", sort=False):
+        result.loc[group.index] = group[left].rolling(window, min_periods=window).corr(group[right])
+    return result
 
 
 def rolling_cov(frame: Any, left: str, right: str, window: int):
-    result = (
-        frame.groupby("code", sort=False, group_keys=False)[["code", left, right]]
-        .apply(lambda group: group[left].rolling(window, min_periods=window).cov(group[right]))
-    )
-    return result.reindex(frame.index)
+    pd = require_pandas()
+    result = pd.Series(pd.NA, index=frame.index, dtype="Float64")
+    for _code, group in frame.groupby("code", sort=False):
+        result.loc[group.index] = group[left].rolling(window, min_periods=window).cov(group[right])
+    return result
 
 
 def safe_divide(numerator: Any, denominator: Any):
@@ -257,8 +256,12 @@ def safe_divide(numerator: Any, denominator: Any):
     return result.replace([float("inf"), float("-inf")], pd.NA)
 
 
-def signed_power(series: Any, power: float):
-    return series.abs().pow(power) * series.where(series >= 0, -1).where(series < 0, 1)
+def sign_series(series: Any):
+    pd = require_pandas()
+    result = pd.Series(pd.NA, index=series.index, dtype="Float64")
+    result.loc[series >= 0] = 1.0
+    result.loc[series < 0] = -1.0
+    return result
 
 
 def decay_linear(frame: Any, field: str, window: int):
@@ -298,9 +301,8 @@ def add_daily_features(frame: Any):
     frame["vwap_proxy_flag"] = ""
     frame.loc[frame["volume"].isna(), "vwap_proxy_flag"] = "missing_volume"
     frame.loc[frame["volume"] == 0, "vwap_proxy_flag"] = "zero_volume"
-    frame.loc[frame["trading_value"].isna(), "vwap_proxy_flag"] = (
-        frame.loc[frame["trading_value"].isna(), "vwap_proxy_flag"].mask(lambda value: value == "", "missing_trading_value")
-    )
+    trading_value_missing = frame["trading_value"].isna()
+    frame.loc[trading_value_missing & frame["vwap_proxy_flag"].eq(""), "vwap_proxy_flag"] = "missing_trading_value"
     frame["rank_open_minus_vwap"] = cross_sectional_rank_pct(frame["open"] - frame["vwap_proxy"], frame["date"])
     frame["rank_abs_close_minus_vwap"] = cross_sectional_rank_pct((frame["close"] - frame["vwap_proxy"]).abs(), frame["date"])
     frame["rank_vwap_minus_close"] = cross_sectional_rank_pct(frame["vwap_proxy"] - frame["close"], frame["date"])
@@ -310,7 +312,6 @@ def add_daily_features(frame: Any):
     frame["rank_inv_close"] = cross_sectional_rank_pct(safe_divide(1, frame["close"]), frame["date"])
     frame["rank_high_minus_close"] = cross_sectional_rank_pct(frame["high"] - frame["close"], frame["date"])
     frame["rank_candle_volume"] = cross_sectional_rank_pct(frame["candle_pressure"] * frame["volume"], frame["date"])
-    frame["rank_close_to_vwap"] = cross_sectional_rank_pct(frame["close_to_vwap"], frame["date"])
     frame["ts_max_vwap_close_3"] = rolling(frame.assign(vwap_minus_close=frame["vwap_proxy"] - frame["close"]), "vwap_minus_close", 3, "max", min_periods=3)
     frame["ts_min_vwap_close_3"] = rolling(frame.assign(vwap_minus_close=frame["vwap_proxy"] - frame["close"]), "vwap_minus_close", 3, "min", min_periods=3)
     frame["rank_ts_max_vwap_close_3"] = cross_sectional_rank_pct(frame["ts_max_vwap_close_3"], frame["date"])
@@ -336,7 +337,6 @@ def add_daily_features(frame: Any):
     frame["ts_rank_vwap_5"] = ts_rank(frame, "vwap_proxy", 5)
     frame["decay_argmax_close_30_2"] = decay_linear(frame.assign(argmax_close_30=frame["argmax_close_30"]), "argmax_close_30", 2)
     frame["rank_argmax_close_10"] = cross_sectional_rank_pct(frame["argmax_close_10"], frame["date"])
-    frame["signed_close_to_vwap"] = signed_power(frame["close_to_vwap"], 1.0)
     return frame.replace([float("inf"), float("-inf")], pd.NA)
 
 
@@ -346,7 +346,9 @@ def add_proxy_alphas(frame: Any):
     frame["wq_alpha_011_proxy"] = (
         (frame["rank_ts_max_vwap_close_3"] + frame["rank_ts_min_vwap_close_3"]) * frame["rank_delta_volume_3"]
     )
-    frame["wq_alpha_012_proxy"] = -delta(frame, "close", 1) * delta(frame, "volume", 1).where(delta(frame, "volume", 1) >= 0, -1).where(delta(frame, "volume", 1) < 0, 1)
+    delta_close_1 = delta(frame, "close", 1)
+    delta_volume_1 = delta(frame, "volume", 1)
+    frame["wq_alpha_012_proxy"] = -delta_close_1 * sign_series(delta_volume_1)
     frame["wq_alpha_024_proxy"] = -(frame["close"] - frame["mean_close_20"])
     frame["wq_alpha_028_proxy"] = -frame["corr_adv_low_5"] + frame["close_to_vwap"]
     frame["wq_alpha_032_proxy"] = frame["mean_close_20"] - frame["close"] + frame["corr_vwap_close_delay_20"]
@@ -381,23 +383,38 @@ def build_base_panel(prices: Any, rebalance_dates: list[date], universe_panel: A
     for code, left_group in left.groupby("code", sort=False):
         right_group = right[right["code"] == code].sort_values("date")
         if right_group.empty:
-            merged_parts.append(left_group)
+            missing_group = left_group.copy()
+            for column in right.columns:
+                if column != "code" and column not in missing_group.columns:
+                    if str(right[column].dtype).startswith("datetime64"):
+                        missing_group[column] = pd.Series(pd.NaT, index=missing_group.index, dtype=right[column].dtype)
+                    elif getattr(right[column].dtype, "kind", "") in {"f", "i", "u"}:
+                        missing_group[column] = pd.Series(float("nan"), index=missing_group.index, dtype="float64")
+                    else:
+                        missing_group[column] = pd.Series(pd.NA, index=missing_group.index, dtype=right[column].dtype)
+            merged_parts.append(missing_group)
             continue
+        right_for_merge = right_group.drop(columns=["code"])
+        if group_field and group_field in left_group.columns and group_field in right_for_merge.columns:
+            right_for_merge = right_for_merge.drop(columns=[group_field])
         merged_parts.append(
             pd.merge_asof(
                 left_group.sort_values("rebalance_date"),
-                right_group,
+                right_for_merge,
                 left_on="rebalance_date",
                 right_on="date",
                 direction="backward",
             )
         )
     merged = pd.concat(merged_parts, ignore_index=True) if merged_parts else left.copy()
-    if "code_x" in merged.columns:
-        merged["code"] = merged["code_x"]
-        merged.drop(columns=[column for column in ["code_x", "code_y"] if column in merged.columns], inplace=True)
-    merged["latest_price_date"] = merged["date"].dt.date.astype(str)
-    merged["rebalance_date"] = merged["rebalance_date"].dt.date.astype(str)
+    if "date" not in merged.columns:
+        merged["date"] = pd.NaT
+    latest_dates = pd.to_datetime(merged["date"], errors="coerce")
+    rebalance_datetimes = pd.to_datetime(merged["rebalance_date"], errors="coerce")
+    merged["latest_price_date"] = latest_dates.dt.strftime("%Y-%m-%d").fillna("")
+    staleness_days = (rebalance_datetimes - latest_dates).dt.days
+    merged["price_staleness_calendar_days"] = staleness_days.astype("Float64")
+    merged["rebalance_date"] = rebalance_datetimes.dt.strftime("%Y-%m-%d")
     if group_field and group_field not in merged.columns and group_field in prices.columns:
         group_values = prices[["code", group_field]].drop_duplicates("code")
         merged = merged.merge(group_values, on="code", how="left")
@@ -405,26 +422,32 @@ def build_base_panel(prices: Any, rebalance_dates: list[date], universe_panel: A
 
 
 def add_flags(frame: Any):
-    pd = require_pandas()
     frame = frame.copy()
+    latest_price_missing = frame["latest_price_date"].fillna("").astype(str).isin({"", "NaT"})
+    vwap_flags = frame["vwap_proxy_flag"].fillna("").astype(str)
+    alpha_missing = frame[ALPHA_FIELDS].isna()
+    price_limit_values = frame["price_limit_flag"].fillna("").astype(str).str.lower()
+    price_limit_flags = price_limit_values.isin({"1", "true", "yes", "y"})
+    adv20_missing = frame["adv20"].isna()
+    adv60_missing = frame["adv60"].isna()
+
     missing_flags: list[str] = []
     coverage_flags: list[str] = []
-    for _index, row in frame.iterrows():
+    for index, missing_alpha_row in enumerate(alpha_missing.to_numpy()):
         missing = []
-        coverage = []
-        if not row.get("latest_price_date") or row.get("latest_price_date") == "NaT":
+        if bool(latest_price_missing.iloc[index]):
             missing.append("missing_price_on_or_before_rebalance")
-        if row.get("vwap_proxy_flag"):
-            missing.append(str(row.get("vwap_proxy_flag")))
-        if str(row.get("price_limit_flag") or "").lower() in {"1", "true", "yes", "y"}:
+        vwap_flag = vwap_flags.iloc[index]
+        if vwap_flag:
+            missing.append(vwap_flag)
+        missing.extend(field for field, is_missing in zip(ALPHA_FIELDS, missing_alpha_row) if bool(is_missing))
+        coverage = []
+        if bool(price_limit_flags.iloc[index]):
             coverage.append("price_limit_flag")
-        if pd.isna(row.get("adv20")):
+        if bool(adv20_missing.iloc[index]):
             coverage.append("insufficient_adv20")
-        if pd.isna(row.get("adv60")):
+        if bool(adv60_missing.iloc[index]):
             coverage.append("insufficient_adv60")
-        for field in ALPHA_FIELDS:
-            if pd.isna(row.get(field)):
-                missing.append(field)
         missing_flags.append(";".join(dict.fromkeys(missing)))
         coverage_flags.append(";".join(dict.fromkeys(coverage)))
     frame["missing_flags"] = missing_flags
@@ -442,7 +465,7 @@ def build_panel(
     group_field: str | None = None,
     input_format: str = "auto",
 ):
-    prices = normalize_prices(prices_path, input_format)
+    prices = normalize_prices(prices_path, input_format, group_field=group_field)
     daily = add_proxy_alphas(add_daily_features(prices))
     rebalance_dates = load_rebalance_dates(rebalance_dates_path, rebalance_date_values, prices)
     universe_panel = normalize_universe_panel(universe_panel_path, group_field, input_format) if universe_panel_path else None

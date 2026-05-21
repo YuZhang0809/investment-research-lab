@@ -12,7 +12,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from build_price_volume_factor_panel import ALPHA_FIELDS, build_panel, normalize_prices, ts_rank  # noqa: E402
+from build_price_volume_factor_panel import (  # noqa: E402
+    ALPHA_FIELDS,
+    build_panel,
+    cross_sectional_rank_pct,
+    normalize_prices,
+    ts_rank,
+)
 from external_factor_panels import join_external_factor_panels  # noqa: E402
 from research_common import read_csv, write_table  # noqa: E402
 
@@ -136,6 +142,173 @@ class PriceVolumeFactorPanelTest(unittest.TestCase):
 
         self.assertAlmostEqual(1.0, float(ranks.iloc[-1]))
         self.assertAlmostEqual(0.5, float(ranks.iloc[-2]))
+
+    def test_cross_sectional_rank_pct_handles_three_code_date(self) -> None:
+        pd = __import__("pandas")
+        ranks = cross_sectional_rank_pct(
+            pd.Series([30.0, 10.0, 20.0]),
+            pd.Series(["2026-01-31", "2026-01-31", "2026-01-31"]),
+        )
+
+        self.assertEqual([1.0, 0.0, 0.5], [float(value) for value in ranks])
+
+    def test_single_code_input_does_not_crash_rolling_correlation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            prices = temp / "prices.csv"
+            rows = [row for row in synthetic_prices(80) if row["code"] == "1001"]
+            write_rows(prices, rows)
+
+            panel, _fields = build_panel(prices, rebalance_date_values=["2026-03-01"], input_format="csv")
+
+            self.assertEqual(["1001"], panel["code"].tolist())
+            self.assertEqual("2026-03-01", panel.iloc[0]["latest_price_date"])
+            self.assertNotEqual("", panel.iloc[0]["wq_alpha_101_proxy"])
+
+    def test_universe_code_without_price_preserves_key_and_missing_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            prices = temp / "prices.csv"
+            universe = temp / "universe.csv"
+            rows = [row for row in synthetic_prices(30) if row["code"] == "1001"]
+            write_rows(prices, rows)
+            write_rows(
+                universe,
+                [
+                    {"rebalance_date": "2026-01-30", "code": "1001", "included_flag": "true"},
+                    {"rebalance_date": "2026-01-30", "code": "9999", "included_flag": "true"},
+                ],
+            )
+
+            panel, _fields = build_panel(
+                prices,
+                universe_panel_path=universe,
+                rebalance_date_values=["2026-01-30"],
+                input_format="csv",
+            )
+            row = panel[panel["code"] == "9999"].iloc[0]
+
+            self.assertEqual("9999", row["code"])
+            self.assertEqual("", row["latest_price_date"])
+            self.assertIn("missing_price_on_or_before_rebalance", row["missing_flags"])
+
+    def test_group_field_can_be_preserved_from_prices(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            prices = temp / "prices.csv"
+            rows = synthetic_prices(30)
+            for row in rows:
+                row["sector"] = "Tech" if row["code"] == "1001" else "Utility"
+            write_rows(prices, rows)
+
+            panel, fields = build_panel(
+                prices,
+                rebalance_date_values=["2026-01-30"],
+                group_field="sector",
+                input_format="csv",
+            )
+            by_code = {row["code"]: row for row in panel.to_dict(orient="records")}
+
+            self.assertIn("sector", fields)
+            self.assertEqual("Tech", by_code["1001"]["sector"])
+            self.assertEqual("Utility", by_code["1002"]["sector"])
+
+    def test_universe_group_field_takes_precedence_over_price_group_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            prices = temp / "prices.csv"
+            universe = temp / "universe.csv"
+            rows = synthetic_prices(30)
+            for row in rows:
+                row["sector"] = "PriceSector"
+            write_rows(prices, rows)
+            write_rows(
+                universe,
+                [
+                    {"rebalance_date": "2026-01-30", "code": "1001", "included_flag": "true", "sector": "UniverseSector"},
+                ],
+            )
+
+            panel, _fields = build_panel(
+                prices,
+                universe_panel_path=universe,
+                rebalance_date_values=["2026-01-30"],
+                group_field="sector",
+                input_format="csv",
+            )
+
+            self.assertEqual("UniverseSector", panel.iloc[0]["sector"])
+
+    def test_alpha_012_sign_chain_is_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            prices = temp / "prices.csv"
+            rows = [
+                {
+                    "date": "2026-01-01",
+                    "code": "1001",
+                    "unadjusted_open": "10",
+                    "unadjusted_high": "12",
+                    "unadjusted_low": "9",
+                    "unadjusted_close": "10",
+                    "adjusted_close": "10",
+                    "volume": "100",
+                    "trading_value": "1000",
+                    "price_limit_flag": "false",
+                },
+                {
+                    "date": "2026-01-02",
+                    "code": "1001",
+                    "unadjusted_open": "11",
+                    "unadjusted_high": "13",
+                    "unadjusted_low": "10",
+                    "unadjusted_close": "12",
+                    "adjusted_close": "12",
+                    "volume": "110",
+                    "trading_value": "1320",
+                    "price_limit_flag": "false",
+                },
+                {
+                    "date": "2026-01-03",
+                    "code": "1001",
+                    "unadjusted_open": "12",
+                    "unadjusted_high": "13",
+                    "unadjusted_low": "10",
+                    "unadjusted_close": "11",
+                    "adjusted_close": "11",
+                    "volume": "90",
+                    "trading_value": "990",
+                    "price_limit_flag": "false",
+                },
+            ]
+            write_rows(prices, rows)
+
+            panel, _fields = build_panel(
+                prices,
+                rebalance_date_values=["2026-01-02", "2026-01-03"],
+                input_format="csv",
+            )
+            by_date = {row["rebalance_date"]: row for row in panel.to_dict(orient="records")}
+
+            self.assertAlmostEqual(-2.0, float(by_date["2026-01-02"]["wq_alpha_012_proxy"]))
+            self.assertAlmostEqual(-1.0, float(by_date["2026-01-03"]["wq_alpha_012_proxy"]))
+
+    def test_coverage_flags_include_price_limit_and_short_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            prices = temp / "prices.csv"
+            rows = synthetic_prices(10)
+            for row in rows:
+                if row["code"] == "1001" and row["date"] == "2026-01-10":
+                    row["price_limit_flag"] = "true"
+            write_rows(prices, rows)
+
+            panel, _fields = build_panel(prices, rebalance_date_values=["2026-01-10"], input_format="csv")
+            row = panel[panel["code"] == "1001"].iloc[0]
+
+            self.assertIn("price_limit_flag", row["coverage_flags"])
+            self.assertIn("insufficient_adv20", row["coverage_flags"])
+            self.assertIn("insufficient_adv60", row["coverage_flags"])
 
     def test_csv_and_parquet_output_are_semantically_equal(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
