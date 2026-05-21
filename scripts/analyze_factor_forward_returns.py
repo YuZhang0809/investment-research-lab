@@ -13,7 +13,6 @@ from research_common import (
     parse_date,
     parse_float,
     read_csv,
-    trading_calendar_from_rows,
     trading_day_offset,
     write_csv,
 )
@@ -87,14 +86,49 @@ def build_parser() -> argparse.ArgumentParser:
 def build_price_index(rows: list[dict[str, str]]) -> dict[str, list[PricePoint]]:
     grouped: dict[str, list[PricePoint]] = defaultdict(list)
     for row in rows:
-        code = (row.get("code") or "").strip()
-        row_date = parse_date(row.get("date"), field_name="prices.date")
-        price = parse_float(row.get("adjusted_close") or row.get("unadjusted_close"))
+        code = price_code(row)
+        row_date = price_date(row)
+        price = price_close(row)
         if code and row_date and price and price > 0:
             grouped[code].append(PricePoint(date=row_date, adjusted_close=price))
     for values in grouped.values():
         values.sort(key=lambda item: item.date)
     return grouped
+
+
+def first_present(row: dict[str, str], aliases: list[str]) -> str:
+    for alias in aliases:
+        value = row.get(alias)
+        if value not in (None, ""):
+            return value
+    return ""
+
+
+def price_code(row: dict[str, str]) -> str:
+    return first_present(row, ["code", "Code", "LocalCode"]).strip()
+
+
+def price_date(row: dict[str, str]) -> date | None:
+    return parse_date(first_present(row, ["date", "Date", "price_date"]), field_name="prices.date")
+
+
+def price_close(row: dict[str, str]) -> float | None:
+    return parse_float(
+        first_present(
+            row,
+            [
+                "adjusted_close",
+                "AdjustmentClose",
+                "unadjusted_close",
+                "close",
+                "Close",
+            ],
+        )
+    )
+
+
+def price_calendar(rows: list[dict[str, str]]) -> list[date]:
+    return sorted({parsed for row in rows if (parsed := price_date(row)) is not None})
 
 
 def price_on_date(points: list[PricePoint], target: date) -> PricePoint | None:
@@ -166,10 +200,17 @@ def factor_rows_by_rebalance_date(
     end: date,
 ) -> list[tuple[date, list[dict[str, str]]]]:
     grouped: dict[date, list[dict[str, str]]] = defaultdict(list)
+    seen: set[tuple[date, str]] = set()
     for row in rows:
         rebalance_date = parse_date(row.get("rebalance_date"), field_name="factors.rebalance_date")
         if rebalance_date is None or rebalance_date < start or rebalance_date > end:
             continue
+        code = str(row.get("code", "") or "").strip()
+        if code:
+            key = (rebalance_date, code)
+            if key in seen:
+                raise ValueError(f"Duplicate factor row for rebalance/code: {rebalance_date} {code}")
+            seen.add(key)
         grouped[rebalance_date].append(row)
     return [(rebalance_date, grouped[rebalance_date]) for rebalance_date in sorted(grouped)]
 
@@ -526,18 +567,19 @@ def main() -> int:
     factors = args.factors or DEFAULT_FACTORS
     price_rows = read_csv(args.prices)
     price_index = build_price_index(price_rows)
-    calendar = trading_calendar_from_rows(price_rows)
+    calendar = price_calendar(price_rows)
+    if price_rows and (not calendar or not price_index):
+        raise ValueError("No usable price rows found. Expected code/date/adjusted_close columns or supported aliases.")
 
     output_rows: list[dict[str, Any]] = []
     grouped_output_rows: list[dict[str, Any]] = []
     factor_data_rows: list[dict[str, Any]] = []
     previous_top_assets: dict[str, set[str]] = {}
     previous_factor_ranks: dict[str, dict[str, float]] = {}
-    factor_row_groups: list[tuple[date, list[dict[str, str]]]] = []
+    all_factor_rows: list[dict[str, str]] = []
     for file_path in selected_factor_files(args.factors_dir, start_date, end_date, args.factor_files):
-        all_factor_rows = read_csv(file_path)
-        factor_row_groups.extend(factor_rows_by_rebalance_date(all_factor_rows, start_date, end_date))
-    for rebalance_date, factor_rows in sorted(factor_row_groups, key=lambda item: item[0]):
+        all_factor_rows.extend(read_csv(file_path))
+    for rebalance_date, factor_rows in factor_rows_by_rebalance_date(all_factor_rows, start_date, end_date):
         if not factor_rows:
             continue
         for factor in factors:

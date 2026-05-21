@@ -23,6 +23,10 @@ python scripts\build_price_volume_factor_panel.py `
 not need to be named `factors_YYYYMM.*`, and it may contain multiple
 `rebalance_date` values.
 
+Explicit factor files are read before row-level `--start-date` / `--end-date`
+filtering. For very large panels, slice them upstream when possible. Duplicate
+`rebalance_date + code` rows across explicit files fail fast.
+
 ```powershell
 python scripts\analyze_factor_forward_returns.py `
   --factor-file data\processed\factors\synthetic_price_volume_panel.parquet `

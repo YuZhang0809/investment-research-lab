@@ -11,7 +11,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from analyze_factor_forward_returns import main as analyze_factor_forward_returns_main, write_report  # noqa: E402
+from analyze_factor_forward_returns import (  # noqa: E402
+    factor_rows_by_rebalance_date,
+    main as analyze_factor_forward_returns_main,
+    write_report,
+)
 from build_price_volume_factor_panel import build_panel  # noqa: E402
 from research_common import write_table  # noqa: E402
 
@@ -362,6 +366,143 @@ class FactorDiagnosticsTest(unittest.TestCase):
             self.assertEqual({"wq_alpha_005_proxy", "wq_alpha_011_proxy", "wq_alpha_101_proxy"}, factors)
             self.assertTrue(grouped_rows)
             self.assertTrue(factor_data_rows)
+
+    def test_factor_rows_by_rebalance_date_filters_and_rejects_duplicate_keys(self) -> None:
+        grouped = factor_rows_by_rebalance_date(
+            [
+                {"rebalance_date": "2026-01-31", "code": "A", "factor": "1"},
+                {"rebalance_date": "2026-02-28", "code": "A", "factor": "2"},
+                {"rebalance_date": "2025-12-31", "code": "A", "factor": "0"},
+            ],
+            date(2026, 1, 1),
+            date(2026, 1, 31),
+        )
+
+        self.assertEqual(1, len(grouped))
+        self.assertEqual(date(2026, 1, 31), grouped[0][0])
+        self.assertEqual("A", grouped[0][1][0]["code"])
+        with self.assertRaisesRegex(ValueError, "Duplicate factor row"):
+            factor_rows_by_rebalance_date(
+                [
+                    {"rebalance_date": "2026-01-31", "code": "A", "factor": "1"},
+                    {"rebalance_date": "2026-01-31", "code": "A", "factor": "2"},
+                ],
+                date(2026, 1, 1),
+                date(2026, 1, 31),
+            )
+
+    def test_factor_file_overlap_fails_fast_instead_of_double_counting(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            factor_file_1 = temp / "panel1.csv"
+            factor_file_2 = temp / "panel2.csv"
+            prices_path = temp / "prices.csv"
+            out_dir = temp / "out"
+            report_dir = temp / "reports"
+            factor_fields = ["rebalance_date", "code", "sector", "custom_factor"]
+            write_csv(
+                factor_file_1,
+                [{"rebalance_date": "2026-01-01", "code": "A", "sector": "Tech", "custom_factor": 1}],
+                factor_fields,
+            )
+            write_csv(
+                factor_file_2,
+                [{"rebalance_date": "2026-01-01", "code": "A", "sector": "Tech", "custom_factor": 2}],
+                factor_fields,
+            )
+            write_csv(
+                prices_path,
+                [
+                    {"date": "2026-01-01", "code": "A", "adjusted_close": 100, "unadjusted_close": 100},
+                    {"date": "2026-01-02", "code": "A", "adjusted_close": 101, "unadjusted_close": 101},
+                ],
+                ["date", "code", "adjusted_close", "unadjusted_close"],
+            )
+            original_argv = sys.argv[:]
+            try:
+                sys.argv = [
+                    "analyze_factor_forward_returns.py",
+                    "--factor-file",
+                    str(factor_file_1),
+                    "--factor-file",
+                    str(factor_file_2),
+                    "--prices",
+                    str(prices_path),
+                    "--start-date",
+                    "2026-01-01",
+                    "--end-date",
+                    "2026-01-01",
+                    "--holding-days",
+                    "1",
+                    "--factor",
+                    "custom_factor",
+                    "--out-dir",
+                    str(out_dir),
+                    "--report-dir",
+                    str(report_dir),
+                    "--no-manifest",
+                ]
+                with self.assertRaisesRegex(ValueError, "Duplicate factor row"):
+                    analyze_factor_forward_returns_main()
+            finally:
+                sys.argv = original_argv
+
+    def test_factor_diagnostics_accept_jquants_style_price_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            factors_dir = temp / "factors"
+            prices_path = temp / "prices.csv"
+            out_dir = temp / "out"
+            report_dir = temp / "reports"
+            write_csv(
+                factors_dir / "factors_202601.csv",
+                [
+                    {"rebalance_date": "2026-01-01", "code": "A", "sector": "Tech", "custom_factor": 1},
+                    {"rebalance_date": "2026-01-01", "code": "B", "sector": "Tech", "custom_factor": 2},
+                ],
+                ["rebalance_date", "code", "sector", "custom_factor"],
+            )
+            write_csv(
+                prices_path,
+                [
+                    {"Date": "2026-01-01", "Code": "A", "AdjustmentClose": 100},
+                    {"Date": "2026-01-02", "Code": "A", "AdjustmentClose": 101},
+                    {"Date": "2026-01-01", "Code": "B", "AdjustmentClose": 100},
+                    {"Date": "2026-01-02", "Code": "B", "AdjustmentClose": 102},
+                ],
+                ["Date", "Code", "AdjustmentClose"],
+            )
+            original_argv = sys.argv[:]
+            try:
+                sys.argv = [
+                    "analyze_factor_forward_returns.py",
+                    "--factors-dir",
+                    str(factors_dir),
+                    "--prices",
+                    str(prices_path),
+                    "--start-date",
+                    "2026-01-01",
+                    "--end-date",
+                    "2026-01-01",
+                    "--holding-days",
+                    "1",
+                    "--factor",
+                    "custom_factor",
+                    "--quantiles",
+                    "2",
+                    "--out-dir",
+                    str(out_dir),
+                    "--report-dir",
+                    str(report_dir),
+                    "--no-manifest",
+                ]
+                self.assertEqual(0, analyze_factor_forward_returns_main())
+            finally:
+                sys.argv = original_argv
+
+            summary_rows = read_csv(out_dir / "factor_forward_returns_202601_202601_1d.csv")
+            self.assertEqual("2", summary_rows[0]["observations"])
+            self.assertEqual("0", summary_rows[0]["missing_price_history"])
 
 
 if __name__ == "__main__":

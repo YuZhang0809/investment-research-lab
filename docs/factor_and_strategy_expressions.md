@@ -328,7 +328,8 @@ from `--group-field` when supplied, otherwise from `sector`.
 Use `--factor-file <panel.csv|panel.parquet>` to analyze an explicit generated
 panel such as `build_price_volume_factor_panel.py` output. Explicit factor files
 may contain multiple `rebalance_date` values and do not need to follow the
-`factors_YYYYMM.*` naming convention.
+`factors_YYYYMM.*` naming convention. They are read before row-level date
+filtering, and duplicate `rebalance_date + code` rows fail fast.
 
 When `--grouped-diagnostics --group-field <field>` is supplied, the script also
 writes:

@@ -13,6 +13,7 @@ from research_common import append_manifest, require_pandas, write_csv, write_ta
 
 
 PROFILE_SCHEMA_VERSION = "price_volume_factor_panel_profile_v0_1"
+OK_FLAG = "none"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -42,7 +43,7 @@ def mb(value: float) -> float:
     return value / 1024 / 1024
 
 
-def count_table_rows(path: Path, table_format: str = "auto") -> int | None:
+def count_table_rows(path: Path, table_format: str = "auto") -> int:
     normalized = table_format.lower()
     if normalized == "auto":
         normalized = "parquet" if path.suffix.lower() == ".parquet" or path.is_dir() else "csv"
@@ -51,8 +52,8 @@ def count_table_rows(path: Path, table_format: str = "auto") -> int | None:
             return max(0, sum(1 for _line in file) - 1)
     try:
         import pyarrow.parquet as pq
-    except ImportError:
-        return None
+    except ImportError as exc:
+        raise RuntimeError("pyarrow is required to count Parquet profile inputs. Install requirements.txt first.") from exc
     if path.is_dir():
         return sum(pq.ParquetFile(file).metadata.num_rows for file in path.glob("*.parquet"))
     return pq.ParquetFile(path).metadata.num_rows
@@ -91,7 +92,8 @@ def synthetic_prices(codes: int, days: int):
             close = open_value + ((offset % 5) - 2) * 0.04
             high = max(open_value, close) + 0.30
             low = max(0.01, min(open_value, close) - 0.25)
-            volume = 10_000 + code_index * 25 + offset * 3
+            volume_cycle = ((offset + code_index) % 9 - 4) * 35
+            volume = 10_000 + code_index * 25 + offset * 3 + volume_cycle
             rows.append(
                 {
                     "date": current.isoformat(),
@@ -124,9 +126,6 @@ def write_synthetic_inputs(
     dates = synthetic_rebalance_dates(date(2020, 1, 1), days, rebalances)
     price_path = directory / f"synthetic_price_volume_prices.{table_format}"
     universe_path = directory / f"synthetic_price_volume_universe.{table_format}"
-    if table_format == "csv":
-        price_path = price_path.with_suffix(".csv")
-        universe_path = universe_path.with_suffix(".csv")
     rebalance_values = [value.isoformat() for value in dates]
     universe_rows = []
     sectors = prices_frame[["code", "sector"]].drop_duplicates("code")
@@ -156,9 +155,13 @@ def flag_counts(frame: Any, field: str) -> dict[str, int]:
     values = frame[field].fillna("").astype(str) if field in frame.columns else []
     counts: dict[str, int] = {}
     for value in values:
-        normalized = value or "none"
+        normalized = value or OK_FLAG
         counts[normalized] = counts.get(normalized, 0) + 1
     return counts
+
+
+def public_path_label(path: Path | None) -> str:
+    return path.name if path is not None else ""
 
 
 def profile_price_volume_factor_panel(
@@ -192,7 +195,7 @@ def profile_price_volume_factor_panel(
             group_field=group_field,
             input_format=input_format,
         )
-        current, peak = tracemalloc.get_traced_memory()
+        _current, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
     runtime_seconds = time.perf_counter() - started
@@ -223,12 +226,12 @@ def profile_price_volume_factor_panel(
         "coverage_issue_row_count": coverage_issue_rows,
         "coverage_issue_row_rate": f"{coverage_issue_rows / output_rows:.6f}" if output_rows else "0",
         "coverage_clean_rate": f"{1 - coverage_issue_rows / output_rows:.6f}" if output_rows else "0",
-        "vwap_proxy_ok_count": vwap_counts.get("none", 0),
-        "vwap_proxy_flagged_count": output_rows - vwap_counts.get("none", 0),
+        "vwap_proxy_ok_count": vwap_counts.get(OK_FLAG, 0),
+        "vwap_proxy_flagged_count": output_rows - vwap_counts.get(OK_FLAG, 0),
         "missing_volume_count": vwap_counts.get("missing_volume", 0),
         "zero_volume_count": vwap_counts.get("zero_volume", 0),
         "missing_trading_value_count": vwap_counts.get("missing_trading_value", 0),
-        "panel_output_path": str(panel_out or ""),
+        "panel_output_file": public_path_label(panel_out),
     }
     return summary, panel, fields
 
@@ -284,7 +287,7 @@ SUMMARY_FIELDS = [
     "missing_volume_count",
     "zero_volume_count",
     "missing_trading_value_count",
-    "panel_output_path",
+    "panel_output_file",
 ]
 
 

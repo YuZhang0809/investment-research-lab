@@ -17,6 +17,7 @@ The profile writes a CSV summary and a Markdown report with:
 - `missing_flags` row rate
 - `coverage_flags` row rate
 - `vwap_proxy_flag` counts
+- output panel basename when `--panel-out` is supplied
 
 `tracemalloc` does not capture every native allocation used by pandas or
 pyarrow. For full-market private runs, also watch process RSS from the operating
@@ -58,7 +59,8 @@ python scripts\profile_price_volume_factor_panel.py `
 ```
 
 Keep private paths, real tickers, and generated full-market panels outside the
-public repo.
+public repo. Profile summaries and reports store only the `--panel-out`
+basename, not the full local path.
 
 ## Memory Controls
 
