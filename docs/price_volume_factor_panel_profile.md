@@ -69,6 +69,20 @@ basename, not the full local path.
   profiles.
 - Prefer `--universe-panel` so output rows are limited to
   `rebalance_date x included codes`.
+- With a universe panel, the builder trims daily prices to the requested codes
+  and the required lookback window before rolling feature calculation. This is
+  the preferred path for full-market validation.
 - Do not rely on the builder default of all price dates for full-market runs.
+- For long histories, shard validation by year or rebalance block first, then
+  concatenate compatible panels outside the public repo if needed.
 - Treat 32 GB memory as an environment constraint to verify with this profile,
   not as a public performance promise.
+
+## Interpreting Close Fallback Metrics
+
+Price-volume returns use an effective close selected row-by-row from adjusted
+close aliases first, then close/unadjusted close aliases. Rows using a fallback
+are marked with `adjusted_close_fallback_used` in `coverage_flags`; rows with no
+usable close are marked `effective_close_missing` in `missing_flags`. Return-
+dependent proxy diagnostics should not be interpreted until `effective_close`
+coverage is healthy.

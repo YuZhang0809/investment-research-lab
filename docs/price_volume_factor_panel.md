@@ -31,6 +31,13 @@ J-Quants-style aliases such as `Date`, `Code`, `LocalCode`,
 `AdjustmentClose`, `Open`, `High`, `Low`, `Close`, `Volume`, and
 `TurnoverValue` are accepted where possible.
 
+Close inputs are coalesced row-by-row for price-volume research. The builder
+uses `adjusted_close` / `AdjustmentClose` first, then falls back to `close` /
+`Close` / `unadjusted_close` when the adjusted close column exists but a row is
+blank. Fallback rows are marked with `effective_close_source` and
+`adjusted_close_fallback_used`; rows with no usable close are marked
+`effective_close_missing`.
+
 Optional:
 
 - `--rebalance-date` / `--rebalance-dates`; defaults to all price dates
@@ -46,6 +53,9 @@ Duplicate `(code, date)` price rows fail fast.
 Base derived fields:
 
 ```text
+effective_close
+effective_close_source
+effective_close_flag
 returns
 price_staleness_calendar_days
 dollar_volume
@@ -94,6 +104,11 @@ operator_version
 the field is blank and the issue is surfaced in `vwap_proxy_flag` and
 `missing_flags`.
 
+Return-dependent proxy fields use `effective_close`, not the raw
+`adjusted_close` column name. This prevents a present-but-blank adjusted close
+column from making `returns` and return-based proxies entirely missing when a
+usable close alias is available.
+
 ## Engineering Profile
 
 Use `scripts/profile_price_volume_factor_panel.py` before large runs. It reports
@@ -102,7 +117,9 @@ memory on synthetic or local inputs. See
 `docs/price_volume_factor_panel_profile.md`.
 
 For full-market private runs, pass explicit rebalance dates and a universe panel
-so output rows are bounded by `rebalance_date x included codes`.
+so output rows are bounded by `rebalance_date x included codes`. The builder
+also trims daily price history to universe-panel codes and the required
+lookback window before computing rolling features.
 
 ## Diagnostics
 

@@ -372,9 +372,11 @@ python scripts\build_price_volume_factor_panel.py `
 
 The output is keyed by `rebalance_date + code` and can be joined through
 `external_factor_panels`. It includes base OHLCV features such as
-`vwap_proxy`, `candle_pressure`, `range_position`, `adv20`, and 17
+`effective_close`, `vwap_proxy`, `candle_pressure`, `range_position`, `adv20`, and 17
 `wq_alpha_*_proxy` fields intended for filters, diagnostics, weak score inputs,
-or execution-timing experiments.
+or execution-timing experiments. `effective_close` is selected row-by-row from
+adjusted close aliases first, then close/unadjusted close aliases; fallback rows
+are flagged for data-quality review.
 
 Profile scale and memory behavior before larger runs:
 
@@ -387,6 +389,11 @@ python scripts\profile_price_volume_factor_panel.py `
   --report reports\engineering\price_volume_factor_panel_profile.md `
   --no-manifest
 ```
+
+For full-market runs, use explicit rebalance dates plus a universe panel. That
+lets the builder trim price history to requested codes and the required lookback
+window before rolling feature calculation. For long histories, validate year or
+rebalance-block shards before attempting a one-shot run.
 
 Run Alphalens-style diagnostics directly from a generated panel:
 

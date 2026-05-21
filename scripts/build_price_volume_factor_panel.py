@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +9,7 @@ from research_common import append_manifest, parse_date, read_table, require_pan
 
 
 OPERATOR_VERSION = "price_volume_proxy_v0_1"
+PRICE_VOLUME_LOOKBACK_CALENDAR_DAYS = 220
 ALPHA_FIELDS = [
     "wq_alpha_005_proxy",
     "wq_alpha_011_proxy",
@@ -33,6 +34,9 @@ BASE_OUTPUT_FIELDS = [
     "code",
     "latest_price_date",
     "price_staleness_calendar_days",
+    "effective_close",
+    "effective_close_source",
+    "effective_close_flag",
     "returns",
     "dollar_volume",
     "adv20",
@@ -82,12 +86,37 @@ def numeric_series(frame: Any, aliases: list[str]):
     return pd.to_numeric(values, errors="coerce")
 
 
+def coalesced_numeric_series(frame: Any, aliases: list[str]):
+    pd = require_pandas()
+    result = pd.Series([pd.NA] * len(frame), index=frame.index, dtype="Float64")
+    source = pd.Series([""] * len(frame), index=frame.index, dtype="string")
+    for alias in aliases:
+        if alias not in frame.columns:
+            continue
+        values = numeric_series(frame, [alias])
+        fill = result.isna() & values.notna()
+        result.loc[fill] = values.loc[fill]
+        source.loc[fill] = alias
+    return result, source
+
+
 def normalize_prices(path: Path, input_format: str = "auto", group_field: str | None = None):
     pd = require_pandas()
     frame = read_table(path, format=input_format)
     code_col = first_column(frame, ["code", "Code", "LocalCode"], required=True)
     date_col = first_column(frame, ["date", "Date", "price_date"], required=True)
     price_limit_col = first_column(frame, ["price_limit_flag", "PriceLimitFlag"])
+    effective_close, effective_close_source = coalesced_numeric_series(
+        frame,
+        ["adjusted_close", "AdjustmentClose", "close", "Close", "unadjusted_close"],
+    )
+    effective_close_flag = effective_close_source.where(
+        effective_close_source.isin(["", "adjusted_close", "AdjustmentClose"]),
+        "adjusted_close_fallback_used",
+    )
+    effective_close_flag = effective_close_flag.where(effective_close.notna(), "effective_close_missing").replace(
+        {"adjusted_close": "", "AdjustmentClose": ""}
+    )
     output_values: dict[str, Any] = {
         "code": frame[code_col].astype(str).str.strip(),
         "date": pd.to_datetime(frame[date_col], errors="coerce").dt.date,
@@ -95,7 +124,10 @@ def normalize_prices(path: Path, input_format: str = "auto", group_field: str | 
         "high": numeric_series(frame, ["unadjusted_high", "high", "High", "AdjustmentHigh", "adjusted_high"]),
         "low": numeric_series(frame, ["unadjusted_low", "low", "Low", "AdjustmentLow", "adjusted_low"]),
         "close": numeric_series(frame, ["unadjusted_close", "close", "Close", "AdjustmentClose", "adjusted_close"]),
-        "adjusted_close": numeric_series(frame, ["adjusted_close", "AdjustmentClose", "close", "Close", "unadjusted_close"]),
+        "adjusted_close": effective_close,
+        "effective_close": effective_close,
+        "effective_close_source": effective_close_source,
+        "effective_close_flag": effective_close_flag,
         "volume": numeric_series(frame, ["volume", "Volume", "AdjustmentVolume"]),
         "trading_value": numeric_series(frame, ["trading_value", "TradingValue", "TurnoverValue", "turnover_value"]),
         "price_limit_flag": frame[price_limit_col].astype(str).str.lower() if price_limit_col is not None else "",
@@ -165,6 +197,25 @@ def normalize_universe_panel(path: Path, group_field: str | None, input_format: 
         duplicate = output.loc[duplicates, ["rebalance_date", "code"]].iloc[0]
         raise ValueError(f"Duplicate universe panel row for rebalance/code: {duplicate['rebalance_date']} {duplicate['code']}")
     return output
+
+
+def active_rebalance_dates(rebalance_dates: list[date], universe_panel: Any | None = None) -> list[date]:
+    if universe_panel is None:
+        return rebalance_dates
+    values = sorted(value for value in universe_panel["rebalance_date"].dropna().unique())
+    return values
+
+
+def trim_price_history(prices: Any, rebalance_dates: list[date], universe_panel: Any | None = None):
+    if not rebalance_dates:
+        return prices
+    trimmed = prices
+    if universe_panel is not None:
+        codes = set(universe_panel["code"].dropna().astype(str))
+        trimmed = trimmed[trimmed["code"].isin(codes)].copy()
+    start = min(rebalance_dates) - timedelta(days=PRICE_VOLUME_LOOKBACK_CALENDAR_DAYS)
+    end = max(rebalance_dates)
+    return trimmed[(trimmed["date"] >= start) & (trimmed["date"] <= end)].copy()
 
 
 def delay(frame: Any, field: str, periods: int):
@@ -287,7 +338,7 @@ def decay_linear(frame: Any, field: str, window: int):
 def add_daily_features(frame: Any):
     pd = require_pandas()
     frame = frame.copy()
-    frame["returns"] = safe_divide(frame["adjusted_close"], delay(frame, "adjusted_close", 1)) - 1
+    frame["returns"] = safe_divide(frame["effective_close"], delay(frame, "effective_close", 1)) - 1
     frame["dollar_volume"] = frame["trading_value"].where(frame["trading_value"].notna(), frame["close"] * frame["volume"])
     frame["adv20"] = rolling(frame, "dollar_volume", 20, "mean", min_periods=20)
     frame["adv60"] = rolling(frame, "dollar_volume", 60, "mean", min_periods=60)
@@ -424,6 +475,9 @@ def build_base_panel(prices: Any, rebalance_dates: list[date], universe_panel: A
 def add_flags(frame: Any):
     frame = frame.copy()
     latest_price_missing = frame["latest_price_date"].fillna("").astype(str).isin({"", "NaT"})
+    effective_close_missing = frame["effective_close"].isna()
+    frame.loc[effective_close_missing & frame["effective_close_flag"].fillna("").eq(""), "effective_close_flag"] = "effective_close_missing"
+    effective_close_flags = frame["effective_close_flag"].fillna("").astype(str)
     vwap_flags = frame["vwap_proxy_flag"].fillna("").astype(str)
     alpha_missing = frame[ALPHA_FIELDS].isna()
     price_limit_values = frame["price_limit_flag"].fillna("").astype(str).str.lower()
@@ -437,6 +491,9 @@ def add_flags(frame: Any):
         missing = []
         if bool(latest_price_missing.iloc[index]):
             missing.append("missing_price_on_or_before_rebalance")
+        effective_close_flag = effective_close_flags.iloc[index]
+        if effective_close_flag == "effective_close_missing":
+            missing.append(effective_close_flag)
         vwap_flag = vwap_flags.iloc[index]
         if vwap_flag:
             missing.append(vwap_flag)
@@ -448,6 +505,8 @@ def add_flags(frame: Any):
             coverage.append("insufficient_adv20")
         if bool(adv60_missing.iloc[index]):
             coverage.append("insufficient_adv60")
+        if effective_close_flag == "adjusted_close_fallback_used":
+            coverage.append(effective_close_flag)
         missing_flags.append(";".join(dict.fromkeys(missing)))
         coverage_flags.append(";".join(dict.fromkeys(coverage)))
     frame["missing_flags"] = missing_flags
@@ -466,9 +525,11 @@ def build_panel(
     input_format: str = "auto",
 ):
     prices = normalize_prices(prices_path, input_format, group_field=group_field)
-    daily = add_proxy_alphas(add_daily_features(prices))
     rebalance_dates = load_rebalance_dates(rebalance_dates_path, rebalance_date_values, prices)
     universe_panel = normalize_universe_panel(universe_panel_path, group_field, input_format) if universe_panel_path else None
+    output_rebalance_dates = active_rebalance_dates(rebalance_dates, universe_panel)
+    prices = trim_price_history(prices, output_rebalance_dates, universe_panel)
+    daily = add_proxy_alphas(add_daily_features(prices))
     panel = build_base_panel(daily, rebalance_dates, universe_panel, group_field)
     panel = add_flags(panel)
     pd = require_pandas()

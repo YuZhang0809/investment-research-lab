@@ -21,6 +21,7 @@ from build_price_volume_factor_panel import (  # noqa: E402
     rolling_arg,
     rolling_cov,
     safe_divide,
+    trim_price_history,
     ts_rank,
 )
 from external_factor_panels import join_external_factor_panels  # noqa: E402
@@ -133,6 +134,26 @@ class PriceVolumeFactorPanelTest(unittest.TestCase):
             self.assertEqual("zero_volume", row["vwap_proxy_flag"])
             self.assertIn("zero_volume", row["missing_flags"])
 
+    def test_blank_adjusted_close_falls_back_row_wise_to_unadjusted_close(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            prices = temp / "prices.csv"
+            rows = synthetic_prices(80)
+            for row in rows:
+                row["adjusted_close"] = ""
+            write_rows(prices, rows)
+
+            panel, _fields = build_panel(prices, rebalance_date_values=["2026-03-01"], input_format="csv")
+            row = panel[panel["code"] == "1001"].iloc[0]
+
+            self.assertEqual("unadjusted_close", row["effective_close_source"])
+            self.assertEqual("adjusted_close_fallback_used", row["effective_close_flag"])
+            self.assertIn("adjusted_close_fallback_used", row["coverage_flags"])
+            self.assertNotEqual("", row["effective_close"])
+            self.assertNotEqual("", row["returns"])
+            self.assertNotEqual("", row["wq_alpha_033_proxy"])
+            self.assertNotEqual("", row["wq_alpha_034_proxy"])
+
     def test_ts_rank_operator_uses_only_rolling_window(self) -> None:
         pd = __import__("pandas")
         frame = pd.DataFrame(
@@ -239,6 +260,21 @@ class PriceVolumeFactorPanelTest(unittest.TestCase):
             self.assertIn("sector", fields)
             self.assertEqual("Tech", by_code["1001"]["sector"])
             self.assertEqual("Utility", by_code["1002"]["sector"])
+
+    def test_trim_price_history_limits_universe_codes_and_lookback_window(self) -> None:
+        pd = __import__("pandas")
+        prices = pd.DataFrame(
+            {
+                "code": ["1001", "1001", "1001", "1002"],
+                "date": [date(2025, 5, 1), date(2025, 8, 1), date(2026, 1, 31), date(2026, 1, 31)],
+            }
+        )
+        universe = pd.DataFrame({"rebalance_date": [date(2026, 1, 31)], "code": ["1001"]})
+
+        trimmed = trim_price_history(prices, [date(2026, 1, 31)], universe)
+
+        self.assertEqual(["1001", "1001"], trimmed["code"].tolist())
+        self.assertEqual([date(2025, 8, 1), date(2026, 1, 31)], trimmed["date"].tolist())
 
     def test_universe_group_field_takes_precedence_over_price_group_field(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

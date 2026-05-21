@@ -142,13 +142,19 @@ Parquet output compatible with `external_factor_panels`.
 Output fields include:
 
 ```text
-rebalance_date,code,latest_price_date,price_staleness_calendar_days,returns,dollar_volume,adv20,adv60,vwap_proxy,intraday_return,range_position,candle_pressure,close_to_vwap,high_low_range,wq_alpha_005_proxy,wq_alpha_011_proxy,wq_alpha_012_proxy,wq_alpha_024_proxy,wq_alpha_028_proxy,wq_alpha_032_proxy,wq_alpha_033_proxy,wq_alpha_034_proxy,wq_alpha_041_proxy,wq_alpha_042_proxy,wq_alpha_043_proxy,wq_alpha_047_proxy,wq_alpha_053_proxy,wq_alpha_057_proxy,wq_alpha_060_proxy,wq_alpha_083_proxy,wq_alpha_101_proxy,missing_flags,coverage_flags,vwap_proxy_flag,operator_version
+rebalance_date,code,latest_price_date,price_staleness_calendar_days,effective_close,effective_close_source,effective_close_flag,returns,dollar_volume,adv20,adv60,vwap_proxy,intraday_return,range_position,candle_pressure,close_to_vwap,high_low_range,wq_alpha_005_proxy,wq_alpha_011_proxy,wq_alpha_012_proxy,wq_alpha_024_proxy,wq_alpha_028_proxy,wq_alpha_032_proxy,wq_alpha_033_proxy,wq_alpha_034_proxy,wq_alpha_041_proxy,wq_alpha_042_proxy,wq_alpha_043_proxy,wq_alpha_047_proxy,wq_alpha_053_proxy,wq_alpha_057_proxy,wq_alpha_060_proxy,wq_alpha_083_proxy,wq_alpha_101_proxy,missing_flags,coverage_flags,vwap_proxy_flag,operator_version
 ```
 
 These fields are proxy research features, not exact WorldQuant 101 formula
 replications and not standalone strategy conclusions. `vwap_proxy` is
 `trading_value / volume`; missing or zero-volume rows keep blank proxy values
 and explicit flags.
+
+`effective_close` is the row-wise close used for returns and return-dependent
+proxy fields. It prefers adjusted close aliases and falls back to close or
+unadjusted close aliases when adjusted close is blank for a row. Fallback rows
+carry `adjusted_close_fallback_used` in `coverage_flags`; rows with no usable
+close carry `effective_close_missing` in `missing_flags`.
 
 `profile_price_volume_factor_panel.py` writes an engineering profile:
 
