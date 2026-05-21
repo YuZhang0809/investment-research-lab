@@ -355,6 +355,27 @@ The output is keyed by `rebalance_date + code` and can be joined through
 downside volatility, 6M/12M max drawdown, benchmark beta, stale-price flags,
 price-limit flags, and insufficient-history `missing_flags`.
 
+### Price-Volume Proxy Factor Panels
+
+`build_price_volume_factor_panel.py` builds WQ-style price-volume proxy fields
+from daily OHLCV data. It does not replicate the full WorldQuant 101 formulas
+and does not create strategy conclusions:
+
+```powershell
+python scripts\build_price_volume_factor_panel.py `
+  --prices <synthetic_daily_ohlcv.csv> `
+  --rebalance-date 2026-03-31 `
+  --out <price_volume_factors_202603.parquet> `
+  --output-format parquet `
+  --no-manifest
+```
+
+The output is keyed by `rebalance_date + code` and can be joined through
+`external_factor_panels`. It includes base OHLCV features such as
+`vwap_proxy`, `candle_pressure`, `range_position`, `adv20`, and 17
+`wq_alpha_*_proxy` fields intended for filters, diagnostics, weak score inputs,
+or execution-timing experiments.
+
 ### Optional Factor Contracts And Crowding Panels
 
 Validate optional dividend, balance-sheet, or crowding inputs before joining or

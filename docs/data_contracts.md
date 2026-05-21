@@ -133,6 +133,23 @@ Output fields include:
 latest_price_date,latest_price_stale,price_staleness_trading_days,price_limit_flag,realized_vol_3m,realized_vol_6m,realized_vol_12m,downside_vol_6m,downside_vol_12m,max_drawdown_6m,max_drawdown_12m,beta_to_benchmark,history_observations_3m,history_observations_6m,history_observations_12m,benchmark_observations,defensive_filter_reasons,missing_flags
 ```
 
+## Price-Volume Factor Panels
+
+`build_price_volume_factor_panel.py` creates WQ-style proxy factor panels keyed
+by `rebalance_date + code`. It consumes daily OHLCV data and writes CSV or
+Parquet output compatible with `external_factor_panels`.
+
+Output fields include:
+
+```text
+rebalance_date,code,latest_price_date,returns,dollar_volume,adv20,adv60,vwap_proxy,intraday_return,range_position,candle_pressure,close_to_vwap,high_low_range,wq_alpha_005_proxy,wq_alpha_011_proxy,wq_alpha_012_proxy,wq_alpha_024_proxy,wq_alpha_028_proxy,wq_alpha_032_proxy,wq_alpha_033_proxy,wq_alpha_034_proxy,wq_alpha_041_proxy,wq_alpha_042_proxy,wq_alpha_043_proxy,wq_alpha_047_proxy,wq_alpha_053_proxy,wq_alpha_057_proxy,wq_alpha_060_proxy,wq_alpha_083_proxy,wq_alpha_101_proxy,missing_flags,coverage_flags,vwap_proxy_flag,operator_version
+```
+
+These fields are proxy research features, not exact WorldQuant 101 formula
+replications and not standalone strategy conclusions. `vwap_proxy` is
+`trading_value / volume`; missing or zero-volume rows keep blank proxy values
+and explicit flags.
+
 ## Crowding Factor Panels
 
 `build_crowding_factor_panel.py` consumes a generic local issuer-level panel with `code`,

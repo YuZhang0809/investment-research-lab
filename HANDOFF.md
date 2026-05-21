@@ -31,6 +31,7 @@ Initial commit:
 - Generic Standard-compatible event account simulation tooling
 - PIT derived fundamental factor panel tooling for public-safe event and factor research
 - Price defensive and crowding factor panel tooling for synthetic/public-safe factor research
+- Price-volume proxy factor panel tooling for WQ-style OHLCV research primitives
 - Example configs ending in `.example.yml`
 - Synthetic sample CSVs
 - Empty templates for holdings, trades, events, and paper-trading logs
