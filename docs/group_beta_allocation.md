@@ -5,14 +5,15 @@ generic engine capability for sectors, industries, regions, size buckets, or
 synthetic theme-like groups. It does not encode private groups, private
 allocation weights, real holdings, real reports, or strategy conclusions.
 
-The current scope is data and signal research:
+The current scope is sidecar group research:
 
 ```text
 group membership -> group basket returns -> group signal panel
+  -> group allocation panel -> security look-through targets -> group attribution
 ```
 
-Group allocation, look-through expansion, and benchmark attribution are planned
-as later layers.
+These tools do not modify `run_qvm_walkforward.py`, do not place orders, and do
+not encode private group definitions or allocation parameters.
 
 ## Group Membership
 
@@ -129,5 +130,99 @@ rebalance_date,group_type,group_id,group_name,coverage,constituent_count,<signal
 ```
 
 The signal panel is a research input. It does not produce allocation weights or
-security-level orders. Later layers should consume this panel to build
-benchmark-relative group allocations and look-through diagnostics.
+security-level orders.
+
+## Group Allocation
+
+`build_group_allocation_panel.py` consumes group signals and produces
+benchmark-relative group target weights:
+
+```powershell
+python scripts\build_group_allocation_panel.py `
+  --group-signals data\processed\groups\group_signals.parquet `
+  --benchmark-weights data\synthetic\group_benchmark_weights.csv `
+  --score-field group_return_6p `
+  --mode score_tilt `
+  --active-budget 0.10 `
+  --max-active-weight 0.05 `
+  --max-turnover 0.10 `
+  --out data\processed\groups\group_allocation.parquet `
+  --no-manifest
+```
+
+Supported allocation modes:
+
+- `score_tilt`: start from benchmark weights and add a centered score tilt.
+- `top_n_equal`: allocate equally to the top `--top-n` scored groups.
+- `inverse_volatility`: allocate by inverse volatility using `--vol-field`.
+
+Supported controls:
+
+- `--max-group-weight`
+- `--max-active-weight`
+- `--max-total-active-weight`
+- `--max-turnover`
+- `--group-type-cap GROUP_TYPE=MAX_WEIGHT`
+- `--cash-weight`
+
+Output contract:
+
+```text
+rebalance_date,group_type,group_id,group_name,benchmark_weight,active_weight,target_weight,current_weight,trade_weight,score,constraint_status,constraint_reasons
+```
+
+If no benchmark-weight file is supplied, the builder uses an equal-weight group
+benchmark for that rebalance date. If no current-weight file is supplied, it
+uses the previous target weights, with the first date starting from the
+benchmark. Constraint fields are audit fields; clipped weight is not silently
+redistributed unless the specific control defines a proportional scale.
+
+## Look-Through Targets
+
+`expand_group_allocation_to_security_targets.py` expands group target weights
+back to security-level look-through weights through the membership panel:
+
+```powershell
+python scripts\expand_group_allocation_to_security_targets.py `
+  --group-allocation data\processed\groups\group_allocation.parquet `
+  --membership-panel data\synthetic\group_membership.csv `
+  --weighting-mode equal_weight `
+  --single-name-cap 0.05 `
+  --out data\processed\groups\group_lookthrough_targets.parquet `
+  --no-manifest
+```
+
+Output contract:
+
+```text
+rebalance_date,code,target_weight,source_group_count,source_groups,lookthrough_constraint_status,lookthrough_constraint_reasons
+```
+
+If a security belongs to multiple groups, contributions are summed and
+`source_groups` records the group-level contributions. `--single-name-cap`
+clips the look-through target and reports `single_name_cap`; it does not
+redistribute the excess. This keeps the diagnostic separate from executable
+portfolio construction.
+
+## Group Attribution
+
+`analyze_group_allocation_attribution.py` joins prior group allocation weights
+to subsequent group basket returns:
+
+```powershell
+python scripts\analyze_group_allocation_attribution.py `
+  --group-allocation data\processed\groups\group_allocation.parquet `
+  --basket-returns data\processed\groups\group_basket_returns.parquet `
+  --out data\processed\groups\group_allocation_attribution.parquet `
+  --no-manifest
+```
+
+Output contract:
+
+```text
+date,allocation_date,group_type,group_id,group_name,target_weight,benchmark_weight,active_weight,group_return,portfolio_contribution,benchmark_contribution,active_contribution,missing_flags
+```
+
+For a return date, the attribution uses the latest allocation date strictly
+before that return date. Same-date allocations are not used for same-period
+returns.

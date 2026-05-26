@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from build_group_basket_return_panel import build_panel as build_basket_panel  # noqa: E402
+from build_group_allocation_panel import build_panel as build_allocation_panel  # noqa: E402
 from build_group_signal_panel import (  # noqa: E402
     aggregate_values,
     benchmark_returns,
@@ -21,6 +22,8 @@ from build_group_signal_panel import (  # noqa: E402
     load_basket_rows,
     parse_aggregation,
 )
+from analyze_group_allocation_attribution import build_panel as build_group_attribution_panel  # noqa: E402
+from expand_group_allocation_to_security_targets import build_panel as build_lookthrough_panel  # noqa: E402
 from group_beta_common import fmt, load_group_membership_panel, memberships_for_date  # noqa: E402
 from validate_group_membership_panel import validate_panel  # noqa: E402
 
@@ -362,6 +365,118 @@ class GroupBetaAllocationTest(unittest.TestCase):
 
         self.assertAlmostEqual(15.0, float(aggregate_values([(10.0, 1), (20.0, 1)], "p50") or 0))
         self.assertEqual("", fmt(float("nan")))
+
+    def test_group_allocation_score_tilt_caps_and_missing_score(self) -> None:
+        rebalance = date(2026, 2, 28)
+        rows = build_allocation_panel(
+            {
+                rebalance: {
+                    ("theme", "theme_a"): {"group_name": "Theme A", "score": "2.0"},
+                    ("theme", "theme_b"): {"group_name": "Theme B", "score": "-1.0"},
+                    ("theme", "theme_c"): {"group_name": "Theme C", "score": ""},
+                }
+            },
+            benchmark_weights_by_date={
+                rebalance: {
+                    ("theme", "theme_a"): 0.30,
+                    ("theme", "theme_b"): 0.30,
+                    ("theme", "theme_c"): 0.40,
+                }
+            },
+            score_field="score",
+            active_budget=0.20,
+            max_active_weight=0.05,
+            max_group_weight=0.34,
+        )
+        by_group = {row["group_id"]: row for row in rows}
+
+        self.assertLessEqual(float(by_group["theme_a"]["active_weight"]), 0.05)
+        self.assertAlmostEqual(0.34, float(by_group["theme_a"]["target_weight"]))
+        self.assertIn("max_active_weight", by_group["theme_a"]["constraint_reasons"])
+        self.assertIn("max_group_weight", by_group["theme_a"]["constraint_reasons"])
+        self.assertIn("missing_score", by_group["theme_c"]["constraint_reasons"])
+        self.assertIn("excluded_missing_score", by_group["theme_c"]["constraint_reasons"])
+
+    def test_group_allocation_group_type_and_turnover_caps(self) -> None:
+        rebalance = date(2026, 2, 28)
+        rows = build_allocation_panel(
+            {
+                rebalance: {
+                    ("theme", "theme_a"): {"group_name": "Theme A", "score": "10"},
+                    ("theme", "theme_b"): {"group_name": "Theme B", "score": "8"},
+                    ("sector", "sector_a"): {"group_name": "Sector A", "score": "1"},
+                }
+            },
+            mode="top_n_equal",
+            top_n=3,
+            current_weights_by_date={rebalance: {("theme", "theme_a"): 0.0, ("theme", "theme_b"): 0.0, ("sector", "sector_a"): 1.0}},
+            group_type_caps={"theme": 0.50},
+            max_turnover=0.10,
+        )
+        by_group = {(row["group_type"], row["group_id"]): row for row in rows}
+        turnover = 0.5 * sum(abs(float(row["target_weight"]) - float(row["current_weight"])) for row in rows)
+
+        self.assertLessEqual(turnover, 0.100000001)
+        self.assertIn("group_type_cap", by_group[("theme", "theme_a")]["constraint_reasons"])
+        self.assertIn("max_turnover", by_group[("theme", "theme_a")]["constraint_reasons"])
+
+    def test_group_lookthrough_aggregates_overlapping_memberships_and_caps_names(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            membership = temp / "membership.csv"
+            write_rows(
+                membership,
+                [
+                    {"rebalance_date": "2026-02-28", "code": "1001", "group_type": "theme", "group_id": "theme_a", "group_name": "Theme A", "membership_weight": "1"},
+                    {"rebalance_date": "2026-02-28", "code": "1002", "group_type": "theme", "group_id": "theme_a", "group_name": "Theme A", "membership_weight": "1"},
+                    {"rebalance_date": "2026-02-28", "code": "1001", "group_type": "theme", "group_id": "theme_b", "group_name": "Theme B", "membership_weight": "1"},
+                ],
+            )
+            allocation = {
+                date(2026, 2, 28): {
+                    ("theme", "theme_a"): {"target_weight": "0.6"},
+                    ("theme", "theme_b"): {"target_weight": "0.4"},
+                }
+            }
+
+            rows = build_lookthrough_panel(
+                allocation,
+                membership,
+                rebalance_dates=[date(2026, 2, 28)],
+                input_format="csv",
+                weighting_mode="equal_weight",
+                single_name_cap=0.50,
+            )
+            by_code = {row["code"]: row for row in rows}
+
+            self.assertAlmostEqual(0.50, float(by_code["1001"]["target_weight"]))
+            self.assertEqual(2, by_code["1001"]["source_group_count"])
+            self.assertIn("single_name_cap", by_code["1001"]["lookthrough_constraint_reasons"])
+            self.assertAlmostEqual(0.30, float(by_code["1002"]["target_weight"]))
+
+    def test_group_allocation_attribution_uses_prior_allocation(self) -> None:
+        rows = build_group_attribution_panel(
+            {
+                date(2026, 1, 31): {
+                    ("theme", "theme_a"): {"group_name": "Theme A", "target_weight": "0.6", "benchmark_weight": "0.5", "active_weight": "0.1"},
+                    ("theme", "theme_b"): {"group_name": "Theme B", "target_weight": "0.4", "benchmark_weight": "0.5", "active_weight": "-0.1"},
+                }
+            },
+            {
+                date(2026, 2, 28): {
+                    ("theme", "theme_a"): {"group_name": "Theme A", "basket_return": "0.10"},
+                    ("theme", "theme_b"): {"group_name": "Theme B", "basket_return": "-0.20"},
+                }
+            },
+        )
+        by_group = {row["group_id"]: row for row in rows}
+
+        self.assertEqual(date(2026, 1, 31), by_group["theme_a"]["allocation_date"])
+        self.assertAlmostEqual(0.06, float(by_group["theme_a"]["portfolio_contribution"]))
+        self.assertAlmostEqual(0.05, float(by_group["theme_a"]["benchmark_contribution"]))
+        self.assertAlmostEqual(0.01, float(by_group["theme_a"]["active_contribution"]))
+        self.assertAlmostEqual(-0.08, float(by_group["theme_b"]["portfolio_contribution"]))
+        self.assertAlmostEqual(0.02, float(by_group["theme_b"]["active_contribution"]))
 
 
 if __name__ == "__main__":

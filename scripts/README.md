@@ -487,6 +487,46 @@ python scripts\build_group_signal_panel.py `
 This is a research data layer. It does not allocate portfolio weights or expand
 groups back to executable security targets.
 
+Build a sidecar group allocation panel:
+
+```powershell
+python scripts\build_group_allocation_panel.py `
+  --group-signals <group_signals.parquet> `
+  --benchmark-weights <synthetic_group_benchmark_weights.csv> `
+  --score-field group_return_6p `
+  --mode score_tilt `
+  --active-budget 0.10 `
+  --max-active-weight 0.05 `
+  --max-turnover 0.10 `
+  --out <group_allocation.parquet> `
+  --no-manifest
+```
+
+Expand group weights back to security-level look-through diagnostics:
+
+```powershell
+python scripts\expand_group_allocation_to_security_targets.py `
+  --group-allocation <group_allocation.parquet> `
+  --membership-panel <synthetic_group_membership.csv> `
+  --weighting-mode equal_weight `
+  --single-name-cap 0.05 `
+  --out <group_lookthrough_targets.parquet> `
+  --no-manifest
+```
+
+Attribute group allocation weights against subsequent group basket returns:
+
+```powershell
+python scripts\analyze_group_allocation_attribution.py `
+  --group-allocation <group_allocation.parquet> `
+  --basket-returns <group_basket_returns.parquet> `
+  --out <group_allocation_attribution.parquet> `
+  --no-manifest
+```
+
+These scripts remain sidecar research tools. They do not modify the main
+walk-forward portfolio construction path.
+
 ### Execution Diagnostics
 
 Small-account execution diagnostics are optional:

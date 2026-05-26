@@ -500,6 +500,45 @@ volatility, max drawdown, and beta to a supplied benchmark. Optional
 single-name factor aggregations support `mean`, `median`, `weighted_mean`,
 `coverage_rate`, and percentile methods such as `p25` or `p75`.
 
+### Group Allocation Panels
+
+`build_group_allocation_panel.py` writes benchmark-relative sidecar allocation
+research rows:
+
+```text
+rebalance_date,group_type,group_id,group_name,benchmark_weight,active_weight,target_weight,current_weight,trade_weight,score,constraint_status,constraint_reasons
+```
+
+Allocation modes are `score_tilt`, `top_n_equal`, and `inverse_volatility`.
+Supported generic controls include maximum group weight, maximum active weight,
+total active-weight budget, turnover cap, cash weight, and group-type caps.
+This panel is a group research artifact. It does not alter stock ranks or
+walk-forward orders.
+
+### Group Look-Through Target Panels
+
+`expand_group_allocation_to_security_targets.py` writes security-level
+look-through diagnostics from group allocations and membership:
+
+```text
+rebalance_date,code,target_weight,source_group_count,source_groups,lookthrough_constraint_status,lookthrough_constraint_reasons
+```
+
+Overlapping memberships are summed by security. Optional `single_name_cap`
+clips the look-through target and reports the constraint; the clipped excess is
+not redistributed.
+
+### Group Allocation Attribution
+
+`analyze_group_allocation_attribution.py` writes:
+
+```text
+date,allocation_date,group_type,group_id,group_name,target_weight,benchmark_weight,active_weight,group_return,portfolio_contribution,benchmark_contribution,active_contribution,missing_flags
+```
+
+Attribution uses the latest allocation date strictly before the basket-return
+date to avoid same-period look-ahead.
+
 ## Walk-Forward Affordable Lot Filter
 
 `run_qvm_walkforward.py` can apply a generic affordable-lot filter during
