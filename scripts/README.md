@@ -445,6 +445,45 @@ with `external_factor_panels` using the relevant sector key. `crowding_raw` is a
 simple unweighted mean of available issuer ratios, so strategy configs should
 prefer explicit component weights when a specific interpretation matters.
 
+### Group Beta Research Panels
+
+Validate generic sector, industry, region, or synthetic theme memberships:
+
+```powershell
+python scripts\validate_group_membership_panel.py `
+  --panel <synthetic_group_membership.csv>
+```
+
+Build group basket returns:
+
+```powershell
+python scripts\build_group_basket_return_panel.py `
+  --prices <synthetic_prices.csv> `
+  --membership-panel <synthetic_group_membership.csv> `
+  --date 2026-01-31 `
+  --date 2026-02-28 `
+  --weighting-mode equal_weight `
+  --out <group_basket_returns.parquet> `
+  --no-manifest
+```
+
+Build group-level signals from basket returns, optional single-name factors,
+optional external group signals, and an optional benchmark:
+
+```powershell
+python scripts\build_group_signal_panel.py `
+  --basket-returns <group_basket_returns.parquet> `
+  --membership-panel <synthetic_group_membership.csv> `
+  --factor-panel <synthetic_factor_panel.csv> `
+  --factor-aggregation book_to_market:weighted_mean `
+  --rebalance-date 2026-02-28 `
+  --out <group_signals.parquet> `
+  --no-manifest
+```
+
+This is a research data layer. It does not allocate portfolio weights or expand
+groups back to executable security targets.
+
 ### Execution Diagnostics
 
 Small-account execution diagnostics are optional:

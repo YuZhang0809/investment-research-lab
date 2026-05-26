@@ -448,6 +448,56 @@ These fields are generic portfolio-construction diagnostics. Public examples
 must remain synthetic and must not encode private sector-cap parameter
 conclusions.
 
+## Group Beta Research Panels
+
+Group beta research uses three public-safe panels. These are generic data and
+signal contracts for sectors, industries, regions, size buckets, or synthetic
+theme-like groups. They do not encode private allocation decisions.
+
+### Group Membership
+
+Exact snapshot membership:
+
+```text
+rebalance_date,code,group_type,group_id,group_name,membership_weight,purity_score,source,notes
+```
+
+As-of membership:
+
+```text
+code,available_date,group_type,group_id,group_name,membership_weight,purity_score,source,notes
+```
+
+`group_type + group_id` identifies the group. `membership_weight` defaults to
+`1.0` when blank and must be positive when present. `purity_score` is optional
+and must be in `[0, 1]` when present. Duplicate exact keys fail by default.
+
+### Group Basket Returns
+
+`build_group_basket_return_panel.py` writes:
+
+```text
+date,group_type,group_id,group_name,constituent_count,weighting_mode,basket_return,basket_value,turnover,coverage,missing_return_count,top_constituent_weight,weight_concentration
+```
+
+Supported weighting modes are `equal_weight`, `liquidity_weight`,
+`market_cap_weight`, and `custom_weight`. Basket period returns use prices on or
+before the relevant observation dates and prior-date weights for period return
+calculation.
+
+### Group Signal Panels
+
+`build_group_signal_panel.py` writes:
+
+```text
+rebalance_date,group_type,group_id,group_name,coverage,constituent_count,<signal_fields>,<aggregated_factor_fields>,<external_fields>,missing_flags
+```
+
+Built-in signals include trailing group returns, realized volatility, downside
+volatility, max drawdown, and beta to a supplied benchmark. Optional
+single-name factor aggregations support `mean`, `median`, `weighted_mean`,
+`coverage_rate`, and percentile methods such as `p25` or `p75`.
+
 ## Walk-Forward Affordable Lot Filter
 
 `run_qvm_walkforward.py` can apply a generic affordable-lot filter during
