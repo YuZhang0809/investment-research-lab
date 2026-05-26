@@ -69,7 +69,8 @@ python scripts\build_group_basket_return_panel.py `
 Supported weighting modes:
 
 - `equal_weight`
-- `liquidity_weight`, using `trading_value` or `volume`
+- `liquidity_weight`, using monetary `trading_value`
+- `volume_weight`, using share `volume`
 - `market_cap_weight`, using an explicit market-cap price field
 - `custom_weight`, using a membership-panel field passed by
   `--custom-weight-field`

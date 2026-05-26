@@ -480,10 +480,12 @@ and must be in `[0, 1]` when present. Duplicate exact keys fail by default.
 date,group_type,group_id,group_name,constituent_count,weighting_mode,basket_return,basket_value,turnover,coverage,missing_return_count,top_constituent_weight,weight_concentration
 ```
 
-Supported weighting modes are `equal_weight`, `liquidity_weight`,
-`market_cap_weight`, and `custom_weight`. Basket period returns use prices on or
-before the relevant observation dates and prior-date weights for period return
-calculation.
+Supported weighting modes are `equal_weight`, `liquidity_weight` using monetary
+`trading_value`, `volume_weight` using share `volume`, `market_cap_weight`, and
+`custom_weight`. Basket period returns use prices on or before the relevant
+observation dates and prior-date weights for period return calculation. If a
+constituent has no newer current-period price than the prior observation date,
+that constituent is counted as missing rather than as a covered 0% return.
 
 ### Group Signal Panels
 

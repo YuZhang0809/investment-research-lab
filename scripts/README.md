@@ -467,6 +467,9 @@ python scripts\build_group_basket_return_panel.py `
   --no-manifest
 ```
 
+Use `liquidity_weight` for monetary `trading_value`, or `volume_weight` for
+share volume. The builder does not mix these units in one basket.
+
 Build group-level signals from basket returns, optional single-name factors,
 optional external group signals, and an optional benchmark:
 

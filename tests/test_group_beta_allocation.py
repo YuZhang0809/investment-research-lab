@@ -13,13 +13,15 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from build_group_basket_return_panel import build_panel as build_basket_panel  # noqa: E402
 from build_group_signal_panel import (  # noqa: E402
+    aggregate_values,
+    benchmark_returns,
     build_panel as build_signal_panel,
     external_rows_by_group,
     latest_factor_rows,
     load_basket_rows,
     parse_aggregation,
 )
-from group_beta_common import load_group_membership_panel, memberships_for_date  # noqa: E402
+from group_beta_common import fmt, load_group_membership_panel, memberships_for_date  # noqa: E402
 from validate_group_membership_panel import validate_panel  # noqa: E402
 
 
@@ -159,15 +161,15 @@ class GroupBetaAllocationTest(unittest.TestCase):
                 ],
             )
             prices = [
-                {"date": "2026-01-01", "code": "1001", "adjusted_close": "10", "trading_value": "100", "market_cap": "100"},
-                {"date": "2026-01-01", "code": "1002", "adjusted_close": "20", "trading_value": "300", "market_cap": "300"},
-                {"date": "2026-01-01", "code": "1003", "adjusted_close": "30", "trading_value": "100", "market_cap": "100"},
-                {"date": "2026-01-02", "code": "1001", "adjusted_close": "11", "trading_value": "100", "market_cap": "100"},
-                {"date": "2026-01-02", "code": "1002", "adjusted_close": "22", "trading_value": "300", "market_cap": "300"},
-                {"date": "2026-01-02", "code": "1003", "adjusted_close": "33", "trading_value": "100", "market_cap": "100"},
-                {"date": "2026-01-03", "code": "1001", "adjusted_close": "12.1", "trading_value": "100", "market_cap": "100"},
-                {"date": "2026-01-03", "code": "1002", "adjusted_close": "22", "trading_value": "300", "market_cap": "300"},
-                {"date": "2026-01-03", "code": "1003", "adjusted_close": "36.3", "trading_value": "100", "market_cap": "100"},
+                {"date": "2026-01-01", "code": "1001", "adjusted_close": "10", "trading_value": "100", "volume": "100", "market_cap": "100"},
+                {"date": "2026-01-01", "code": "1002", "adjusted_close": "20", "trading_value": "300", "volume": "300", "market_cap": "300"},
+                {"date": "2026-01-01", "code": "1003", "adjusted_close": "30", "trading_value": "100", "volume": "100", "market_cap": "100"},
+                {"date": "2026-01-02", "code": "1001", "adjusted_close": "11", "trading_value": "100", "volume": "100", "market_cap": "100"},
+                {"date": "2026-01-02", "code": "1002", "adjusted_close": "22", "trading_value": "300", "volume": "300", "market_cap": "300"},
+                {"date": "2026-01-02", "code": "1003", "adjusted_close": "33", "trading_value": "100", "volume": "100", "market_cap": "100"},
+                {"date": "2026-01-03", "code": "1001", "adjusted_close": "12.1", "trading_value": "100", "volume": "100", "market_cap": "100"},
+                {"date": "2026-01-03", "code": "1002", "adjusted_close": "22", "trading_value": "300", "volume": "300", "market_cap": "300"},
+                {"date": "2026-01-03", "code": "1003", "adjusted_close": "36.3", "trading_value": "100", "volume": "100", "market_cap": "100"},
             ]
 
             equal_rows = build_basket_panel(
@@ -199,6 +201,13 @@ class GroupBetaAllocationTest(unittest.TestCase):
                 weighting_mode="custom_weight",
                 custom_weight_field="custom_weight",
             )
+            volume_rows = build_basket_panel(
+                prices,
+                membership,
+                dates=[date(2026, 1, 1)],
+                input_format="csv",
+                weighting_mode="volume_weight",
+            )
             equal_by_date = {row["date"].isoformat(): row for row in equal_rows if row["group_id"] == "tech"}
             liq_by_date = {row["date"].isoformat(): row for row in liquidity_rows if row["group_id"] == "tech"}
 
@@ -207,8 +216,71 @@ class GroupBetaAllocationTest(unittest.TestCase):
             self.assertAlmostEqual(0.75, float(liq_by_date["2026-01-01"]["top_constituent_weight"]))
             self.assertAlmostEqual(0.75, float(market_cap_rows[0]["top_constituent_weight"]))
             self.assertAlmostEqual(0.75, float(custom_rows[0]["top_constituent_weight"]))
+            self.assertAlmostEqual(0.75, float(volume_rows[0]["top_constituent_weight"]))
             self.assertEqual(2, equal_by_date["2026-01-03"]["constituent_count"])
             self.assertGreater(float(equal_by_date["2026-01-03"]["turnover"]), 0)
+
+    def test_group_basket_treats_stale_current_price_as_missing_return(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            membership = temp / "membership.csv"
+            write_rows(
+                membership,
+                [
+                    {"rebalance_date": "2026-01-01", "code": "1001", "group_type": "sector", "group_id": "tech", "membership_weight": "1"},
+                ],
+            )
+            prices = [
+                {"date": "2026-01-01", "code": "1001", "adjusted_close": "10", "trading_value": "100"},
+            ]
+
+            rows = build_basket_panel(
+                prices,
+                membership,
+                dates=[date(2026, 1, 1), date(2026, 1, 2)],
+                input_format="csv",
+                weighting_mode="equal_weight",
+            )
+            second = rows[1]
+
+            self.assertIsNone(second["basket_return"])
+            self.assertEqual(0.0, second["coverage"])
+            self.assertEqual(1, second["missing_return_count"])
+
+    def test_liquidity_weight_does_not_mix_trading_value_with_volume(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            membership = temp / "membership.csv"
+            write_rows(
+                membership,
+                [
+                    {"rebalance_date": "2026-01-01", "code": "1001", "group_type": "sector", "group_id": "tech", "membership_weight": "1"},
+                    {"rebalance_date": "2026-01-01", "code": "1002", "group_type": "sector", "group_id": "tech", "membership_weight": "1"},
+                ],
+            )
+            prices = [
+                {"date": "2026-01-01", "code": "1001", "adjusted_close": "10", "trading_value": "100", "volume": "1"},
+                {"date": "2026-01-01", "code": "1002", "adjusted_close": "20", "trading_value": "", "volume": "300"},
+            ]
+
+            liquidity = build_basket_panel(
+                prices,
+                membership,
+                dates=[date(2026, 1, 1)],
+                input_format="csv",
+                weighting_mode="liquidity_weight",
+            )
+            volume = build_basket_panel(
+                prices,
+                membership,
+                dates=[date(2026, 1, 1)],
+                input_format="csv",
+                weighting_mode="volume_weight",
+            )
+
+            self.assertEqual(1, liquidity[0]["constituent_count"])
+            self.assertAlmostEqual(1.0, liquidity[0]["top_constituent_weight"])
+            self.assertAlmostEqual(300 / 301, volume[0]["top_constituent_weight"])
 
     def test_group_signal_panel_builds_returns_beta_factor_aggregates_and_external_asof(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -271,6 +343,25 @@ class GroupBetaAllocationTest(unittest.TestCase):
             self.assertAlmostEqual(17.5, float(row["book_to_market_weighted_mean"]))
             self.assertEqual("stress", row["risk_state"])
             self.assertNotEqual("", row["group_beta_to_benchmark"])
+
+    def test_group_signal_preserves_zero_benchmark_return_from_parquet(self) -> None:
+        pd = __import__("pandas")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "benchmark.parquet"
+            pd.DataFrame({"date": ["2026-01-02", "2026-01-03"], "return": [0.0, 0.05]}).to_parquet(path, index=False)
+
+            returns = benchmark_returns(path, "auto")
+
+            self.assertIn(date(2026, 1, 2), returns)
+            self.assertEqual(0.0, returns[date(2026, 1, 2)])
+            self.assertEqual(0.05, returns[date(2026, 1, 3)])
+
+    def test_group_signal_validates_percentile_bounds_and_formats_nan_blank(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Percentile aggregation"):
+            parse_aggregation("book_to_market:p101")
+
+        self.assertAlmostEqual(15.0, float(aggregate_values([(10.0, 1), (20.0, 1)], "p50") or 0))
+        self.assertEqual("", fmt(float("nan")))
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ from group_beta_common import (
 from research_common import append_manifest, date_range_from_rows, parse_float, read_table, write_table
 
 
-WEIGHTING_MODES = {"equal_weight", "liquidity_weight", "market_cap_weight", "custom_weight"}
+WEIGHTING_MODES = {"equal_weight", "liquidity_weight", "volume_weight", "market_cap_weight", "custom_weight"}
 FIELDNAMES = [
     "date",
     "group_type",
@@ -73,10 +73,9 @@ def raw_weight(
     if mode == "equal_weight":
         return base
     if mode == "liquidity_weight":
-        if point is None:
-            return 0.0
-        value = point.trading_value if point.trading_value is not None else point.volume
-        return base * value if value is not None and value > 0 else 0.0
+        return base * point.trading_value if point is not None and point.trading_value is not None and point.trading_value > 0 else 0.0
+    if mode == "volume_weight":
+        return base * point.volume if point is not None and point.volume is not None and point.volume > 0 else 0.0
     if mode == "market_cap_weight":
         return base * point.market_cap if point is not None and point.market_cap is not None and point.market_cap > 0 else 0.0
     if mode == "custom_weight":
@@ -100,7 +99,8 @@ def group_weights(
     for membership in memberships:
         key = (membership.group_type, membership.group_id)
         point = latest_price_point(price_index.get(membership.code, []), weight_date)
-        raw_by_group.setdefault(key, {})[membership.code] = raw_by_group.setdefault(key, {}).get(membership.code, 0.0) + raw_weight(
+        group_raw = raw_by_group.setdefault(key, {})
+        group_raw[membership.code] = group_raw.get(membership.code, 0.0) + raw_weight(
             membership,
             point,
             mode=mode,
@@ -128,6 +128,7 @@ def basket_return_for_group(
             or previous.adjusted_close is None
             or current.adjusted_close is None
             or previous.adjusted_close <= 0
+            or current.date <= previous.date
         ):
             missing += 1
             continue
@@ -170,6 +171,8 @@ def build_panel(
 ) -> list[dict[str, Any]]:
     if weighting_mode not in WEIGHTING_MODES:
         raise ValueError(f"Unsupported weighting mode: {weighting_mode}")
+    if not dates:
+        raise ValueError("--date or --dates is required for group basket returns.")
     membership_panel = load_group_membership_panel(
         membership_panel_path,
         input_format=input_format,
@@ -177,8 +180,6 @@ def build_panel(
         duplicate_policy=membership_duplicate_policy,
     )
     price_index = build_price_index(price_rows)
-    if not dates:
-        dates = sorted({point.date for points in price_index.values() for point in points})
     output: list[dict[str, Any]] = []
     previous_current_weights: dict[tuple[str, str], dict[str, float]] | None = None
     previous_date: date | None = None
@@ -191,22 +192,13 @@ def build_panel(
             mode=weighting_mode,
             custom_weight_field=custom_weight_field,
         )
-        return_weights: dict[tuple[str, str], dict[str, float]] = {}
-        if previous_date is not None:
-            return_memberships = memberships_for_date(membership_panel, previous_date)
-            return_weights, _return_names = group_weights(
-                return_memberships,
-                price_index,
-                previous_date,
-                mode=weighting_mode,
-                custom_weight_field=custom_weight_field,
-            )
+        return_weights: dict[tuple[str, str], dict[str, float]] = previous_current_weights or {}
         group_keys = sorted(set(current_weights) | set(return_weights))
         for key in group_keys:
             weights = current_weights.get(key, {})
             return_value: float | None = None
             coverage = 0.0
-            missing_count = len(return_weights.get(key, weights))
+            missing_count = 0 if previous_date is None else len(return_weights.get(key, weights))
             if previous_date is not None:
                 return_value, coverage, missing_count = basket_return_for_group(
                     return_weights.get(key, {}),

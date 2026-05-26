@@ -62,7 +62,11 @@ def parse_aggregation(value: str) -> AggregationSpec:
     if len(parts) not in {2, 3} or not parts[0] or not parts[1]:
         raise ValueError("--factor-aggregation must use FIELD:METHOD[:OUTPUT].")
     field, method = parts[0], parts[1]
-    if method not in AGGREGATION_METHODS and not (method.startswith("p") and method[1:].isdigit()):
+    if method.startswith("p") and method[1:].isdigit():
+        percentile_value = int(method[1:])
+        if percentile_value < 0 or percentile_value > 100:
+            raise ValueError(f"Percentile aggregation must be in [0, 100]: {method}")
+    elif method not in AGGREGATION_METHODS:
         raise ValueError(f"Unsupported group factor aggregation method: {method}")
     output = parts[2] if len(parts) == 3 and parts[2] else f"{field}_{method}"
     return AggregationSpec(field=field, method=method, output=output)
@@ -101,7 +105,12 @@ def benchmark_returns(path: Path | None, input_format: str) -> dict[date, float]
         row_date = parse_optional_date(row.get("date") or row.get("Date"), "benchmark.date")
         if row_date is None:
             continue
-        return_value = parse_float(row.get("return") or row.get("benchmark_return"))
+        return_value = None
+        for field in ("return", "benchmark_return"):
+            value = row.get(field)
+            if field in row and value is not None and str(value).strip() != "":
+                return_value = parse_float(value)
+                break
         if return_value is not None:
             direct[row_date] = return_value
             continue
@@ -283,17 +292,17 @@ def external_rows_by_group(
 
 
 def external_row_for_group(rows: dict[tuple[str, str], list[dict[str, Any]]], key: tuple[str, str], target_date: date, asof: bool):
-    selected = None
-    for row in rows.get(key, []):
-        if row["_date"] <= target_date:
-            selected = row
-        elif not asof:
-            break
     if not asof:
         for row in rows.get(key, []):
             if row["_date"] == target_date:
                 return row
         return None
+    selected = None
+    for row in rows.get(key, []):
+        if row["_date"] <= target_date:
+            selected = row
+        else:
+            break
     return selected
 
 
@@ -374,7 +383,7 @@ def build_panel(
                     missing_flags.append(f"group_return_{window}p")
             for window in risk_windows:
                 returns = clean_returns(trailing_rows(rows, rebalance_date, window))
-                if len(returns) >= 2:
+                if len(returns) >= max(window, 2):
                     row[f"group_vol_{window}p"] = stdev(returns) * math.sqrt(annualization)
                     row[f"group_downside_vol_{window}p"] = downside_vol(returns, annualization)
                     row[f"group_max_drawdown_{window}p"] = max_drawdown(returns)

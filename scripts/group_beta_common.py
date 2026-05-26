@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -58,6 +59,8 @@ def fmt(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, float):
+        if not math.isfinite(value):
+            return ""
         return f"{value:.10g}"
     if isinstance(value, date):
         return value.isoformat()
