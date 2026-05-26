@@ -75,10 +75,10 @@ def load_allocation_rows(path: Path, input_format: str) -> dict[date, dict[tuple
 
 
 def load_prices(path: Path | None, input_format: str, weighting_mode: str) -> dict[str, list[Any]]:
-    if weighting_mode == "equal_weight" and path is None:
+    if weighting_mode in {"equal_weight", "custom_weight"} and path is None:
         return {}
     if path is None:
-        raise ValueError("--prices is required for non-equal group look-through weighting modes.")
+        raise ValueError("--prices is required for price-driven group look-through weighting modes.")
     return build_price_index(read_table(path, format=input_format).to_dict(orient="records"))
 
 

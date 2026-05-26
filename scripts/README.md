@@ -514,6 +514,10 @@ python scripts\expand_group_allocation_to_security_targets.py `
   --no-manifest
 ```
 
+`custom_weight` look-through uses `--custom-weight-field` from the membership
+panel and does not need `--prices`; price-driven modes such as
+`liquidity_weight`, `volume_weight`, and `market_cap_weight` do.
+
 Attribute group allocation weights against subsequent group basket returns:
 
 ```powershell

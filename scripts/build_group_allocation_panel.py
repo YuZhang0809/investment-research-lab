@@ -27,6 +27,7 @@ FIELDNAMES = [
 
 MODES = {"score_tilt", "top_n_equal", "inverse_volatility"}
 MISSING_SCORE_POLICIES = {"exclude", "zero"}
+EPSILON = 1e-10
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -188,8 +189,11 @@ def apply_total_active_cap(
     scale = cap / active_sum
     output: dict[tuple[str, str], float] = {}
     for key in keys:
-        output[key] = max(benchmark.get(key, 0.0) + (target.get(key, 0.0) - benchmark.get(key, 0.0)) * scale, 0.0)
-        reasons[key].append("max_total_active_weight")
+        old_value = target.get(key, 0.0)
+        new_value = max(benchmark.get(key, 0.0) + (old_value - benchmark.get(key, 0.0)) * scale, 0.0)
+        output[key] = new_value
+        if abs(new_value - old_value) > EPSILON:
+            reasons[key].append("max_total_active_weight")
     return output
 
 
@@ -211,8 +215,10 @@ def apply_group_type_caps(
         scale = cap / total
         for key, value in list(output.items()):
             if key[0] == group_type:
-                output[key] = value * scale
-                reasons[key].append("group_type_cap")
+                new_value = value * scale
+                output[key] = new_value
+                if abs(new_value - value) > EPSILON:
+                    reasons[key].append("group_type_cap")
     return output
 
 
@@ -231,9 +237,60 @@ def apply_turnover_cap(
     scale = cap / turnover
     output: dict[tuple[str, str], float] = {}
     for key in keys:
-        output[key] = max(current.get(key, 0.0) + (target.get(key, 0.0) - current.get(key, 0.0)) * scale, 0.0)
-        reasons[key].append("max_turnover")
+        old_value = target.get(key, 0.0)
+        new_value = max(current.get(key, 0.0) + (old_value - current.get(key, 0.0)) * scale, 0.0)
+        output[key] = new_value
+        if abs(new_value - old_value) > EPSILON:
+            reasons[key].append("max_turnover")
     return output
+
+
+def validate_final_constraints(
+    target: dict[tuple[str, str], float],
+    benchmark: dict[tuple[str, str], float],
+    current: dict[tuple[str, str], float],
+    reasons: dict[tuple[str, str], list[str]],
+    *,
+    min_group_weight: float,
+    max_group_weight: float | None,
+    max_active_weight: float | None,
+    max_total_active_weight: float | None,
+    max_turnover: float | None,
+    group_type_caps: dict[str, float],
+) -> None:
+    keys = set(target) | set(benchmark) | set(current)
+    for key in keys:
+        value = target.get(key, 0.0)
+        if value > 0 and min_group_weight > 0 and value < min_group_weight - EPSILON:
+            reasons[key].append("final_min_group_weight_violation")
+        if max_group_weight is not None and value > max_group_weight + EPSILON:
+            reasons[key].append("final_max_group_weight_violation")
+        if max_active_weight is not None and abs(value - benchmark.get(key, 0.0)) > max_active_weight + EPSILON:
+            reasons[key].append("final_max_active_weight_violation")
+
+    if max_total_active_weight is not None:
+        total_active = sum(abs(target.get(key, 0.0) - benchmark.get(key, 0.0)) for key in keys)
+        if total_active > max_total_active_weight + EPSILON:
+            for key in keys:
+                if abs(target.get(key, 0.0) - benchmark.get(key, 0.0)) > EPSILON:
+                    reasons[key].append("final_max_total_active_weight_violation")
+
+    if max_turnover is not None:
+        turnover = 0.5 * sum(abs(target.get(key, 0.0) - current.get(key, 0.0)) for key in keys)
+        if turnover > max_turnover + EPSILON:
+            for key in keys:
+                if abs(target.get(key, 0.0) - current.get(key, 0.0)) > EPSILON:
+                    reasons[key].append("final_max_turnover_violation")
+
+    if group_type_caps:
+        totals: dict[str, float] = defaultdict(float)
+        for key, value in target.items():
+            totals[key[0]] += max(value, 0.0)
+        for group_type, cap in group_type_caps.items():
+            if totals.get(group_type, 0.0) > cap + EPSILON:
+                for key, value in target.items():
+                    if key[0] == group_type and value > EPSILON:
+                        reasons[key].append("final_group_type_cap_violation")
 
 
 def score_tilt_targets(
@@ -437,9 +494,22 @@ def build_panel(
         target = apply_total_active_cap(target, benchmark, reasons, max_total_active_weight)
         target = apply_group_type_caps(target, reasons, group_type_caps)
         target = apply_turnover_cap(target, current, reasons, max_turnover)
+        validate_final_constraints(
+            target,
+            benchmark,
+            current,
+            reasons,
+            min_group_weight=min_group_weight,
+            max_group_weight=max_group_weight,
+            max_active_weight=max_active_weight,
+            max_total_active_weight=max_total_active_weight,
+            max_turnover=max_turnover,
+            group_type_caps=group_type_caps,
+        )
         names = {key: normalize_text(row.get("group_name")) for key, row in signal_rows.items()}
         for key in sorted(set(keys) | set(target) | set(current) | set(benchmark)):
             reason_values = [value for value in dict.fromkeys(reasons.get(key, [])) if value]
+            has_final_violation = any(value.startswith("final_") and value.endswith("_violation") for value in reason_values)
             row = {
                 "rebalance_date": rebalance_date,
                 "group_type": key[0],
@@ -451,10 +521,14 @@ def build_panel(
                 "current_weight": current.get(key, 0.0),
                 "trade_weight": target.get(key, 0.0) - current.get(key, 0.0),
                 "score": scores.get(key),
-                "constraint_status": "clipped" if reason_values else "ok",
+                "constraint_status": "violation" if has_final_violation else ("clipped" if reason_values else "ok"),
                 "constraint_reasons": ";".join(reason_values),
             }
-            if row["target_weight"] == 0 and any(value.startswith("excluded") or value == "top_n_excluded" for value in reason_values):
+            if (
+                not has_final_violation
+                and row["target_weight"] == 0
+                and any(value.startswith("excluded") or value == "top_n_excluded" for value in reason_values)
+            ):
                 row["constraint_status"] = "excluded"
             output.append(row)
         previous_target = {key: target.get(key, 0.0) for key in set(keys) | set(target)}

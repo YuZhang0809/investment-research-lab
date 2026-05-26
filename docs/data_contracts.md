@@ -513,7 +513,9 @@ Allocation modes are `score_tilt`, `top_n_equal`, and `inverse_volatility`.
 Supported generic controls include maximum group weight, maximum active weight,
 total active-weight budget, turnover cap, cash weight, and group-type caps.
 This panel is a group research artifact. It does not alter stock ranks or
-walk-forward orders.
+walk-forward orders. Mutually infeasible controls are surfaced with
+`constraint_status=violation` and `final_*_violation` reasons instead of being
+silently repaired.
 
 ### Group Look-Through Target Panels
 
@@ -526,7 +528,8 @@ rebalance_date,code,target_weight,source_group_count,source_groups,lookthrough_c
 
 Overlapping memberships are summed by security. Optional `single_name_cap`
 clips the look-through target and reports the constraint; the clipped excess is
-not redistributed.
+not redistributed. `custom_weight` look-through reads membership fields and
+does not require price rows.
 
 ### Group Allocation Attribution
 

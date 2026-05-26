@@ -23,7 +23,7 @@ from build_group_signal_panel import (  # noqa: E402
     parse_aggregation,
 )
 from analyze_group_allocation_attribution import build_panel as build_group_attribution_panel  # noqa: E402
-from expand_group_allocation_to_security_targets import build_panel as build_lookthrough_panel  # noqa: E402
+from expand_group_allocation_to_security_targets import build_panel as build_lookthrough_panel, load_prices as load_lookthrough_prices  # noqa: E402
 from group_beta_common import fmt, load_group_membership_panel, memberships_for_date  # noqa: E402
 from validate_group_membership_panel import validate_panel  # noqa: E402
 
@@ -420,6 +420,66 @@ class GroupBetaAllocationTest(unittest.TestCase):
         self.assertIn("group_type_cap", by_group[("theme", "theme_a")]["constraint_reasons"])
         self.assertIn("max_turnover", by_group[("theme", "theme_a")]["constraint_reasons"])
 
+    def test_group_allocation_reports_infeasible_final_cap_violations(self) -> None:
+        rebalance = date(2026, 2, 28)
+        turnover_rows = build_allocation_panel(
+            {
+                rebalance: {
+                    ("theme", "theme_a"): {"group_name": "Theme A", "score": "1"},
+                    ("theme", "theme_b"): {"group_name": "Theme B", "score": "0"},
+                }
+            },
+            mode="top_n_equal",
+            top_n=1,
+            current_weights_by_date={rebalance: {("theme", "theme_a"): 1.0, ("theme", "theme_b"): 0.0}},
+            max_group_weight=0.20,
+            max_turnover=0.10,
+        )
+        turnover_by_group = {row["group_id"]: row for row in turnover_rows}
+
+        self.assertGreater(float(turnover_by_group["theme_a"]["target_weight"]), 0.20)
+        self.assertEqual("violation", turnover_by_group["theme_a"]["constraint_status"])
+        self.assertIn("final_max_group_weight_violation", turnover_by_group["theme_a"]["constraint_reasons"])
+
+        active_rows = build_allocation_panel(
+            {
+                rebalance: {
+                    ("theme", "theme_a"): {"group_name": "Theme A", "score": "1"},
+                    ("theme", "theme_b"): {"group_name": "Theme B", "score": ""},
+                }
+            },
+            benchmark_weights_by_date={rebalance: {("theme", "theme_a"): 0.90, ("theme", "theme_b"): 0.10}},
+            mode="score_tilt",
+            max_active_weight=0.05,
+            max_group_weight=0.50,
+        )
+        active_row = {row["group_id"]: row for row in active_rows}["theme_a"]
+
+        self.assertAlmostEqual(-0.40, float(active_row["active_weight"]))
+        self.assertEqual("violation", active_row["constraint_status"])
+        self.assertIn("final_max_active_weight_violation", active_row["constraint_reasons"])
+
+    def test_group_allocation_scale_caps_only_tag_changed_rows(self) -> None:
+        rebalance = date(2026, 2, 28)
+        rows = build_allocation_panel(
+            {
+                rebalance: {
+                    ("theme", "theme_a"): {"group_name": "Theme A", "score": "2"},
+                    ("theme", "theme_b"): {"group_name": "Theme B", "score": "1"},
+                    ("sector", "sector_a"): {"group_name": "Sector A", "score": "0"},
+                }
+            },
+            benchmark_weights_by_date={rebalance: {("theme", "theme_a"): 0.20, ("theme", "theme_b"): 0.20, ("sector", "sector_a"): 0.60}},
+            active_budget=0.60,
+            max_total_active_weight=0.20,
+            group_type_caps={"theme": 0.60},
+        )
+        by_group = {(row["group_type"], row["group_id"]): row for row in rows}
+
+        self.assertIn("max_total_active_weight", by_group[("theme", "theme_a")]["constraint_reasons"])
+        self.assertNotIn("max_total_active_weight", by_group[("theme", "theme_b")]["constraint_reasons"])
+        self.assertNotIn("group_type_cap", by_group[("sector", "sector_a")]["constraint_reasons"])
+
     def test_group_lookthrough_aggregates_overlapping_memberships_and_caps_names(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
@@ -453,6 +513,32 @@ class GroupBetaAllocationTest(unittest.TestCase):
             self.assertEqual(2, by_code["1001"]["source_group_count"])
             self.assertIn("single_name_cap", by_code["1001"]["lookthrough_constraint_reasons"])
             self.assertAlmostEqual(0.30, float(by_code["1002"]["target_weight"]))
+
+    def test_group_lookthrough_custom_weight_does_not_require_prices(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            membership = temp / "membership.csv"
+            write_rows(
+                membership,
+                [
+                    {"rebalance_date": "2026-02-28", "code": "1001", "group_type": "theme", "group_id": "theme_a", "membership_weight": "1", "custom_weight": "3"},
+                    {"rebalance_date": "2026-02-28", "code": "1002", "group_type": "theme", "group_id": "theme_a", "membership_weight": "1", "custom_weight": "1"},
+                ],
+            )
+
+            rows = build_lookthrough_panel(
+                {date(2026, 2, 28): {("theme", "theme_a"): {"target_weight": "0.8"}}},
+                membership,
+                rebalance_dates=[date(2026, 2, 28)],
+                input_format="csv",
+                weighting_mode="custom_weight",
+                custom_weight_field="custom_weight",
+                price_index=load_lookthrough_prices(None, "csv", "custom_weight"),
+            )
+            by_code = {row["code"]: row for row in rows}
+
+            self.assertAlmostEqual(0.6, float(by_code["1001"]["target_weight"]))
+            self.assertAlmostEqual(0.2, float(by_code["1002"]["target_weight"]))
 
     def test_group_allocation_attribution_uses_prior_allocation(self) -> None:
         rows = build_group_attribution_panel(

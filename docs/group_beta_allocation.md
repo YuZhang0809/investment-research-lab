@@ -155,6 +155,8 @@ Supported allocation modes:
 - `score_tilt`: start from benchmark weights and add a centered score tilt.
 - `top_n_equal`: allocate equally to the top `--top-n` scored groups.
 - `inverse_volatility`: allocate by inverse volatility using `--vol-field`.
+  When `--top-n` is supplied, groups are selected by score first, then weighted
+  by inverse volatility.
 
 Supported controls:
 
@@ -176,6 +178,10 @@ benchmark for that rebalance date. If no current-weight file is supplied, it
 uses the previous target weights, with the first date starting from the
 benchmark. Constraint fields are audit fields; clipped weight is not silently
 redistributed unless the specific control defines a proportional scale.
+Some controls can be mutually infeasible, for example a tight turnover cap and
+a much lower maximum group weight. In that case the final row keeps the
+deterministic target produced by the ordered cap pipeline and reports
+`constraint_status=violation` with a `final_*_violation` reason.
 
 ## Look-Through Targets
 
@@ -203,6 +209,8 @@ If a security belongs to multiple groups, contributions are summed and
 clips the look-through target and reports `single_name_cap`; it does not
 redistribute the excess. This keeps the diagnostic separate from executable
 portfolio construction.
+`custom_weight` look-through uses the membership-panel field named by
+`--custom-weight-field` and does not require price rows.
 
 ## Group Attribution
 
